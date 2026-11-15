@@ -1,53 +1,9 @@
 import { prisma } from '../../providers/database';
 import { SHAREABLE_PROVIDERS } from './config';
+import { shareableAccounts } from './repoShareableAccounts';
 import { TeamError, type Prisma, type ShareableAccount, type TeamAccessFilter } from './types';
 import { mutateTeam, userSelect } from './repoCore';
-/** A legacy email integration can fan out: only exact healthy inboxes are selectable. */
-export async function shareableAccounts(
-  userId: string,
-  client: Prisma.TransactionClient = prisma
-): Promise<ShareableAccount[]> {
-  const integrations = await client.integration.findMany({
-    where: {
-      userId,
-      name: { in: [...SHAREABLE_PROVIDERS] },
-      type: 'DATA_SOURCE',
-      status: 'CONNECTED',
-      isActive: true,
-    },
-    include: { emailCredentials: { where: { state: 'connected' } } },
-  });
-  const result: ShareableAccount[] = [];
-  const imessageCount = integrations.some((row) => row.name === 'imessage')
-    ? await client.integration.count({ where: { userId, name: 'imessage' } })
-    : 0;
-  for (const integration of integrations) {
-    const base = {
-      integrationId: integration.id,
-      provider: integration.name,
-      name: integration.name,
-      status: integration.status,
-      ownerUserId: userId,
-    };
-    if (integration.name === 'imessage') {
-      if (integration.accountId === '' && imessageCount === 1)
-        result.push({ ...base, id: integration.id, accountId: '', accountEmail: null });
-      continue;
-    }
-    for (const credential of integration.emailCredentials) {
-      const email = credential.email?.trim().toLowerCase();
-      if (
-        email === undefined ||
-        email === '' ||
-        credential.userId !== userId ||
-        credential.provider.toLowerCase() !== integration.name
-      )
-        continue;
-      result.push({ ...base, id: credential.id, accountId: email, accountEmail: email });
-    }
-  }
-  return result;
-}
+export { shareableAccounts } from './repoShareableAccounts';
 export async function selectAccount(
   userId: string,
   selector: string,
@@ -101,17 +57,27 @@ export const deleteIntegrationShare = (
       where: { id: selector, userId },
       select: { id: true },
     });
-    if (!credential && !integration) throw new TeamError(404, 'Account not found');
+    // A Plaid share names one institution login; unsharing must work even after it disconnects.
+    const item =
+      credential || integration
+        ? null
+        : await tx.plaidItem.findFirst({
+            where: { id: selector, userId },
+            select: { id: true, integrationId: true },
+          });
+    if (!credential && !integration && !item) throw new TeamError(404, 'Account not found');
     await tx.teamIntegrationShare.deleteMany({
       where: {
         teamId,
         ownerUserId: userId,
-        integrationId: credential?.integrationId ?? selector,
+        integrationId: credential?.integrationId ?? item?.integrationId ?? selector,
         ...(credential?.email !== undefined && credential?.email !== null
           ? { accountId: credential.email.trim().toLowerCase() }
-          : accountId !== undefined
-            ? { accountId }
-            : {}),
+          : item
+            ? { accountId: item.id }
+            : accountId !== undefined
+              ? { accountId }
+              : {}),
       },
     });
   });
@@ -126,7 +92,6 @@ export const integrationShares = (userId: string, filters: TeamAccessFilter = {}
         status: 'CONNECTED',
         isActive: true,
         name: { in: [...SHAREABLE_PROVIDERS] },
-        type: 'DATA_SOURCE',
       },
     },
     include: {
@@ -161,12 +126,6 @@ export const projectShares = (userId: string) =>
         },
       },
     },
-  });
-export const imessageCounts = (ownerIds: string[]) =>
-  prisma.integration.groupBy({
-    by: ['userId'],
-    where: { userId: { in: ownerIds }, name: 'imessage' },
-    _count: true,
   });
 export const putProjectShare = (userId: string, teamId: string, projectId: string) =>
   mutateTeam(userId, teamId, async (tx) => {

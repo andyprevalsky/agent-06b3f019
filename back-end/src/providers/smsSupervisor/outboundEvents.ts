@@ -18,13 +18,10 @@ import { sendSms, sendMms, getUserPhone } from '../smsQueue';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
 import { isEmojiOnlyMessage } from './emoji';
 import { SMS_MAX_BODY_CHARACTERS } from '../smsDeliveryContract';
-import {
-  approvalNotificationContent,
-  deliverNotificationCard,
-  plannerNotificationContent,
-} from './notificationCards';
+import { approvalNotificationContent, plannerNotificationContent } from './notificationCards';
+import { composeLifecycleNotification } from './notificationLlm';
 import { markWhatsAppReachable, markWhatsAppUnreachable } from '../whatsappReachability';
-import { ROSE_LABS_URL, SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
+import { ROSE_LABS_URL, SMS_TEMPLATES, getAgentShareUrl, getAgentUrl } from '../smsTemplates';
 import { rehostMmsAttachmentUrl } from './mmsAttachment';
 import { appendLifecycleSms } from './sessionStore';
 import {
@@ -109,12 +106,6 @@ async function deliverAcrossChannels(
       correctionBudget,
       send: (candidate) => send(channel, candidate),
     });
-    // Keep the full receipt/instructions and the transcript's original text
-    // anchor. A card is a separate Linq message, never mixed with text/media.
-    // Failure of this optional companion cannot retry an accepted notification.
-    if (result.success && channel === 'SMS' && notification.card) {
-      await deliverNotificationCard(phone, notification.card, result, options);
-    }
     if (channel === 'WHATSAPP') {
       if (result.recipientUnreachable === true) await markWhatsAppUnreachable(userId);
       else if (result.success) await markWhatsAppReachable(userId);
@@ -186,13 +177,30 @@ async function sendLifecycleMms(
   return result;
 }
 
+/** The template stays the delivery of last resort: a model outage never drops the notice. */
+async function composeOrTemplate(
+  input: Parameters<typeof composeLifecycleNotification>[0],
+  template: string
+): Promise<string> {
+  try {
+    return (await composeLifecycleNotification(input)) ?? template;
+  } catch (error) {
+    log.warn('Lifecycle notification compose failed; sending template', {
+      agentId: input.agentId,
+      event: input.event,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return template;
+  }
+}
+
 function requireNotificationDelivery(result: SmsSendResult): void {
   if (!result.success) throw new NotificationDeliveryError(result);
 }
 
 const MAX_COMPLETION_OUTPUT_LINES = 6;
 
-function completionOutputLines(outputs: unknown): string[] {
+export function completionOutputLines(outputs: unknown): string[] {
   if (!Array.isArray(outputs)) return [];
 
   return outputs
@@ -237,7 +245,7 @@ export function buildCompletionSmsBody(
 ): string {
   if (finalAnswer !== undefined) return finalAnswer;
   const prefix = agentId.substring(0, 6);
-  const url = getAgentUrl(agentId);
+  const url = getAgentShareUrl(agentId);
   const oneLineSummary = summary.replace(/\s+/g, ' ').trim();
   return SMS_TEMPLATES.agentCompleted(prefix, oneLineSummary, url, completionOutputLines(outputs));
 }
@@ -265,17 +273,21 @@ export async function notifyAgentStarted(
   }
 
   const prefix = agent.id.substring(0, 6);
-  const url = getAgentUrl(agent.id);
-  const message = SMS_TEMPLATES.agentStarted(prefix, agent.goal, url, agent.notificationMessage);
+  const url = getAgentShareUrl(agent.id);
+  const template = SMS_TEMPLATES.agentStarted(prefix, agent.goal, url, agent.notificationMessage);
+  // A messaging-agent kickoff already wrote its own short text; anything else is
+  // composed into one natural sentence instead of echoing the task instructions.
+  const message = agent.notificationMessage?.trim()
+    ? template
+    : await composeOrTemplate(
+        { agentId: agent.id, event: 'agent_started', goal: agent.goal, link: url },
+        template
+      );
 
   const result = await sendLifecycleSms(
     userId,
     phone,
-    {
-      message,
-      requiredLinks: [url],
-      card: { url, title: 'Rose is working', subtitle: agent.goal },
-    },
+    { message, requiredLinks: [url] },
     {
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'agent_started', user_id: userId },
@@ -327,7 +339,7 @@ export async function notifyPlannerMessage(
   const result = await sendLifecycleSms(
     userId,
     phone,
-    plannerNotificationContent(message, messageText, isQuestion),
+    plannerNotificationContent(message, messageText),
     {
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'planner_message', user_id: userId, is_question: isQuestion },
@@ -384,7 +396,7 @@ export async function notifyWriteLock(
   const message = formatPaymentApprovalBody(paymentCard, notification, question, agentUrl);
   const mediaUrl = getWriteLockMediaUrl(notification) ?? getPaymentCardMediaUrl(paymentCard);
   const rehostedMediaUrl = mediaUrl ? await rehostMmsAttachmentUrl(userId, mediaUrl) : null;
-  const approvalContent = approvalNotificationContent(message, agentUrl, question, !!paymentCard);
+  const approvalContent = approvalNotificationContent(message, agentUrl);
 
   const result = rehostedMediaUrl
     ? await sendLifecycleMms(
@@ -471,7 +483,6 @@ export async function notifyAuthAssistance(
     {
       message,
       requiredLinks: [url],
-      card: { url, title: 'Sign in to continue', subtitle: authRealm, button: 'Sign in' },
     },
     {
       archiveRootAgentId: agent.id,
@@ -526,12 +537,6 @@ export async function notifyAgentCardSetup(
     {
       message,
       requiredLinks: [setupUrl || ROSE_LABS_URL],
-      card: {
-        url: setupUrl || ROSE_LABS_URL,
-        title: 'Finish AgentCard setup',
-        subtitle: 'Complete your existing card setup so Rose can continue.',
-        button: 'Set up card',
-      },
     },
     undefined,
     channels
@@ -579,13 +584,28 @@ export async function notifyCompletion(
   }
 
   const prefix = agent.id.substring(0, 6);
-  const message = buildCompletionSmsBody(agent.id, summary, outputs, finalAnswer);
+  const template = buildCompletionSmsBody(agent.id, summary, outputs, finalAnswer);
+  // An accepted final answer is immutable; other completions are composed into a
+  // short outcome text rather than a dump of every structured result field.
+  const message =
+    finalAnswer !== undefined
+      ? template
+      : await composeOrTemplate(
+          {
+            agentId: agent.id,
+            event: 'agent_completed',
+            summary,
+            results: completionOutputLines(outputs),
+            link: getAgentShareUrl(agent.id),
+          },
+          template
+        );
   const smsFallback =
     finalAnswer !== undefined &&
     (finalAnswer.length > SMS_MAX_BODY_CHARACTERS || isEmojiOnlyMessage(finalAnswer))
       ? {
-          message: `Your result is ready: ${getAgentUrl(agent.id)}`,
-          requiredLinks: [getAgentUrl(agent.id)],
+          message: `Your result is ready: ${getAgentShareUrl(agent.id)}`,
+          requiredLinks: [getAgentShareUrl(agent.id)],
           preserveText: true,
         }
       : undefined;
@@ -595,9 +615,8 @@ export async function notifyCompletion(
     phone,
     {
       message,
-      requiredLinks: finalAnswer === undefined ? [getAgentUrl(agent.id)] : [],
+      requiredLinks: finalAnswer === undefined ? [getAgentShareUrl(agent.id)] : [],
       preserveText: finalAnswer !== undefined,
-      card: { url: getAgentUrl(agent.id), title: 'Rose finished the task', subtitle: summary },
     },
     {
       archiveRootAgentId: agent.id,
@@ -656,7 +675,6 @@ export async function notifyCostLimit(
     {
       message,
       requiredLinks: [agentUrl],
-      card: { url: agentUrl, title: 'Rose reached the task budget', subtitle: taskLabel },
     },
     {
       archiveRootAgentId: agent.id,

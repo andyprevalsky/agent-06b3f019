@@ -111,7 +111,7 @@ from benchmarks.phone_callee import (
     resolve_callee_prompt,
 )
 from benchmarks.phone_critical_attention import PHONE_BENCH_TASK_NAMES
-from benchmarks.team_data import TASK_MARKERS as TEAM_DATA_TASKS, apply_team_fixture, verified_fixture_database
+from benchmarks.team_data import TASK_FIXTURES as TEAM_DATA_TASKS, apply_team_fixture, verified_fixture_database
 from benchmarks.phone_daily import (
     TASK_KINDS as PHONE_DAILY_TASKS,
 )

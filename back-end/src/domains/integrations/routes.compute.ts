@@ -93,7 +93,9 @@ function queryValue(req: AuthRequest, name: string): string | undefined {
   return trimmed === '' ? undefined : trimmed;
 }
 
-/** GET /api/integrations/compute-code/credentials/token */
+/** GET /api/integrations/compute-code/credentials/token
+ *  Lease order: own → team-shared (internal callers only; source "team" with
+ *  ownerUserId/teamId) → pool. */
 router.get(
   '/compute-code/credentials/token',
   authenticate,
@@ -125,6 +127,9 @@ router.get(
           rootAgentId: queryValue(req, 'rootAgentId'),
           fastCacheAffinityKey: queryValue(req, 'fastCacheAffinityKey'),
           tokenType: requestedTokenType,
+          // A teammate's shared subscription serves only the agents service's
+          // server-side Rose calls, never a user session (or what it hands on).
+          includeTeam: req.isInternal === true,
         }
       );
       return res.json(result);

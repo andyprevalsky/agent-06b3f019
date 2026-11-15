@@ -14,11 +14,14 @@
  *                     progress matched by address; idle = not syncing (synced),
  *                     phase `history` = light "checking for new mail" (no bar)
  *   plaidAccountViews one chip per institution (existing disconnect / update);
- *                     progress matched by item id
+ *                     progress matched by item id; its team-sharing caption is
+ *                     looked up by the item's own id (PlaidItem.id)
  *   rowSyncFor        the backend reports ONE account for a Gmail / Plaid row
  *                     that lists several: one bar for the whole row instead of
  *                     per-chip bars (a single address / item simply matches it)
  */
+
+import type { ReactNode } from 'react';
 
 import { parseIntegrationAccount, parseIntegrationAccounts } from '../hooks/integrationAccounts';
 import { gmailAccounts } from '../hooks/useIntegrationData';
@@ -219,6 +222,7 @@ export function plaidItemIds(item: PlaidItem): string[] {
 export function plaidAccountViews(
   integrations: ConnectedIntegration[],
   plaid: PlaidPort,
+  shareFor?: (itemId: string) => ReactNode,
 ): DesktopAccountView[] {
   const contract = parseIntegrationAccounts(integrations.find((i) => i.name === 'plaid')) ?? [];
   const items = visibleInstitutionItems(plaid.items);
@@ -241,6 +245,7 @@ export function plaidAccountViews(
       onResync: needsUpdate ? () => plaid.onUpdate(item.id) : undefined,
       resyncLabel: `Reconnect ${label}`,
       resyncing: needsUpdate && busy,
+      share: shareFor?.(item.id),
     };
   });
 }

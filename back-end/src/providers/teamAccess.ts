@@ -8,6 +8,36 @@ export interface TeamDataGrant {
   provider: string;
   accountId: string;
   accountEmail: string | null;
+  /** Display label: inbox email, institution, repo, compute account or CLI name. */
+  label: string | null;
+}
+
+/** Providers whose one shareable account is the user's single Integration row (accountId ''). */
+export const SINGLE_ACCOUNT_PROVIDERS = ['imessage', 'whatsapp', 'linkedin'] as const;
+/** Meeting-note providers: one account per user, pinned by its account email. */
+export const MEETING_NOTE_PROVIDERS = ['granola', 'fireflies'] as const;
+
+/**
+ * The exact, provider-qualified account id agents see and pass back as `account_id`.
+ * Single-account providers all store accountId '' (iMessage keeps '' for compatibility),
+ * so the others are named by their provider; multi-account providers use their stored id.
+ */
+export function agentAccountId(
+  grant: Pick<TeamDataGrant, 'provider' | 'accountId' | 'accountEmail'>
+): string {
+  switch (grant.provider) {
+    case 'gmail':
+      return (grant.accountEmail ?? '').trim().toLowerCase();
+    case 'imessage':
+      return '';
+    case 'whatsapp':
+    case 'linkedin':
+    case 'granola':
+    case 'fireflies':
+      return grant.provider;
+    default:
+      return grant.accountId;
+  }
 }
 
 export interface SharedProjectDto {

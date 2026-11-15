@@ -3,6 +3,8 @@
  *
  *   GET    /api/integrations/github/repos                 accessible-repo inventory
  *                                                         {repos: [{repo_name, repo_url, canonical_ref, ...}]}
+ *                                                         (agents service, or ?include_shared=true: plus
+ *                                                         teammates' shared repos, each with `shared`)
  *   POST   /api/integrations/github/repos                 connect {repo_url, connected_rose_project_ref?, default_branch?, replace?}
  *                                                         (replace: switch a folder that already has another repo; else 409)
  *   GET    /api/integrations/github/repos/resolve?ref=    canonical connection of any ref spelling
@@ -55,7 +57,13 @@ function handle(fn: (req: AuthRequest, res: Response, userId: string) => Promise
 router.get(
   '/github/repos',
   authenticate,
-  handle(async (_req, res, userId) => res.json(await listGithubRepos(userId)))
+  handle(async (req, res, userId) =>
+    res.json(
+      await listGithubRepos(userId, {
+        includeShared: req.isInternal === true || req.query.include_shared === 'true',
+      })
+    )
+  )
 );
 
 router.post(
