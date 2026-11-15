@@ -117,6 +117,16 @@ function validateTransfer(
   }
 }
 
+/**
+ * Same contract as the org mapper (lifecycleOrgTransfer.mapTransferredCents): a live reclaim leaves
+ * 0 outstanding even though AgentCard still echoes the original transferred counter (observed on
+ * production abandon 2026-08-09, and again on the v2 owner probe 2026-11-15).
+ */
+export function v2TransferredCents(transfer: Record<string, unknown>): number {
+  if (transfer.status === 'reclaimed' && transfer.livemode === true) return 0;
+  return integerField(transfer, 'transferred_cents');
+}
+
 export async function observeV2Lifecycle(
   purchase: Purchase,
   api: AgentCardV2Request = agentCardV2Request,
@@ -169,7 +179,7 @@ export async function observeV2Lifecycle(
       id: transferId,
       status: stringField(transfer, 'status'),
       amountCents: integerField(transfer, 'amount_cents'),
-      transferredCents: integerField(transfer, 'transferred_cents'),
+      transferredCents: v2TransferredCents(transfer),
       releasedCents: integerField(transfer, 'released_cents'),
       cardId: purchase.cardId,
       livemode: transfer.livemode,
