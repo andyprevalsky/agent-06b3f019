@@ -86,9 +86,13 @@ backend attempt merely because the current screen asks for a password. A filled 
 private acknowledgment, not sign-in proof; observe and verify. A
 phone_credential_unavailable receipt means request the protected user step if an
 actual critical password screen blocks progress. Binding/stale errors mean
-observe again, never supply a secret or blindly retry. If account suggestions or
-another overlay cover the password field, first dismiss them with an observed tap
-away from the field (such as the page heading), then observe and fill again. UNKNOWN means inspect
+observe again, never supply a secret or blindly retry. Submit an email or username
+step with input.keys enter so the password page opens with its field focused. If account
+suggestions or another overlay cover the password field (its own label or placeholder is
+not observed), never tap the suggestion rows; try input.keys escape, then a downward
+input.drag starting above the overlay rows, then input.scroll dy -300, one at a time with screen.text after each,
+and call credentials.fill_saved only once the field's own label is observed with the
+overlay gone. If all three fail, report that blocker without retrying. UNKNOWN means inspect
 status/receipts, never replay. A saved-password rejection ends autonomous password attempts for that current
 sign-in. Request the protected user step only if the current observation confirms
 that a critical password step still blocks progress. Do not try another saved-password
