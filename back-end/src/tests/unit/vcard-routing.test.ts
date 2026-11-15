@@ -8,11 +8,23 @@ async function main(): Promise<void> {
     const { rosePhoneFor } = await import('../../domains/vcard/config');
     const linq = '+12054015445';
     const surge = '+14154498072';
-    Object.assign(process.env, { SMS_PROVIDER: 'linq', LINQ_FROM_PHONE: linq, LINQ_RECIPIENTS: '+19729777432' });
+    Object.assign(process.env, {
+      SMS_PROVIDER: 'linq',
+      LINQ_FROM_PHONE: linq,
+      LINQ_RECIPIENTS: '+19729777432',
+    });
     assert.equal(rosePhoneFor('+19729777432'), linq, 'allowlisted recipient saves the Linq number');
-    assert.equal(rosePhoneFor('+12025550000'), surge, 'Surge-routed recipient saves the Surge number');
+    assert.equal(
+      rosePhoneFor('+12025550000'),
+      surge,
+      'Surge-routed recipient saves the Surge number'
+    );
     delete process.env.LINQ_RECIPIENTS;
-    assert.equal(rosePhoneFor('+12025550000'), linq, 'open rollout: everyone saves the Linq number');
+    assert.equal(
+      rosePhoneFor('+12025550000'),
+      linq,
+      'open rollout: everyone saves the Linq number'
+    );
     assert.equal(rosePhoneFor(null), linq);
     process.env.SMS_PROVIDER = 'surge';
     assert.equal(rosePhoneFor('+19729777432'), surge, 'Linq off: Surge number');
