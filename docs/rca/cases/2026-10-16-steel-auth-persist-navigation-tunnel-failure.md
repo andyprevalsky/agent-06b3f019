@@ -8,11 +8,11 @@ classification: test-bug
 problem_class: fixture-environment-data-mismatch
 first_bad_boundary: browser-provider.auth-persist.live.ts readSignedIn (and the first Kernel sign-in block) reached the browser's cookie jar and localStorage only by a real page.goto to https://example.com through the session's residential exit, which some exits refuse for the whole session
 symptoms:
-  - 'net::ERR_TUNNEL_CONNECTION_FAILED'
   - 'FAIL live Kernel/Steel auth persist'
-  - '198 passed, 1 failed, 199 total'
   - 'page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/'
   - 'live-probes browser-provider FLAKY'
+  - '/rotate-proxy 500: {"error":"page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://api.ipify.org/'
+  - 'FAIL live Kernel provider parity: /rotate-proxy 500'
 tags:
   - browser-provider
   - steel
@@ -27,6 +27,8 @@ sources:
   - PR #1734
   - commit 910dd40a1404f1cb4abaa212e585bbff842ad14b
   - memory:kernel-live-parity-upstream-reset-flake
+  - PR #1809
+  - commit d9ae5e3214bc75ec7320c850c9778c003092d94f
 repro: 'back-end/src/tests/blackbox/browser-provider.auth-persist-origin.support.ts (browser-provider domain): real Chromium behind a local proxy that answers every CONNECT with 502; pre-fix the fixture read failed with page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/, post-fix it passes with zero CONNECTs'
 status: fixed
 ---
@@ -149,3 +151,34 @@ Before/after, identical commands from `back-end/` on this source:
 
 Post-fix run logs: R2 trace-archive `rca-evidence/steel-auth-persist-tunnel/20261114/final-runs.tar.zst`
 (sha256 `cf2b41900e07a1af087f0441fcbb0efcdc5ea6cc9dba2fe985b7960ee4cd17ff`).
+
+## November 15: rotation restore of a saved tab (PR #1809)
+
+This is a separate call site from the auth-persist fixture fixed on November 14. It is the boundary the October 29 U4 section recovered: the saved ipify tab inside a logical-browser checkpoint.
+
+**Occurrence.** PR #1775 attempt 4 (source `3bf66999e`) failed live provider parity with `/rotate-proxy 500: {"error":"page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://api.ipify.org/?format=json&nonce=466beac0-...`. The handoff called it Kernel; the server log shows rotation 4, `currentProvider=steel targetProvider=steel recoveryAction=ip_rotated`. Steel created and validated session `067a4858-ac9a-...` at 07:42:09–10Z. `restoreLogicalBrowserCheckpoint` reached `navigation_started` at 07:42:11.263Z, and its one strict `page.goto` of the saved tab failed 584 ms later, turning the whole rotation into a 500. The saved tab was the live test's own exit-IP probe, captured at the earlier `/close`. PR #2106's live probes hit the same boundary on 2026-11-14 21:37:45Z (676 ms after `navigation_started`; same-source rerun passed). Attribution: `Gate: NOT_INTRODUCED` by PR #1775.
+
+**Reproduction.** `back-end/src/tests/blackbox/browser-session-rotation-restore.cases.ts`, registered from `browser-session-hydration-failure.cases.ts` (browser-session domain), replays the captured error through the real `rotateBrowserProxy` and checkpoint restore with a fake provider and page. On unfixed code it fails with the identical `Error: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://api.ipify.org/...`, both on the original base and again after the 11-14 sync. With the fix:
+- a single tunnel failure recovers on the same session;
+- a persistent failure stops after 3 attempts and never publishes ACTIVE;
+- a timeout stays terminal after one attempt;
+- a binding change stops the retry.
+
+**Fix (PR #1809, merged `d9ae5e3214`).** Retry only `net::ERR_TUNNEL_CONNECTION_FAILED` around the restore navigation: 3 attempts, 500 ms and 1.5 s apart, with the restore binding rechecked on every attempt. Other navigation failures stay terminal, and partial hydration still never publishes ACTIVE.
+
+**Rejected in adversarial review: refunding the reserved rotation when restore fails.**
+- The row's provider is already committed, so a retry would not retake the same rung.
+- A refund on every error removes the cap on paid allocations.
+- A destination that refuses connections should advance the ladder, not pin the run to one rung.
+
+Without a refund, a caller's retry still advances to the next rung on a new exit.
+
+**Verified.**
+- The browser-session domain passes locally.
+- Live Kernel provider parity passed on Blacksmith on four fixed sources (two live-probes rounds after main moved the case there).
+- The final gate round passed all 17 gates on `4c0ec0165`.
+- Production Render and backend probes passed at the merge SHA.
+
+**Still open.**
+- Why the proxy failed the tunnel. No CONNECT response is retained. The `browser-checkpoint:restore-navigation` retry warnings now log each attempt, so a recurrence will show whether a same-session retry recovers. The November 14 finding (about 5% of Steel exits refuse example.com for a whole session) suggests some refusals will exhaust the bounded retry; that case still fails the rotation, and the caller's next rotation moves to a new exit.
+- A restore that fails after all retries leaves its replacement session bound to the row until it is superseded or closed. This predates the fix.
