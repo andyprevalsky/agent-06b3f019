@@ -105,21 +105,42 @@ once. New runs never admit them, which leaves ~28 KB of real feedback.
 - `agents/workflows/background_agents.py`: a finished record's `wake.base_goal`
   is omitted from the snapshot when it equals `tool_args.goal`, and restore
   re-derives it.
+- Claim check (`agents/workflows/agent_workflow.py`, `agents/helpers/fetch_config.py`):
+  a feedback entry proven bound to a durable USER message records its message id.
+  - Binding is proven in one of two ways: durable admission from a row with an id,
+    or a plain signal bound to the row it arrived as.
+  - The continuation carries `{"message_id", "sha256"}` instead of the text.
+  - At run start, `_hydrate_claim_checked_feedback` reads the text back through
+    the read-only `fetch_message_texts` activity (`POST /api/agents/messages/batch`,
+    user-scoped, 50 ids per request).
+  - It accepts the DB text, or the DB text plus the context pointer suffix,
+    whichever matches the digest. A mismatch logs an error and uses the stored
+    message.
+  - An entry whose message is gone is dropped (logged).
+  - No schema refresh starts until the read-back finishes.
+  - Feedback text therefore no longer grows the continuation args. Only id-less
+    rows (rare) and attention responses still ride inline, once.
 
 Nothing is truncated (rule 13). Every value restores exactly, and the summary
 travels only in the context argument. The regression asserts:
 - each feedback text and wake goal appears once in runtime_state;
 - runtime_state stays within 20 KB of its unique content;
+- id-bound feedback rides as id + digest and is read back exactly (including the pointer-suffixed form);
+- a deleted message's entry is dropped;
+- schema refresh waits for the read-back;
 - the handoff stays well under 2 MiB with a context at #2239's 1.2 MB budget;
 - old snapshots still round-trip (negative control).
 
-10k agents: per-agent O(feedback) dict build at each continuation, no shared
-state or fan-in.
+10k agents:
+- per-agent O(feedback) work at each continuation;
+- one user-scoped batch read per restore (ceil(ids/50) requests);
+- no shared state or fan-in.
 
-Residual: real user feedback text (~600 B per message) still rides in
-runtime_state because 40 of 47 entries arrive on the signal path with no message
-id to claim-check against. Moving it to the DB needs id pairing on that path plus
-a restore-time fetch activity.
+Residual:
+- Snapshots written before this change have no recorded message ids, so their
+  existing feedback stays inline (once) and only new feedback is claim-checked.
+- An old-code worker restoring a new snapshot would skip the claim-checked
+  entries.
 
 ## Human feedback
 

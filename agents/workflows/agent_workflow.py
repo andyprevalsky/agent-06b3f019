@@ -39,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers import (
         check_user_usage,
         fetch_agent_config,
+        fetch_message_texts,
         fetch_agent_queue_pointer,
         finalize_workflow_replacement_bootstrap,
         generate_completion_summary,
@@ -838,6 +839,29 @@ CONTINUATION_PAYLOAD_WARN_BYTES = 1_500_000
 _FEEDBACK_TEXT_KEY = "legacy_feedback_text"
 
 
+def _feedback_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _message_pointer_suffix(message_id: str) -> str:
+    # helpers.context_pointers.annotate_with_pointer appends this to USER rows.
+    return f"\n\nReference: @ref:message:{message_id}"
+
+
+def _without_message_pointer(text: str, message_id: str) -> str:
+    return text.removesuffix(_message_pointer_suffix(message_id))
+
+
+def _claim_checked_feedback(value: Any) -> Optional[Tuple[str, str]]:
+    """A serialized {"message_id", "sha256"} feedback entry, carried instead of its text."""
+    if not isinstance(value, dict):
+        return None
+    message_id, digest = value.get("message_id"), value.get("sha256")
+    if isinstance(message_id, str) and message_id and isinstance(digest, str) and len(digest) == 64:
+        return message_id, digest
+    return None
+
+
 def _serialized_requirement_key(key: Tuple[str, ...], feedback_index: Dict[str, int]) -> List[Any]:
     if len(key) == 3 and key[0] == "legacy" and key[2] in feedback_index:
         return [_FEEDBACK_TEXT_KEY, key[1], feedback_index[key[2]]]
@@ -941,6 +965,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_feedback: List[str] = []
         self._response_schema_feedback_sources: List[Optional[Tuple[str, ...]]] = []
         self._response_schema_feedback_rows: Set[Tuple[str, ...]] = set()
+        # Feedback index -> its durable USER message id (proven binding only). The
+        # continuation carries id + digest and the next run reads the text back from
+        # the DB (claim check), so feedback no longer grows continue_as_new args.
+        self._response_schema_feedback_message_ids: Dict[int, str] = {}
+        # Claim-checked entries restored but not yet read back: index -> sha256.
+        self._response_schema_feedback_pending: Dict[int, str] = {}
         self._response_schema_task_base: Optional[str] = None
         self._response_schema_task_baseline_rows: Set[Tuple[str, ...]] = set()
         self._response_schema_attention_events: Dict[str, str] = {}
@@ -1219,7 +1249,15 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             source_rows = runtime.get("response_schema_feedback_sources")
             self._response_schema_feedback = []
             self._response_schema_feedback_sources = []
+            self._response_schema_feedback_message_ids = {}
+            self._response_schema_feedback_pending = {}
             for index, value in enumerate(feedback_rows):
+                claim = _claim_checked_feedback(value)
+                if claim is not None:
+                    restored_index = len(self._response_schema_feedback)
+                    self._response_schema_feedback_message_ids[restored_index] = claim[0]
+                    self._response_schema_feedback_pending[restored_index] = claim[1]
+                    value = ""  # read back by _hydrate_claim_checked_feedback before any use
                 if not isinstance(value, str):
                     continue
                 source = source_rows[index] if isinstance(source_rows, list) and index < len(source_rows) else None
@@ -1489,7 +1527,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             prior_status = "ACTIVE"
         feedback_index: Dict[str, int] = {}
         for index, text in enumerate(self._response_schema_feedback):
-            feedback_index.setdefault(text, index)
+            if index not in self._response_schema_feedback_message_ids:
+                feedback_index.setdefault(text, index)
 
         return {
             "version": 1,
@@ -1531,7 +1570,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "last_signal_response": self._last_signal_response,
                 "signal_responses": dict(self._signal_responses),
                 "pending_approval_resume": _canonical_pending_approval_resume(self._pending_approval_resume),
-                "response_schema_feedback": list(self._response_schema_feedback),
+                "response_schema_feedback": [
+                    self._serialized_feedback_entry(index, text)
+                    for index, text in enumerate(self._response_schema_feedback)
+                ],
                 "response_schema_feedback_sources": [
                     _serialized_requirement_key(self._response_schema_feedback_sources[index], feedback_index)
                     if index < len(self._response_schema_feedback_sources)
@@ -1840,6 +1882,86 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._has_new_messages = True
         self._start_response_schema_refresh()
 
+    def _claim_check_signal_feedback(self, row_text: str, message_id: str) -> None:
+        """Bind the oldest unbound signal-delivered feedback entry to the USER row it arrived as."""
+        candidates = {row_text.strip(), _without_message_pointer(row_text, message_id).strip()}
+        for index, value in enumerate(self._response_schema_feedback):
+            source = (
+                self._response_schema_feedback_sources[index]
+                if index < len(self._response_schema_feedback_sources)
+                else None
+            )
+            if source is None and index not in self._response_schema_feedback_message_ids and value.strip() in candidates:
+                self._response_schema_feedback_message_ids[index] = message_id
+                return
+
+    def _serialized_feedback_entry(self, index: int, text: str) -> Any:
+        message_id = self._response_schema_feedback_message_ids.get(index)
+        if message_id is None:
+            return text
+        digest = self._response_schema_feedback_pending.get(index) or _feedback_digest(text)
+        return {"message_id": message_id, "sha256": digest}
+
+    async def _hydrate_claim_checked_feedback(self) -> None:
+        """Read claim-checked feedback text back from the DB before anything reads it."""
+        pending = dict(self._response_schema_feedback_pending)
+        if not pending:
+            return
+        ids = sorted({self._response_schema_feedback_message_ids[index] for index in pending})
+        texts = await workflow.execute_activity(
+            fetch_message_texts,
+            args=[self.user_id, ids],
+            start_to_close_timeout=timedelta(seconds=120),
+            heartbeat_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(initial_interval=timedelta(seconds=2), maximum_interval=timedelta(seconds=60)),
+        )
+        for index, digest in pending.items():
+            message_id = self._response_schema_feedback_message_ids[index]
+            stored = texts.get(message_id)
+            if not isinstance(stored, str):
+                # The user's message row is gone, so it is no longer a requirement.
+                workflow.logger.error(
+                    f"[ContinuationClaimCheck] agent={self.agent_id} feedback message {message_id} not found; "
+                    "dropping its feedback entry"
+                )
+                self._response_schema_feedback_message_ids.pop(index)
+                continue
+            text = next(
+                (
+                    candidate
+                    for candidate in (stored, f"{stored}{_message_pointer_suffix(message_id)}")
+                    if _feedback_digest(candidate) == digest
+                ),
+                None,
+            )
+            if text is None:
+                workflow.logger.error(
+                    f"[ContinuationClaimCheck] agent={self.agent_id} feedback message {message_id} text digest "
+                    "mismatch; using the stored message text"
+                )
+                text = stored
+            self._response_schema_feedback[index] = text
+        missing = {index for index in pending if index not in self._response_schema_feedback_message_ids}
+        if missing:
+            self._drop_response_schema_feedback(missing)
+        self._response_schema_feedback_pending = {}
+        workflow.logger.info(
+            f"[ContinuationClaimCheck] agent={self.agent_id} read back {len(pending) - len(missing)} "
+            f"feedback text(s) from {len(ids)} message id(s)"
+        )
+        self._start_response_schema_refresh()
+
+    def _drop_response_schema_feedback(self, indices: Set[int]) -> None:
+        kept = [index for index in range(len(self._response_schema_feedback)) if index not in indices]
+        sources = self._response_schema_feedback_sources
+        self._response_schema_feedback = [self._response_schema_feedback[index] for index in kept]
+        self._response_schema_feedback_sources = [sources[index] if index < len(sources) else None for index in kept]
+        self._response_schema_feedback_message_ids = {
+            new: self._response_schema_feedback_message_ids[old]
+            for new, old in enumerate(kept)
+            if old in self._response_schema_feedback_message_ids
+        }
+
     def _append_response_schema_feedback(self, response: str, source: Optional[Tuple[str, ...]] = None) -> None:
         """Keep authored text paired with proven source identity; legacy text stays unknown."""
         count = len(self._response_schema_feedback)
@@ -1894,6 +2016,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             if key in self._response_schema_feedback_rows or not self._response_schema_pending_signals.get(text, 0):
                 continue
             self._response_schema_feedback_rows.add(key)
+            if key[0] == "id":
+                self._claim_check_signal_feedback(message["text"], key[1])
             self._response_schema_pending_signals[text] -= 1
             if self._response_schema_pending_signals[text] == 0:
                 del self._response_schema_pending_signals[text]
@@ -1917,7 +2041,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if event_id in self._response_schema_attention_events:
                     continue
                 self._response_schema_attention_events[event_id] = text
-            self._append_response_schema_feedback(text, next(iter(keys)))
+            source_key = next(iter(keys))
+            self._append_response_schema_feedback(text, source_key)
+            if source_key[0] == "id":
+                self._response_schema_feedback_message_ids[len(self._response_schema_feedback) - 1] = source_key[1]
             self._response_schema_revision += 1
             self._response_schema_refresh_error = None
             self._has_new_messages = True
@@ -2300,6 +2427,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             _demo_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
         self._restore_deployment_state(resume_state)
+        await self._hydrate_claim_checked_feedback()
         # continue_as_new / deployment resume may restore demo_cache_goal from
         # runtime_state. Recompute the DEMO cache gate from the restored goals
         # so a non-demo input goal cannot leave cache replay disabled when the
@@ -3444,7 +3572,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
 
     def _start_response_schema_refresh(self) -> None:
         """Start one coalescing background schema worker without blocking reasoning."""
-        if not self._response_schema_initialized:
+        if not self._response_schema_initialized or self._response_schema_feedback_pending:
             return
         if self._response_schema_applied_revision >= self._response_schema_revision:
             return

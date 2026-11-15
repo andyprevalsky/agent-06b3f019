@@ -3417,13 +3417,16 @@ def test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off
     assert restored._continuation_resume_state() == args[16]
 
 
-def test_workflow_continuation_runtime_state_carries_feedback_and_background_once():
+async def test_workflow_continuation_runtime_state_carries_feedback_and_background_once():
     """RCA 2026-11-15 (agent 8789a5df): runtime_state was 536,819 bytes of a 2,124,477-byte
     handoff (TMPRL1103 forever, cutover a145f654 wedged in DRAINING). Root cause: three
     ~40 KB context compaction summaries had been admitted as user requirements, and each
     id-less row's full text rode three times (feedback, source key, row key). Smaller: a
     wakeable background record carried its spawn goal twice. Each piece of state must
-    travel once, and the summary only in the context argument."""
+    travel once, and the summary only in the context argument. Feedback bound to a durable
+    USER message rides as its id + digest and is read back from the DB (claim check)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
     from loop.run_agent import _real_user_requirement_keys, _requirement_keys
 
     wf = _bare_workflow_instance()
@@ -3456,6 +3459,20 @@ def test_workflow_continuation_runtime_state_carries_feedback_and_background_onc
         wf._record_response_schema_feedback(text)
         feedback_texts.append(text)
     feedback_texts.extend(row["text"] for row in wf.context if "message_id" not in row)
+    # A row admitted from the polled context carries the pointer suffix; the DB row does not.
+    durable_text = "Use the Oakland unit, not Emeryville. " * 20
+    wf.context.append(
+        {
+            "role": "USER",
+            "message_id": "user-row-durable",
+            "text": f"{durable_text}\n\nReference: @ref:message:user-row-durable",
+            "timestamp": "2026-11-14T11:00:00+00:00",
+            "metadata": {},
+        }
+    )
+    feedback_texts.append(wf.context[-1]["text"])
+    db_texts = {row["message_id"]: row["text"] for row in wf.context if "message_id" in row}
+    db_texts["user-row-durable"] = durable_text
     summaries = [
         {
             "role": "USER",
@@ -3508,26 +3525,60 @@ def test_workflow_continuation_runtime_state_carries_feedback_and_background_onc
 
     for summary in summaries:
         assert summary["text"] not in runtime_json, "compaction summary rode in runtime_state"
-    for text in feedback_texts:
-        assert runtime_json.count(text[:40]) == 1, f"feedback carried more than once: {text[:20]}"
+    claimed = wf._response_schema_feedback_message_ids
+    assert set(claimed.values()) == set(db_texts), "every id-bound feedback entry is claim-checked"
+    for index, text in enumerate(feedback_texts):
+        expected = 0 if index in claimed else 1  # claim-checked text lives only in the DB
+        assert runtime_json.count(text[:40]) == expected, f"feedback carried {expected}x expected: {text[:20]}"
     for record in list(wf._background_finished.values())[:-1]:
         if "wake" in record:
             assert runtime_json.count(record["wake"]["base_goal"]) == 1, "wake goal carried twice"
     assert "base_goal" in state["runtime_state"]["background_agents"]["finished"]["call-30"]["wake"]
-    unique_bytes = sum(len(json.dumps(text)) for text in feedback_texts) + len(
-        json.dumps(wf._background_state_snapshot())
-    )
+    unique_bytes = sum(
+        len(json.dumps(text)) for index, text in enumerate(feedback_texts) if index not in claimed
+    ) + len(json.dumps(wf._background_state_snapshot()))
     assert len(runtime_json) < unique_bytes + 20_000, (len(runtime_json), unique_bytes)
     assert len(json.dumps(args)) < 2 * 1024 * 1024 - 300_000, "handoff must stay well under 2 MiB"
 
     restored = _bare_workflow_instance()
     restored.max_iterations = args[12]
+    restored.agent_id, restored.user_id = wf.agent_id, wf.user_id
     restored._restore_deployment_state(json.loads(json.dumps(state)))
+    assert restored._continuation_resume_state() == state, "an unread claim keeps its id + digest"
+    revision = restored._response_schema_revision
+    restored._response_schema_initialized = True
+    restored._response_schema_revision = restored._response_schema_applied_revision + 1
+    restored._start_response_schema_refresh()
+    assert restored._response_schema_refresh_task is None, "schema refresh waited for claim-checked text"
+    restored._response_schema_initialized = False
+    restored._response_schema_revision = revision
+    fetch = AsyncMock(return_value=dict(db_texts))
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=fetch),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+    ):
+        await restored._hydrate_claim_checked_feedback()
+    assert fetch.await_count == 1 and fetch.await_args.kwargs["args"] == [wf.user_id, sorted(db_texts)]
     assert restored._response_schema_feedback == wf._response_schema_feedback
     assert restored._response_schema_feedback_sources == wf._response_schema_feedback_sources
     assert restored._response_schema_feedback_rows == wf._response_schema_feedback_rows
     assert restored._background_finished == wf._background_finished
     assert restored._continuation_resume_state() == state
+
+    # A user message deleted from the DB is no longer a requirement: its entry is dropped.
+    pruned = _bare_workflow_instance()
+    pruned.max_iterations = args[12]
+    pruned.agent_id, pruned.user_id = wf.agent_id, wf.user_id
+    pruned._restore_deployment_state(json.loads(json.dumps(state)))
+    gone = {key: value for key, value in db_texts.items() if key != "user-row-0"}
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=AsyncMock(return_value=gone)),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+    ):
+        await pruned._hydrate_claim_checked_feedback()
+    assert pruned._response_schema_feedback == feedback_texts[1:]
+    assert len(pruned._response_schema_feedback_sources) == len(feedback_texts) - 1
+    assert sorted(pruned._response_schema_feedback_message_ids.values()) == sorted(gone)
 
     # A snapshot written before this change (full-text keys inline) still restores.
     legacy_runtime = dict(state["runtime_state"])
@@ -15223,7 +15274,7 @@ async def run_all_tests():
         "wf_continuation_carries_context_once",
         test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off,
     )
-    r.record(
+    await r.record_async(
         "wf_continuation_runtime_state_carries_feedback_and_background_once",
         test_workflow_continuation_runtime_state_carries_feedback_and_background_once,
     )
