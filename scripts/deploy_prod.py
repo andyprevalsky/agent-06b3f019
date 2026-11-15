@@ -799,9 +799,19 @@ def lane_semantic(ctx: Ctx) -> Result:
         if code != 0:
             return False, f'Fly-lane gate (production) exited {code}; semantics not dispatched', code
     code = ctx.sh('semantic', semantic_argv(ctx.sha, ctx.state_dir))
-    run = (ctx.production_receipt().get('semantic') or {}).get('run_id')
-    return (code == 0), (f'chat-lifecycle-ratchet run {run} success' if code == 0
-                         else f'production-semantic exited {code} (run {run})'), code
+    semantic = ctx.production_receipt().get('semantic') or {}
+    run = semantic.get('run_id')
+    if code != 0:
+        return False, f'production-semantic exited {code} (run {run})', code
+    binding = semantic.get('binding') or {}
+    if binding.get('kind') == 'verified-by-descendant':  # the specs of the live frontend's descendant of the merge ran
+        live = str(binding.get('live_frontend_commit') or '')
+        if not live or semantic.get('source_sha') != live:
+            return False, (f'production-semantic recorded a descendant binding to {live[:12] or "no commit"} but run '
+                           f'{run} tested {str(semantic.get("source_sha"))[:12]}; the binding is unverified'), 1
+        return True, Descendant(f'verified by descendant {live}: chat-lifecycle-ratchet run {run} success with the '
+                                f'specs of live frontend {live[:12]} (a descendant of {ctx.sha[:12]})'), 0
+    return True, f'chat-lifecycle-ratchet run {run} success', 0
 
 
 def release_stalled(lifecycle: object, *, livemode: bool) -> bool:

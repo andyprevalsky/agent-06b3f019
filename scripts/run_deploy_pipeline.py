@@ -167,8 +167,14 @@ re-pin when a receipt exceeds it): 4150 MB.
   live=<sha> merged=<sha> reason=<code>``. Credential, Render API and git
   failures exit 2 and never pass.
 * ``production-semantic`` is the Step 13b dispatch itself. It requires the
-  passed ``production`` receipt for the same merged SHA, dispatches
-  ``chat-lifecycle-ratchet.yml`` on ``main`` with ``source_sha=<merged SHA>``
+  passed ``production`` receipt for the same merged SHA, reads the live
+  frontend's ``/version.json`` and dispatches ``chat-lifecycle-ratchet.yml``
+  on ``main`` with ``source_sha=<merged SHA>`` when that build is the merge, or
+  ``source_sha=<live commit>`` (recorded ``binding: verified-by-descendant``)
+  when it strictly descends from the merge, so the specs match the UI that is
+  live; an ancestor build with an identical ``front-end/`` is
+  ``source-equivalent`` (the merge is dispatched), one that differs is waited
+  out (``--live-timeout``) and an unrelated build dispatches nothing (exit 1)
   (``workflow_dispatch`` refs must be branches or tags, so the exact commit
   travels as an input the workflow checks out and names in its run title),
   binds to the newest run created after the dispatch whose title names that
@@ -4536,6 +4542,24 @@ DISPATCH_CLOCK_SKEW_S = 5.0
 SEMANTIC_DISPATCH_RESUME_WINDOW_S = 15 * 60.0
 SEMANTIC_RUN_FIELDS = "databaseId,createdAt,headSha,displayTitle,status,conclusion,url,event"
 SEMANTIC_VIEW_FIELDS = "status,conclusion,attempt,url,headSha,displayTitle,createdAt,updatedAt,jobs"
+# The specs must match the UI the browser loads. Every production build serves
+# /version.json as {"buildId": "<12-hex commit>-<build time>"}
+# (front-end/vite.config.ts productionBuildId). The 2026-11-15 run 43681354141
+# ran the merge's spec against a live descendant that had intentionally removed
+# a region the spec asserted. The lane now dispatches the commit the live
+# frontend serves when that commit strictly descends from the merge.
+# DEPLOY_SEMANTIC_VERSION_URL overrides the URL only for offline fixtures.
+SEMANTIC_VERSION_PATH = "/version.json"
+SEMANTIC_BUILD_ID = re.compile(r"([0-9a-f]{7,40})-[0-9a-z]+")
+SEMANTIC_VERSION_TIMEOUT_SECONDS = 30.0
+# Vercel builds every main commit and takes ~5 min to promote one, so a merge
+# dispatched right after merging can still find its parent live. An ancestor
+# build with no change under these paths serves the merge's UI and specs
+# (source-equivalent, like the Render lane's live-ancestor-same-backend). One
+# that differs is waited out for the Vercel lane's 90 x 10 s, then refused.
+SEMANTIC_FRONTEND_PATHS = ("front-end/",)
+DEFAULT_SEMANTIC_LIVE_TIMEOUT = 900.0
+SEMANTIC_LIVE_POLL_SECONDS = 10.0
 
 
 def _parse_github_time(value: object) -> datetime | None:
@@ -4547,12 +4571,13 @@ def _parse_github_time(value: object) -> datetime | None:
         return None
 
 
-def semantic_select_run(rows: object, merged_sha: str, dispatched_at: datetime) -> dict | None:
+def semantic_select_run(rows: object, source_sha: str, dispatched_at: datetime) -> dict | None:
     """The newest ``workflow_dispatch`` run this dispatch created: created no
     earlier than the dispatch clock (minus ``DISPATCH_CLOCK_SKEW_S``) and
-    titled ``source_sha=<merged_sha>`` by the workflow's run-name. Older runs
-    and runs of another source commit never match, whatever their headSha
-    (the branch head at dispatch time, which may be a later commit)."""
+    titled ``source_sha=<source_sha>`` (the dispatched commit: the merge or its
+    bound live descendant) by the workflow's run-name. Older runs and runs of
+    another source commit never match, whatever their headSha (the branch
+    head at dispatch time, which may be a later commit)."""
     earliest = dispatched_at - timedelta(seconds=DISPATCH_CLOCK_SKEW_S)
     matches: list[tuple[datetime, int, dict]] = []
     for row in rows if isinstance(rows, list) else []:
@@ -4560,7 +4585,7 @@ def semantic_select_run(rows: object, merged_sha: str, dispatched_at: datetime) 
             continue
         created = _parse_github_time(row.get("createdAt"))
         title = SEMANTIC_TITLE_PATTERN.search(str(row.get("displayTitle") or ""))
-        if created is None or created < earliest or title is None or title.group(1) != merged_sha:
+        if created is None or created < earliest or title is None or title.group(1) != source_sha:
             continue
         if row.get("event") not in (None, "workflow_dispatch"):
             continue
@@ -4581,6 +4606,106 @@ def semantic_pending_dispatch(entry: object, merged_sha: str) -> datetime | None
         return None
     dispatch = entry.get("dispatch") if isinstance(entry.get("dispatch"), dict) else {}
     return _parse_github_time(dispatch.get("at"))
+
+
+def _resolve_commit(prefix: str, root: Path) -> str | None:
+    """The full SHA of a commit prefix in this checkout, or None when no single
+    commit matches it."""
+    completed = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{prefix}^{{commit}}"], cwd=root,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+    sha = completed.stdout.strip()
+    return sha if completed.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", sha) else None
+
+
+def semantic_live_frontend(frontend_url: str, root: Path) -> dict:
+    """The commit the live frontend serves: ``<frontend_url>/version.json``
+    ``buildId`` (front-end/vite.config.ts productionBuildId), resolved to a
+    full SHA in this checkout (one ``git fetch origin main`` when unknown).
+    An unreadable version, a build id that names no commit or an unresolvable
+    commit raises ``ProductionToolingError``, never a guess."""
+    url = os.environ.get("DEPLOY_SEMANTIC_VERSION_URL") or frontend_url.rstrip("/") + SEMANTIC_VERSION_PATH
+    request = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=SEMANTIC_VERSION_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8") or "null")
+    except urllib.error.HTTPError as error:
+        raise ProductionToolingError(
+            f"GET {url} returned HTTP {error.code}; the live frontend's build is unknown, so no spec revision can be "
+            "bound to it: rerun once the frontend serves /version.json") from error
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise ProductionToolingError(
+            f"GET {url} failed ({type(error).__name__}: {error}); the live frontend's build is unknown: rerun once it "
+            "is reachable") from error
+    build_id = str(payload.get("buildId") or "") if isinstance(payload, dict) else ""
+    match = SEMANTIC_BUILD_ID.fullmatch(build_id)
+    if not match:
+        raise ProductionToolingError(
+            f"GET {url} buildId {build_id!r} names no commit (expected <commit>-<build time>, "
+            "front-end/vite.config.ts productionBuildId); the live frontend's source is unknown")
+    prefix = match.group(1)
+    live = _resolve_commit(prefix, root)
+    fetch_error = ""
+    if live is None:
+        fetched = subprocess.run(["git", "fetch", "--quiet", "origin", "main"], cwd=root, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300,
+                                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        fetch_error = fetched.stderr.strip()[:200] if fetched.returncode else ""
+        live = _resolve_commit(prefix, root)
+    if live is None:
+        raise ProductionToolingError(
+            f"cannot resolve the live frontend commit {prefix} (buildId {build_id}) in this checkout"
+            + (f" (git fetch origin main: {fetch_error})" if fetch_error else "")
+            + ": fetch origin main so it is known locally, then rerun")
+    return {"live_frontend_commit": live, "build_id": build_id, "version_url": url, "observed_at": _now()}
+
+
+def semantic_source_binding(merged_sha: str, frontend_url: str, root: Path, *,
+                            timeout: float = DEFAULT_SEMANTIC_LIVE_TIMEOUT,
+                            poll_seconds: float = SEMANTIC_LIVE_POLL_SECONDS, sleep=time.sleep) -> dict:
+    """Bind the semantic specs to the UI the live frontend serves
+    (``semantic_live_frontend``). The 2026-11-15 run 43681354141 ran the
+    merge's specs against a live descendant that had intentionally removed a
+    region those specs asserted. ``kind`` and the commit dispatched:
+
+    * ``exact``: the merge's own build; dispatch the merge.
+    * ``verified-by-descendant``: a strict descendant of the merge; dispatch
+      the live commit, which contains the merge and whose specs describe the
+      live UI.
+    * ``source-equivalent``: an ancestor with no change under
+      ``SEMANTIC_FRONTEND_PATHS`` (the merge's build is not promoted yet but
+      would serve the same UI); dispatch the merge.
+
+    An ancestor whose frontend differs is re-read every ``poll_seconds`` until
+    one of the above holds, then refused (``ProductionGateError``) after
+    ``timeout``. An unrelated build is refused at once. Nothing is dispatched
+    on a refusal or a tooling error."""
+    started = time.monotonic()
+    polls = 0
+    while True:
+        polls += 1
+        binding = {**semantic_live_frontend(frontend_url, root), "polls": polls}
+        live = binding["live_frontend_commit"]
+        if live == merged_sha:
+            return {"kind": "exact", **binding}
+        if _is_ancestor(merged_sha, live, root):
+            return {"kind": "verified-by-descendant", **binding}
+        if not _is_ancestor(live, merged_sha, root):
+            raise ProductionGateError(
+                f"live frontend {live[:12]} is not {merged_sha[:12]} or a strict descendant of it (buildId "
+                f"{binding['build_id']} at {binding['version_url']}) and is unrelated to it: the merge is not live there")
+        changed = _git_lines(["diff", "--name-only", live, merged_sha, "--", *SEMANTIC_FRONTEND_PATHS], root)
+        if not changed:
+            return {"kind": "source-equivalent", **binding, "frontend_paths": list(SEMANTIC_FRONTEND_PATHS)}
+        waited = time.monotonic() - started
+        if waited >= timeout:
+            raise ProductionGateError(
+                f"live frontend {live[:12]} is not {merged_sha[:12]} or a strict descendant of it: it is an ancestor "
+                f"whose {', '.join(SEMANTIC_FRONTEND_PATHS)} differs in {len(changed)} path(s) and was still live after "
+                f"{waited:.0f}s ({polls} reads of {binding['version_url']}): wait for the Vercel lane to report this merge "
+                "(or a descendant) live, then rerun")
+        print(f"PIPELINE_SEMANTIC waiting live_frontend={live[:12]} is an ancestor of {merged_sha[:12]} with "
+              f"{len(changed)} frontend path(s) changed; rereading in {poll_seconds:.0f}s", flush=True)
+        sleep(poll_seconds)
 
 
 def _semantic_jobs(view: dict) -> list[dict]:
@@ -4631,7 +4756,8 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                         backend_url: str = SEMANTIC_BACKEND_URL, retry_justification: str | None = None,
                         root: Path | None = None, timeout: float = DEFAULT_SEMANTIC_TIMEOUT,
                         start_timeout: float = DEFAULT_SEMANTIC_START_TIMEOUT,
-                        poll_seconds: float = DEFAULT_SEMANTIC_POLL_SECONDS, sleep=time.sleep) -> int:
+                        poll_seconds: float = DEFAULT_SEMANTIC_POLL_SECONDS, sleep=time.sleep,
+                        live_timeout: float = DEFAULT_SEMANTIC_LIVE_TIMEOUT) -> int:
     """deploy.md Step 13b. Requires the ``production`` (Fly lane) receipt for
     this merged SHA to have passed in ``state_dir`` (never dispatch while a
     surface is still cutting over). When the receipt already names a run of
@@ -4642,9 +4768,11 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
     and looked up again on the next call; only when it is older than
     ``SEMANTIC_DISPATCH_RESUME_WINDOW_S`` and one more query finds no run is
     it abandoned to ``semantic_history`` and dispatched anew. Otherwise it
-    dispatches ``chat-lifecycle-ratchet.yml`` on ``main`` with
-    ``source_sha=<merged_sha>`` plus the URLs and binds to the newest run
-    created after the dispatch whose title names that SHA. It polls every
+    dispatches ``chat-lifecycle-ratchet.yml`` on ``main`` with the
+    ``source_sha`` ``semantic_source_binding`` chose (the merge, or the live
+    frontend's strict descendant of it, recorded under ``binding``) plus the
+    URLs and binds to the newest run created after the dispatch whose title
+    names that SHA. It polls every
     ``poll_seconds`` within ``timeout``, records run id/url/headSha/effective
     source_sha/created/completed/conclusion/per-job conclusions under
     ``semantic`` in ``production.json`` (every GitHub wait joins
@@ -4692,7 +4820,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                                         "backend_url": backend_url}},
                 "run_id": None, "url": None, "head_sha": None, "source_sha": None, "display_title": None,
                 "created_at": None, "completed_at": None, "attempt": None, "status": None, "conclusion": None,
-                "jobs": [], "retry": None}
+                "jobs": [], "retry": None, "binding": None}
 
     if resume or retrying_previous or pending is not None:
         entry = previous
@@ -4726,20 +4854,36 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                                 timeout=timeout, poll_seconds=poll_seconds, sleep=sleep)
         entry["retry"]["attempt"] = entry.get("attempt")
 
+    def dispatch_source() -> str:
+        """The commit this entry dispatched, or will dispatch: the merge, or the
+        live descendant ``semantic_source_binding`` chose. Entries recorded
+        before the binding existed dispatched the merge."""
+        return str(entry["dispatch"]["inputs"].get("source_sha") or merged_sha)
+
     def dispatch() -> datetime:
-        """``gh workflow run``; once it returned 0 the dispatch is recorded
-        (status ``dispatched``, run_id null) before any discovery, so a failed
-        ``gh run list`` or a discovery timeout never dispatches the gate twice."""
+        """Bind the spec revision to the live frontend
+        (``semantic_source_binding``), then run ``gh workflow run``. Once that
+        returns 0 the dispatch is recorded (status ``dispatched``, run_id null)
+        before any discovery, so a failed ``gh run list`` or a discovery
+        timeout never dispatches the gate twice."""
+        binding = semantic_source_binding(merged_sha, frontend_url, root, timeout=live_timeout,
+                                          poll_seconds=min(SEMANTIC_LIVE_POLL_SECONDS, poll_seconds), sleep=sleep)
+        entry["binding"] = binding
+        entry["dispatch"]["inputs"]["source_sha"] = (
+            binding["live_frontend_commit"] if binding["kind"] == "verified-by-descendant" else merged_sha)
+        print(f"PIPELINE_SEMANTIC binding={binding['kind']} merged_sha={merged_sha} "
+              f"live_frontend={binding['live_frontend_commit']} build_id={binding['build_id']} "
+              f"source_sha={dispatch_source()}", flush=True)
         dispatched_at = datetime.now(timezone.utc).replace(microsecond=0)
         entry["dispatch"]["at"] = dispatched_at.strftime("%Y-%m-%dT%H:%M:%SZ")
         _write_production_receipt(receipt_path, receipt)
         _gh_text(["workflow", "run", SEMANTIC_WORKFLOW, "--ref", SEMANTIC_DISPATCH_REF,
-                  "-f", f"source_sha={merged_sha}", "-f", f"frontend_url={frontend_url}",
+                  "-f", f"source_sha={dispatch_source()}", "-f", f"frontend_url={frontend_url}",
                   "-f", f"backend_url={backend_url}"], root)
         entry["status"] = "dispatched"
         _write_production_receipt(receipt_path, receipt)
         print(f"PIPELINE_SEMANTIC dispatched workflow={SEMANTIC_WORKFLOW} ref={SEMANTIC_DISPATCH_REF} "
-              f"source_sha={merged_sha} at={entry['dispatch']['at']}", flush=True)
+              f"source_sha={dispatch_source()} at={entry['dispatch']['at']}", flush=True)
         return dispatched_at
 
     def discover(dispatched_at: datetime, limit: float) -> tuple[dict | None, int, float]:
@@ -4751,7 +4895,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
             polls += 1
             rows = _gh_json(["run", "list", "--workflow", SEMANTIC_WORKFLOW, "--event", "workflow_dispatch",
                              "--branch", SEMANTIC_DISPATCH_REF, "--limit", "20", "--json", SEMANTIC_RUN_FIELDS], root)
-            row = semantic_select_run(rows, merged_sha, dispatched_at)
+            row = semantic_select_run(rows, dispatch_source(), dispatched_at)
             if row is not None or time.monotonic() - started >= limit:
                 return row, polls, round(time.monotonic() - started, 1)
             sleep(min(10.0, poll_seconds))
@@ -4759,7 +4903,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
     try:
         if resume:
             run_id = str(entry["run_id"])
-            print(f"PIPELINE_SEMANTIC resume run={run_id} status={entry.get('status')} source_sha={merged_sha}: "
+            print(f"PIPELINE_SEMANTIC resume run={run_id} status={entry.get('status')} source_sha={dispatch_source()}: "
                   "watching the recorded run instead of dispatching again", flush=True)
             print(f"SEMANTIC_RUN_ID={run_id}", flush=True)
             retry = entry.get("retry") if isinstance(entry.get("retry"), dict) else None
@@ -4773,7 +4917,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                 rerun_failed(retry_justification)
         elif retrying_previous:
             print(f"PIPELINE_SEMANTIC resume run={entry['run_id']} conclusion={entry.get('conclusion')} "
-                  f"source_sha={merged_sha}: rerunning failed jobs once", flush=True)
+                  f"source_sha={dispatch_source()}: rerunning failed jobs once", flush=True)
             print(f"SEMANTIC_RUN_ID={entry['run_id']}", flush=True)
             rerun_failed(retry_justification or "")
         else:
@@ -4783,7 +4927,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                 age_s = time.time() - pending.timestamp()
                 stale = age_s > SEMANTIC_DISPATCH_RESUME_WINDOW_S
                 print(f"PIPELINE_SEMANTIC resume dispatch at={entry['dispatch']['at']} age={age_s:.0f}s "
-                      f"source_sha={merged_sha}: looking for that dispatch's run instead of dispatching again", flush=True)
+                      f"source_sha={dispatch_source()}: looking for that dispatch's run instead of dispatching again", flush=True)
                 # Within the window the run may still be appearing: keep polling.
                 # Past it, one more query decides: adopt the run, or abandon the dispatch.
                 row, polls, waited_s = discover(pending, 0.0 if stale else start_timeout)
@@ -4805,7 +4949,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                 waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": None,
                               "polls": polls, "waited_s": waited_s, "outcome": "timeout"})
                 raise ProductionGateError(
-                    f"no {SEMANTIC_WORKFLOW} run titled source_sha={merged_sha} created after the dispatch at "
+                    f"no {SEMANTIC_WORKFLOW} run titled source_sha={dispatch_source()} created after the dispatch at "
                     f"{entry['dispatch']['at']} appeared within {start_timeout:.0f}s; the dispatch is unconfirmed: "
                     f"inspect `gh run list --workflow {SEMANTIC_WORKFLOW} --event workflow_dispatch` (an older run "
                     f"is never adopted; a run GitHub stamped more than {DISPATCH_CLOCK_SKEW_S:.0f}s before this "
@@ -4814,7 +4958,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                     "dispatching again)"
                 )
             run_id = str(row.get("databaseId"))
-            entry.update(run_id=run_id, url=row.get("url"), head_sha=row.get("headSha"), source_sha=merged_sha,
+            entry.update(run_id=run_id, url=row.get("url"), head_sha=row.get("headSha"), source_sha=dispatch_source(),
                          display_title=row.get("displayTitle"), created_at=row.get("createdAt"),
                          status=row.get("status"))
             waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": run_id,
@@ -4822,7 +4966,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
             _write_production_receipt(receipt_path, receipt)
             print(f"SEMANTIC_RUN_ID={run_id}", flush=True)
             print(f"PIPELINE_SEMANTIC run={run_id} url={entry['url']} head_sha={entry['head_sha']} "
-                  f"source_sha={merged_sha} created={entry['created_at']}", flush=True)
+                  f"source_sha={dispatch_source()} created={entry['created_at']}", flush=True)
             _semantic_wait_complete(run_id, root=root, waits=waits, entry=entry, min_attempt=1, timeout=timeout,
                                     poll_seconds=poll_seconds, sleep=sleep)
             if entry["conclusion"] != "success" and retry_justification is not None:
@@ -4831,6 +4975,9 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
     except ProductionGateError as error:
         print(f"PIPELINE_SEMANTIC status=blocked exit=1 {error}", flush=True)
         return finish("failed", 1, str(error))
+    except ProductionToolingError as error:
+        print(f"PIPELINE_SEMANTIC status=error exit=2 {error}", flush=True)
+        return finish("error", 2, str(error))
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
         detail = getattr(error, "stderr", "") or ""
         message = f"{type(error).__name__}: {error} {detail.strip() if isinstance(detail, str) else ''}".strip()
@@ -4838,8 +4985,10 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         return finish("error", 2, message)
     jobs = " ".join(f"{job.get('name')}={job.get('conclusion')}" for job in entry["jobs"]) or "no jobs"
     if entry["conclusion"] == "success":
+        binding = (entry.get("binding") or {}).get("kind") or "exact"
         print(f"PIPELINE_SEMANTIC status=passed exit=0 run={entry['run_id']} attempt={entry['attempt']} "
-              f"source_sha={merged_sha} head_sha={entry['head_sha']} url={entry['url']} jobs: {jobs}", flush=True)
+              f"source_sha={dispatch_source()} merged_sha={merged_sha} binding={binding} head_sha={entry['head_sha']} "
+              f"url={entry['url']} jobs: {jobs}", flush=True)
         return finish("passed", 0)
     retry_state = "used" if entry.get("retry") else "available (--retry-failed-once \"<justification>\")"
     print(f"PIPELINE_SEMANTIC status=failed exit=1 run={entry['run_id']} attempt={entry['attempt']} "
@@ -4949,6 +5098,9 @@ def main(argv: list[str] | None = None) -> int:
     semantic_parser.add_argument("--start-timeout", type=float, default=DEFAULT_SEMANTIC_START_TIMEOUT,
                                  help="seconds to wait for the dispatched run to appear")
     semantic_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_SEMANTIC_POLL_SECONDS)
+    semantic_parser.add_argument("--live-timeout", type=float, default=DEFAULT_SEMANTIC_LIVE_TIMEOUT,
+                                 help="seconds to wait while the live frontend still serves an ancestor build whose "
+                                      "front-end/ differs from the merge's")
     render_parser = sub.add_parser(
         "production-render",
         help="deploy.md Step 13a step 1: wait for Render to serve the merged backend (exact-SHA deploy live, or the "
@@ -5010,7 +5162,7 @@ def main(argv: list[str] | None = None) -> int:
         return production_semantic(args.merged_sha, args.state_dir, frontend_url=args.frontend_url,
                                    backend_url=args.backend_url, retry_justification=args.retry_failed_once,
                                    timeout=args.timeout, start_timeout=args.start_timeout,
-                                   poll_seconds=args.poll_seconds)
+                                   poll_seconds=args.poll_seconds, live_timeout=args.live_timeout)
     return wait(args.state_dir, args.timeout, args.stall_seconds, args.since)
 
 
