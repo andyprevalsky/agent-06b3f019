@@ -81,7 +81,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.model_pricing import get_anthropic_pricing, get_default_pricing
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
-    from helpers.sms_activities import get_agent_source, notify_sms_event_activity
+    from helpers.sms_activities import MESSAGING_AGENT_SOURCES, get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import (
         GENERATION_HANDOFF_SIGNAL,
         note_generation_handoff,
@@ -5615,15 +5615,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             except Exception as e:
                 workflow.logger.error(f"Failed to update status to COST_LIMIT_REACHED: {e}")
 
-            # Send SMS notification for cost_limit (root + SMS-source only)
-            if self.agent_source == "SMS":
+            # Send SMS notification for cost_limit (root + SMS/WhatsApp-source only)
+            if self.agent_source in MESSAGING_AGENT_SOURCES:
                 try:
                     notification_args = [
                         self.user_id,
                         "cost_limit",
                         self.agent_id,
                         {
-                            "tree_cost_cents": int(self.subtree_cost_cents),
+                            # The cost that tripped the limit, persisted resume spend included.
+                            "tree_cost_cents": int(effective_cost),
                             "price_limit_cents": self.price_limit_cents,
                         },
                     ]
