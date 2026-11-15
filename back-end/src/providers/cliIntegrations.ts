@@ -19,6 +19,12 @@ import {
 import { buildNativeCliTemplate } from './nativeCliTemplateBuilder';
 import { initializeCliCredentials } from './cliNativeCredentials';
 import { withCliPublicationLease, type CliPublicationAuth } from './cliPublicationLease';
+import {
+  SHARED_NATIVE_CLI_UNAVAILABLE,
+  scrubCliResult,
+  sharedCliSecrets,
+  usableCliIntegration,
+} from './cliTeamShares';
 
 const log = createLogger('CliIntegrations');
 
@@ -466,15 +472,23 @@ async function publishClaimedCliIntegration(
   return { integration: cliView(updated), verification: result };
 }
 
-/** Request receipts survive API retries; uncertain calls stay uncertain rather than execute twice. */
+/**
+ * Request receipts survive API retries; uncertain calls stay uncertain rather than execute twice.
+ * A teammate's shared CLI runs in its OWNER's template sandbox under the owner's lease, and its
+ * output (and receipt) is scrubbed of the owner's credential values before it reaches the caller.
+ */
 export async function runCliIntegration(
   caller: CliCaller,
   id: string,
   args: string[],
-  requestId: string
+  requestId: string,
+  execute: typeof executeTemplateCli = executeTemplateCli
 ): Promise<CliResult> {
-  const row = await ownedIntegration(caller.userId, id);
+  const { row, shared } = await usableCliIntegration(caller.userId, id);
   const config = cliConfig(row.config)!;
+  // Native logins are leased only to their owner's own sessions; never to a teammate.
+  if (shared !== null && config.native_template)
+    throw new CliIntegrationError(409, SHARED_NATIVE_CLI_UNAVAILABLE);
   if (config.native_template)
     throw new CliIntegrationError(
       409,
@@ -497,13 +511,15 @@ export async function runCliIntegration(
     .digest('hex');
   const previous = await prisma.message.findUnique({ where: { id: receiptId } });
   if (previous !== null) return readReceipt(previous.metadata, fingerprint);
+  // Opened before anything runs: an unreadable bundle must never return raw output.
+  const secrets = shared === null ? [] : await sharedCliSecrets(row.userId, id);
   // Lease before claiming: a busy template is retryable because nothing ran.
   const lease = `cli:${receiptId}`;
   const now = new Date();
   const acquired = await prisma.codeSession.updateMany({
     where: {
       id: config.code_session_id,
-      userId: caller.userId,
+      userId: row.userId,
       state: { not: 'RETIRED' },
       sandboxKind: 'e2b',
       sandboxId: { not: null },
@@ -541,13 +557,23 @@ export async function runCliIntegration(
     }
     let result: CliResult;
     try {
-      result = await executeTemplateCli({
+      result = await execute({
         sandboxId: session.sandboxId,
         command: config.command,
         args,
         conversation: caller.taskId,
         pauseAfter: true,
       });
+      if (shared !== null) {
+        result = scrubCliResult(result, secrets);
+        log.info('Shared CLI run in owner template', {
+          integrationId: id,
+          ownerUserId: row.userId,
+          userId: caller.userId,
+          agentId: caller.agentId,
+          exitCode: result.exit_code,
+        });
+      }
     } catch {
       await prisma.message.update({
         where: { id: receiptId },

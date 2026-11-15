@@ -23,6 +23,8 @@ export interface TeamIntegrationShare {
   provider: string;
   accountId: string;
   accountEmail: string | null;
+  /** Display label (inbox, institution, repo, compute account, CLI name); absent on older backends. */
+  label?: string | null;
 }
 export interface SharedTeamProject {
   id: string;
@@ -52,12 +54,36 @@ export interface TeamContact {
   email: string;
   onRose?: boolean;
 }
+/**
+ * Integrations an account row can share with a team. iPhone, browser cookies, the
+ * Passwords rows and Pebble Index 01 are never shareable, so they are not listed.
+ */
+export type ShareableProvider =
+  | 'gmail'
+  | 'imessage'
+  | 'whatsapp'
+  | 'linkedin'
+  | 'granola'
+  | 'fireflies'
+  | 'plaid'
+  | 'github_repo'
+  | 'claude_code'
+  | 'gpt_code'
+  | 'cli';
+/**
+ * One exact shareable account. `accountId`: inbox email (gmail), '' (one-row providers:
+ * imessage, whatsapp, linkedin, granola/fireflies + `accountEmail`), PlaidItem.id (plaid),
+ * `gh:owner/repo` (github_repo), compute account id (claude_code / gpt_code), CLI request id (cli).
+ */
 export interface ShareableIntegration {
   integrationId: string;
+  /** Selector for PUT / DELETE /teams/:teamId/integrations/:id. */
   id: string;
   provider: string;
   accountId: string;
   accountEmail: string | null;
+  /** Inbox, institution, repo, compute account email or CLI name; null when the provider has none. */
+  label: string | null;
   name: string;
   status: string;
   teamIds: string[];
@@ -145,8 +171,38 @@ export function isAccountShared(team: Team, account: ShareableIntegration): bool
       share.integrationId === account.integrationId && share.accountId === account.accountId,
   );
 }
-export const integrationLabel = (account: ShareableIntegration) =>
-  `${account.provider.toLowerCase() === 'imessage' ? 'iMessage' : account.provider} · ${account.accountEmail || account.accountId || account.name}`;
+const PROVIDER_NAMES = new Map<string, string>([
+  ['gmail', 'Gmail'],
+  ['imessage', 'iMessage'],
+  ['whatsapp', 'WhatsApp'],
+  ['linkedin', 'LinkedIn'],
+  ['granola', 'Granola'],
+  ['fireflies', 'Fireflies'],
+  ['plaid', 'Plaid'],
+  ['github_repo', 'GitHub repo'],
+  ['claude_code', 'Claude Subscription'],
+  ['gpt_code', 'ChatGPT Subscription'],
+  ['cli', 'CLI'],
+]);
+/** The integration's name as its Integrations row shows it. */
+export const providerDisplayName = (provider: string) =>
+  PROVIDER_NAMES.get(provider.toLowerCase()) ?? provider;
+type Labeled = Pick<TeamIntegrationShare, 'provider' | 'accountEmail' | 'label'>;
+/** The account's own name: its label, else its email, else the integration's name. */
+export const accountLabel = (account: Labeled) =>
+  account.label?.trim() || account.accountEmail || providerDisplayName(account.provider);
+/** "Gmail · work@example.test", "Plaid · Chase", or just "WhatsApp" for a one-account row. */
+export function integrationLabel(account: Labeled): string {
+  const provider = providerDisplayName(account.provider);
+  const label = accountLabel(account);
+  return label === provider ? provider : `${provider} · ${label}`;
+}
+/** Compute accounts (`claude` / `codex`) are shared as their Claude Code / Codex integration. */
+export function computeShareProvider(provider: string): ShareableProvider | undefined {
+  if (provider === 'claude') return 'claude_code';
+  if (provider === 'codex') return 'gpt_code';
+  return undefined;
+}
 
 export function inviteDeliveryLabel(status: InviteDeliveryStatus | undefined): string {
   switch (status) {

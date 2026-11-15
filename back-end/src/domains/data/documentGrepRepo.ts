@@ -9,9 +9,11 @@ import { GOOGLE_WORKSPACE_SOURCES } from '../../services/integrations/googleWork
 import { GRANOLA_PROVIDER, GRANOLA_SOURCES } from '../../services/integrations/granolaDocuments';
 import { meetingSources } from '../../services/integrations/meetingDocuments';
 import { pageSize, regexPredicate } from './sharedGrepRepo';
+import { documentAccessPredicate, type TableAccess } from './tableAccessRepo';
 
 export interface DocumentGrepRow {
   id: string;
+  userId: string;
   source: string;
   externalId: string;
   title: string;
@@ -110,8 +112,13 @@ function documentFilters(params: {
   return Prisma.sql`AND ${Prisma.join(parts, ' AND ')}`;
 }
 
+/** Own rows plus live meeting-notes shares; nothing when the scope reads no documents. */
+function documentScope(access: TableAccess): Prisma.Sql {
+  return documentAccessPredicate(access) ?? Prisma.sql`FALSE`;
+}
+
 export async function countDocumentGrepRows(params: {
-  userId: string;
+  access: TableAccess;
   pattern: string;
   caseInsensitive: boolean;
   documentSource?: string;
@@ -133,7 +140,7 @@ export async function countDocumentGrepRows(params: {
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*)::bigint AS count
     FROM "UserDataDocument" d
-    WHERE d."userId" = ${params.userId}
+    WHERE ${documentScope(params.access)}
       AND ${predicate}
       ${filters}
   `;
@@ -141,7 +148,7 @@ export async function countDocumentGrepRows(params: {
 }
 
 export async function searchDocumentGrepRows(params: {
-  userId: string;
+  access: TableAccess;
   pattern: string;
   caseInsensitive: boolean;
   limit: number;
@@ -165,6 +172,7 @@ export async function searchDocumentGrepRows(params: {
   return prisma.$queryRaw<DocumentGrepRow[]>`
     SELECT
       d.id,
+      d."userId",
       d.source,
       d."externalId",
       d.title,
@@ -176,7 +184,7 @@ export async function searchDocumentGrepRows(params: {
       d."deletedAt",
       d."updatedAt"
     FROM "UserDataDocument" d
-    WHERE d."userId" = ${params.userId}
+    WHERE ${documentScope(params.access)}
       AND ${predicate}
       ${filters}
     ORDER BY COALESCE(d."sourceUpdatedAt", d."updatedAt") DESC, d.id DESC

@@ -55,6 +55,7 @@ async def test_root_context_drops_revoked_map_on_cache_hit():
     assert "SECRET" not in first
     assert (
         "grep and list_agents cover this shared data; filter by owner_user_id, team_id, account_id or project_id. "
+        "Shared bank transactions need an explicit owner_user_id or team_id. "
         "Use exact ids; never guess identities."
     ) in first
     assert "scope" not in first and "shared_project_agents" not in first
@@ -138,6 +139,60 @@ async def test_shared_grep_preserves_filters_and_does_not_gate_personal_connecto
     assert payload["team_id"] == "team-1" and payload["owner_user_id"] == "owner-2"
 
 
+async def test_shared_integration_sources_do_not_gate_personal_connectors():
+    """Shared WhatsApp, LinkedIn, meeting notes and bank logins reach the backend unprobed."""
+    from domains.grep.repo import grep_activity
+    from domains.grep.service import execute_grep
+
+    cases = [
+        ({"sources": ["whatsapp"], "account_id": "whatsapp"}, "whatsapp"),
+        ({"sources": ["messages"], "account_id": "linkedin"}, "linkedin"),
+        ({"sources": ["documents"], "document_source": "granola", "account_id": "granola"}, "granola"),
+        ({"sources": ["documents"], "document_source": "fireflies", "account_id": "fireflies"}, "fireflies"),
+        ({"sources": ["transactions"], "account_id": "item-chase"}, "item-chase"),
+    ]
+    for extra, account in cases:
+        calls = []
+
+        async def execute(activity, *args, **kwargs):
+            calls.append((activity, kwargs["args"]))
+            return {"matches": [], "total_matches": 0, "truncated": False}
+
+        with patch(
+            "domains.grep.service.source_status_activity",
+            side_effect=AssertionError(f"shared {account} must not gate the reader's own connector"),
+        ):
+            await execute_grep(
+                execute_activity=execute,
+                tool_call={"tool": "grep", "pattern": "launch", "owner_user_id": "owner-2", **extra},
+                tool_call_id="call",
+                agent_id="agent",
+                user_id="reader",
+            )
+        payload = next(args[0] for activity, args in calls if activity is grep_activity)
+        assert payload["owner_user_id"] == "owner-2" and payload["account_id"] == account
+
+
+async def test_team_map_keeps_account_labels_and_drops_secrets():
+    from helpers.team_context import format_team_context
+
+    text = format_team_context(
+        {
+            "you": {"userId": "reader"},
+            "teams": [{"id": "team-1", "name": "Atlas", "role": "MEMBER"}],
+            "accounts": [
+                {"teamId": "team-1", "ownerUserId": "owner-2", "provider": "plaid", "accountId": "item-chase",
+                 "label": "Chase", "accessToken": "SECRET"},
+                {"teamId": "team-1", "ownerUserId": "owner-2", "provider": "github_repo",
+                 "accountId": "gh:acme/app", "label": "gh:acme/app"},
+            ],
+            "projects": [],
+        }
+    )
+    assert '"label": "Chase"' in text and '"accountId": "item-chase"' in text and "gh:acme/app" in text
+    assert "SECRET" not in text and "accessToken" not in text
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, fn in [
@@ -145,6 +200,8 @@ async def run_all_tests():
         ("explore_revocation", test_explore_inventory_refreshes_revoked_grant),
         ("shared_filter_transport", test_shared_grep_preserves_filters_and_does_not_gate_personal_connector),
         ("owner_self_gates_own_connector", test_owner_self_grep_still_gates_own_connector),
+        ("shared_integration_sources_ungated", test_shared_integration_sources_do_not_gate_personal_connectors),
+        ("team_map_labels_no_secrets", test_team_map_keeps_account_labels_and_drops_secrets),
     ]:
         await result.record_async(name, fn)
         teardown_mock()

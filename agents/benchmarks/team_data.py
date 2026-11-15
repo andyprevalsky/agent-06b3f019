@@ -5,14 +5,17 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
-TASK_MARKERS = {
-    'team-daily-investor-email-count': 'ROSE-TEAM-INVESTORS',
-    'team-daily-access-boundaries': 'ROSE-TEAM-BOUNDARIES',
+# Each task's (record marker, db_fixtures label). team_data_fixture.ts picks the seeder by marker:
+# ROSE-TEAM-SHARED seeds team-integrations.fixture.ts, every other marker data-teams.fixture.ts.
+TASK_FIXTURES = {
+    'team-daily-investor-email-count': ('ROSE-TEAM-INVESTORS', 'team_data_v1'),
+    'team-daily-access-boundaries': ('ROSE-TEAM-BOUNDARIES', 'team_data_v1'),
+    'team-daily-shared-integrations': ('ROSE-TEAM-SHARED', 'team_integrations_v1'),
 }
 
 
 def apply_team_fixture(task_name: str, base_url: str, user_id: str, database_url: str, *, owned_cloud: bool = False) -> dict:
-    if task_name not in TASK_MARKERS:
+    if task_name not in TASK_FIXTURES:
         raise ValueError('Unknown team data fixture')
     target = urlsplit(database_url)
     if owned_cloud:
@@ -24,7 +27,7 @@ def apply_team_fixture(task_name: str, base_url: str, user_id: str, database_url
         raise ValueError('Team fixtures require an isolated local stack and database')
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
-        ['npx', 'tsx', 'agents/benchmarks/team_data_fixture.ts', user_id, TASK_MARKERS[task_name]],
+        ['npx', 'tsx', 'agents/benchmarks/team_data_fixture.ts', user_id, TASK_FIXTURES[task_name][0]],
         cwd=root, env={**os.environ, 'DATABASE_URL': database_url, 'TEAM_BENCH_FIXTURE': '1', 'TEAM_BENCH_OWNED_CLOUD': '1' if owned_cloud else '0'},
         text=True, capture_output=True, timeout=60,
     )

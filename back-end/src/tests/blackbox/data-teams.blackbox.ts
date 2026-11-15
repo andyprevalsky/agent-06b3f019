@@ -233,7 +233,12 @@ async function run() {
       0,
       'no transitive sharing'
     );
-    for (const params of [{ project_id: ' ' }, { offset: '-1' }, { limit: '500' }]) {
+    const badParams: Array<Record<string, string>> = [
+      { project_id: ' ' },
+      { offset: '-1' },
+      { limit: '500' },
+    ];
+    for (const params of badParams) {
       const bad = await fetch(
         `${BASE_URL}/api/data/project-agents?${new URLSearchParams(params).toString()}`,
         { headers: apiHeaders(f.ids.reader) }
@@ -337,6 +342,7 @@ async function run() {
           provider: 'gmail',
           accountId: f.emails.teammate,
           accountEmail: f.emails.teammate,
+          label: f.emails.teammate,
         },
       ],
     };

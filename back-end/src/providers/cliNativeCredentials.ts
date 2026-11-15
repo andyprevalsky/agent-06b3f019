@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
 import { encryptProjectSecret, decryptProjectSecret } from './projects/secrets';
 import { CliIntegrationError, type CliCaller } from './cliIntegrations';
+import { isSharedCliFor, SHARED_CLI_CREDENTIALS_REFUSED } from './cliTeamShares';
 
 export interface CliCredentialFile {
   path: string;
@@ -168,13 +169,23 @@ function declaredPaths(config: Prisma.JsonValue): string[] {
     throw new CliIntegrationError(409, 'Native CLI credentials are not configured');
   return config.credential_files as string[];
 }
+/** Only the owner's own sessions lease; a teammate's shared CLI is refused explicitly. */
+async function leasableCli(userId: string, integrationId: string) {
+  try {
+    return await ownedCli(userId, integrationId);
+  } catch (error) {
+    if (error instanceof CliIntegrationError && (await isSharedCliFor(userId, integrationId)))
+      throw new CliIntegrationError(403, SHARED_CLI_CREDENTIALS_REFUSED);
+    throw error;
+  }
+}
 async function authorized(
   caller: CliCaller,
   integrationId: string
 ): Promise<{ paths: string[]; command: string }> {
   if (caller.taskId === null) throw new CliIntegrationError(403, 'A live code session is required');
   const [connection, task, agent] = await Promise.all([
-    ownedCli(caller.userId, integrationId),
+    leasableCli(caller.userId, integrationId),
     prisma.claudeCodeSession.findUnique({
       where: { id: caller.taskId },
       select: { agentId: true, status: true },
@@ -230,6 +241,25 @@ function assertLease(state: CredentialState, caller: CliCaller, token: string): 
     throw new CliIntegrationError(409, 'CLI credential lease does not belong to this session');
   if (state.lease.expiresAt <= Date.now())
     throw new CliIntegrationError(409, 'CLI credential lease expired; reconnect this CLI');
+}
+
+/**
+ * The decoded text of every file in a connection's stored credential bundle, so
+ * a shared run can scrub them from its output; null when there is no bundle
+ * (its secrets are unknown). Server-side only: never returned to any caller.
+ */
+export async function cliCredentialFileValues(
+  ownerUserId: string,
+  integrationId: string
+): Promise<string[] | null> {
+  const row = await prisma.integration.findUnique({
+    where: credentialsWhere(ownerUserId, integrationId),
+    select: { config: true },
+  });
+  if (!row) return null;
+  return opened(credentialState(row.config)).flatMap((file) =>
+    file.data === null ? [] : [Buffer.from(file.data, 'base64').toString('utf8')]
+  );
 }
 
 /** Setup may refresh its bundle until Connected; published credentials change only on release. */
