@@ -901,6 +901,8 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser('merge', help='prove the merge is allowed, then merge and record the merge commit')
     sub.add_parser('production', help='verify every applicable production lane (scripts/deploy_prod.py)',
                    add_help=False)
+    sub.add_parser('scorecard', help='render the deploy-summary-v2 card from a JSON spec (scripts/deploy_scorecard.py)',
+                   add_help=False)
     checked = sub.add_parser('deletion-check', help='prove nothing needed lives only on this devbox')
     checked.add_argument('--manifest', type=Path, help='JSON {path-glob: disposition} for preserved records')
     checked.add_argument('--receipt', type=Path, help='receipt path (default: docs/handoffs/pr-<N>-closeout/ after merge)')
@@ -917,8 +919,9 @@ COMMANDS = {'sync': cmd_sync, 'collect': cmd_collect, 'fix': cmd_fix, 'freeze': 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in {'gates', 'production'}:
-        return delegate({'gates': 'deploy_gates', 'production': 'deploy_prod'}[argv[0]], argv[1:])
+    if argv and argv[0] in {'gates', 'production', 'scorecard'}:
+        return delegate({'gates': 'deploy_gates', 'production': 'deploy_prod', 'scorecard': 'deploy_scorecard'}[argv[0]],
+                        argv[1:])
     top = parser()
     args = top.parse_args(argv)
     if args.command == 'approval' and args.action == 'decide' and not (args.decision and args.evidence):

@@ -1082,5 +1082,75 @@ class PostFindingsCLIProposalTest(unittest.TestCase):
         self.assertEqual(calls[2], ['gh', 'pr', 'comment', '1708', '--body', '@coderabbitai review'])
 
 
+
+class Scorecard(unittest.TestCase):
+    """`scripts/deploy scorecard` renders the fixed deploy-summary-v2 template from recorded facts."""
+
+    def spec(self, **over):
+        spec = {
+            'title': 'PR #9 <fix>', 'shipped': True,
+            'start': '2026-11-15T04:00:00Z', 'end': '2026-11-15T06:00:00Z',
+            'deployed': ['Merged `abc123`; see [run 42](https://github.com/o/r/actions/runs/42).', 'x < y & "z"'],
+            'note': 'Review skipped (usage cap).',
+            'delegated': [{'text': 'FLAKY `t`', 'url': 'https://boxes.dev/thread/thr_1'}],
+            'providers': [], 'followups': ['Unreviewed cycle'],
+            'segments': [
+                {'row': 'Gates', 'kind': 'automation', 'start': '2026-11-15T04:00:00Z', 'end': '2026-11-15T05:00:00Z', 'label': 'gates'},
+                {'row': 'Waiting', 'kind': 'wait', 'start': '2026-11-15T04:30:00Z', 'end': '2026-11-15T05:30:00Z', 'label': 'quota', 'reason': 'credits'},
+                {'row': 'Waiting', 'kind': 'unrecorded', 'start': '2026-11-15T05:30:00Z', 'end': '2026-11-15T06:30:00Z', 'label': 'asleep'},
+            ],
+        }
+        spec.update(over)
+        return spec
+
+    def test_renders_the_fixed_template_with_every_placeholder_replaced(self):
+        import deploy_scorecard as sc
+        html = sc.render(self.spec())
+        self.assertNotIn('{{', html)
+        self.assertIn('deploy-summary-v2', html)
+        self.assertIn('<h1 class="green">✅ SHIPPED — PR #9 &lt;fix&gt;</h1>', html)
+        self.assertIn('<code>abc123</code>', html)
+        self.assertIn('<a href="https://github.com/o/r/actions/runs/42">run 42</a>', html)
+        self.assertIn('x &lt; y &amp; &quot;z&quot;', html)
+        self.assertIn('repair thread', html)
+        self.assertIn('class="box followup"', html)
+        self.assertIn('<p>None.</p>', html)
+        self.assertIn('Elapsed 2h0m', html)
+
+    def test_totals_union_overlapping_intervals_and_clamp_to_the_deploy_clock(self):
+        import deploy_scorecard as sc
+        html = sc.render(self.spec())
+        self.assertIn('Work + automation 1h0m', html)
+        self.assertIn('Waiting 1h0m', html)
+        self.assertIn('Wait — reason unrecorded 30m', html)
+        self.assertIn('class="fill unrecorded"', html)
+
+    def test_not_shipped_is_red_and_untrusted_links_are_not_rendered(self):
+        import deploy_scorecard as sc
+        html = sc.render(self.spec(shipped=False, deployed=['[x](javascript:alert(1))']))
+        self.assertIn('NOT SHIPPED', html)
+        self.assertNotIn('href="javascript', html)
+
+    def test_refuses_invalid_specs(self):
+        import deploy_scorecard as sc
+        bad = [
+            self.spec(end='2026-11-15T03:00:00Z'),
+            self.spec(segments=[{'row': 'G', 'kind': 'automation', 'start': '2026-11-15T05:00:00Z',
+                                 'end': '2026-11-15T04:00:00Z', 'label': 'x'}]),
+            self.spec(segments=[{'row': 'G', 'kind': 'fixes', 'start': '2026-11-15T04:00:00Z',
+                                 'end': '2026-11-15T05:00:00Z', 'label': 'x'}]),
+            {k: v for k, v in self.spec().items() if k != 'deployed'},
+        ]
+        for spec in bad:
+            with self.assertRaises(ValueError):
+                sc.render(spec)
+
+    def test_cli_writes_the_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec, out = Path(tmp) / 'spec.json', Path(tmp) / 'card.html'
+            spec.write_text(json.dumps(self.spec()))
+            self.assertEqual(d.main(['scorecard', '--spec', str(spec), '--output', str(out)]), 0)
+            self.assertIn('TIME PER STAGE', out.read_text())
+
 if __name__ == '__main__':
     unittest.main()
