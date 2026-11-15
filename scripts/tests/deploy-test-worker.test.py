@@ -325,6 +325,20 @@ class Worker(unittest.TestCase):
             self.assertTrue(result['complete'])
             self.assertEqual(result['evidence']['a']['log'], result['evidence']['c']['log'])
             self.assertEqual('a', result['evidence']['c']['shared_sweep_run_by'])
+        # Case-specific FLAKY rows stay with the case whose run recorded them (CodeRabbit, PR #2124).
+        sys.path.insert(0, str(Path(worker.__file__).resolve().parent))
+        import deploy_gate_progress as progress
+        flaky = sweep(0)
+        flaky['command'] = [sys.executable, '-c',
+                            ("import sys; sys.path.insert(0,%r); import deploy_gate_progress as p; "
+                             "p.report('u1','FLAKY',detail='rerun passed')") % str(Path(worker.__file__).resolve().parent)]
+        self.recipe['cases'] = {'a': dict(flaky), 'c': dict(flaky)}
+        with patch.dict(os.environ, {progress.ENV: str(self.root / '.context' / 'flaky-progress.jsonl')}):
+            result = worker.execute(dict(self.request, token='sweep-token-flaky', checks=['a', 'c']), self.root)
+        self.assertEqual({'a': 'PASS', 'c': 'PASS'}, result['cases'])
+        self.assertEqual(['u1'], [r['unit'] for r in result['evidence']['a']['flaky']])
+        self.assertNotIn('flaky', result['evidence']['c'])
+        self.assertEqual('a', result['evidence']['c']['shared_sweep_run_by'])
         # A case naming the same sweep with a different spec is not the same run.
         counter.unlink()
         other = sweep(0)

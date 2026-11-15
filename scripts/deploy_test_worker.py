@@ -126,15 +126,16 @@ def execute(request: dict, root: Path) -> dict:
                 if not setup_ok or CANCEL.is_set():
                     rows[name] = {'status': 'UNVERIFIED', 'reason': 'setup failed or worker interrupted'}
                 elif key in swept:
-                    first = swept[key]
-                    rows[name] = {**rows[first], 'shared_sweep_run_by': first}
+                    # Share only the execution; quarantined/FLAKY rows stay with the case that recorded them.
+                    first, execution = swept[key]
+                    rows[name] = {**execution, **case_outcomes(name, folder), 'shared_sweep_run_by': first}
                     report_case(name, rows[name], folder)
                 else:
                     rows[name] = run_step(name, spec, root, folder)
+                    if key is not None:
+                        swept[key] = (name, dict(rows[name]))
                     rows[name].update(case_outcomes(name, folder))
                     report_case(name, rows[name], folder)
-                    if key is not None:
-                        swept[key] = name
         finally:
             cleanup = recipe.get('cleanup')
             if cleanup:
