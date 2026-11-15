@@ -8,8 +8,8 @@ unlimited fallback) the cap is
     floor(limit * (1 - production_reserve_fraction) / per_bench_peak)
 
 and the overall cap is the minimum across enforced providers that apply to the
-fleet's browser provider. A row with `browser_provider` (Tilion: one 20-browser
-pilot account) binds only fleets on that provider; every other row binds all
+fleet's browser provider. A row with `browser_provider` (Tilion: one shared
+250-browser account) binds only fleets on that provider; every other row binds all
 fleets. The browser provider is `--browser-provider`, else
 CLOUDBENCH_BROWSER_PROVIDER, else BROWSER_PROVIDER in back-end/.env (the bench
 env contract later requires it to equal production). When none is a known

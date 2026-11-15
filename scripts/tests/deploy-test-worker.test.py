@@ -3802,7 +3802,7 @@ class FakeTilionListing:
 
 
 class CloudSharedProviderHeadroom(unittest.TestCase):
-    """Two deploys and production share ONE 20-browser Tilion account: size smoke from its live usage."""
+    """Two deploys and production share ONE 250-browser Tilion account: size smoke from its live usage."""
     KEY='fixture-tilion-key-not-real'
 
     def setUp(self):
@@ -3830,35 +3830,35 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
                 self.assertNotIn(self.KEY,stderr.getvalue())
 
     def test_live_account_sessions_narrow_the_smoke_width(self):
-        listing=FakeTilionListing(5)  # production + another deploy hold five browsers right now
+        listing=FakeTilionListing(190)  # production + another deploy hold 190 browsers right now
         width,output=self.width(listing)
-        self.assertEqual(11,width)  # floor(20 * 0.8 - 5), not the solo registry cap 16
+        self.assertEqual(10,width)  # floor(250 * 0.8 - 190), not the 17 requested or the registry cap 70
         url,method,headers,timeout=listing.requests[0]
         self.assertEqual(('https://tilion.fixture.invalid/v1/sessions','GET'),(url,method))
         self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
         self.assertLessEqual(timeout,15)
-        self.assertIn('5 live account-wide of 20 (20% reserved for production)',output)
+        self.assertIn('190 live account-wide of 250 (20% reserved for production)',output)
         self.assertEqual([],self.sleeps)
 
     def test_idle_account_still_honours_the_registry_cap_and_request(self):
-        self.assertEqual(16,self.width(FakeTilionListing(0))[0])
+        self.assertEqual(70,self.width(FakeTilionListing(0),count=80)[0])  # Parallel's registry cap binds
         self.assertEqual(3,self.width(FakeTilionListing(0),count=3)[0])
 
     def test_second_deploy_waits_while_the_first_holds_the_pool_then_starts(self):
-        # Deploy A's 16 smoke browsers are live; production keeps its four-browser reserve.
-        listing=FakeTilionListing(16,17,9)
+        # Deploys and production hold all 200 usable browsers; production keeps its 50-browser reserve.
+        listing=FakeTilionListing(200,201,193)
         width,output=self.width(listing)
         self.assertEqual(7,width)
         self.assertEqual(3,len(listing.requests))
         self.assertEqual([30.0,30.0],self.sleeps)
         self.assertEqual(2,output.count('⏳ waiting for shared provider headroom'))
-        self.assertIn('16 live of 20, 20% reserved for production',output)
+        self.assertIn('200 live of 250, 20% reserved for production',output)
 
     def test_full_account_until_the_deadline_refuses_before_any_launch(self):
         launched=[]
         with patch.object(self.cloud,'run_command',side_effect=lambda *a,**k:launched.append(a)):
             with self.assertRaises(ValueError) as refused:
-                self.width(FakeTilionListing(16))
+                self.width(FakeTilionListing(200))
         self.assertIn('cannot admit one smoke task by the deadline',str(refused.exception))
         self.assertEqual([],launched)
         self.assertAlmostEqual(900.0,sum(self.sleeps))
@@ -3880,8 +3880,8 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         capacity=runpy.run_path(str(ROOT/'scripts/cloudbench-provider-capacity.py'))
         registry=capacity['for_browser_provider'](capacity['load_registry'](),'tilion')
         stderr=io.StringIO()
-        width=headroom.admitted_width(17,registry,probes=probes,deadline=0,stream=stderr)
-        self.assertEqual(16,width)
+        width=headroom.admitted_width(80,registry,probes=probes,deadline=0,stream=stderr)
+        self.assertEqual(70,width)
         self.assertIn('live account usage UNMEASURED',stderr.getvalue())
 
     def test_plain_http_base_url_never_receives_the_key(self):

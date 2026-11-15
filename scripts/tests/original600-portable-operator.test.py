@@ -119,6 +119,10 @@ STOP: do not retry, split, or work around this limit. Halt and ask the user to e
   1. increase these provider rate limits (then record the new limits in scripts/cloudbench-provider-limits.json), or
   2. rerun with a lower concurrency (70 or fewer concurrent benches).
 """
+TILION_PROVIDER_LINE = ('  - Tilion browser sessions: 250 concurrent browsers, pilot_roselabs (TILION_API_KEY) → max 200 '
+                        'concurrent benches (peak 1 sessions per bench, assumed, not yet measured on Tilion)')
+# A Tilion fleet lists its own scoped row after the unscoped rows it shares.
+PROVIDER_REFUSAL_600_TILION = PROVIDER_REFUSAL_600.replace('\nSTOP:', f'\n{TILION_PROVIDER_LINE}\nSTOP:', 1)
 
 
 def wide_provider_limits():
@@ -2304,21 +2308,21 @@ class Portable(unittest.TestCase):
                 self.assertEqual(json.loads(result.stdout), dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=fx.args[3],
                                                                  copies=600, max_concurrent_benches=70, provider_calls=0))
                 self.assertNotIn('CHECKED_NOT_LAUNCHED', result.stdout)
-            # A Tilion backend env binds the 20-browser pilot (16 after the production reserve).
+            # A Tilion backend env also binds the 250-browser Tilion account (200 after the
+            # production reserve); the unscoped Parallel row still caps the fleet at 70.
             (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=tilion\nGITHUB_TOKEN=fixture_github\n')
             tilion = subprocess.run(fx.args, cwd='/', env=fx.env, capture_output=True, text=True, timeout=10)
             self.assertEqual(tilion.returncode, 78, tilion.stderr)
-            self.assertIn('maximum 16.', tilion.stderr)
-            self.assertIn('  - Tilion browser sessions: 20 concurrent browsers, pilot plan', tilion.stderr)
-            self.assertEqual(json.loads(tilion.stdout)['max_concurrent_benches'], 16)
+            self.assertEqual(tilion.stderr, PROVIDER_REFUSAL_600_TILION)
+            self.assertEqual(json.loads(tilion.stdout)['max_concurrent_benches'], 70)
             # No BROWSER_PROVIDER in the selected env binds every row (Tilion is the code
-            # default); an unrelated ambient provider must not drop the Tilion pilot.
+            # default); an unrelated ambient provider must not drop the Tilion row.
             (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nGITHUB_TOKEN=fixture_github\n')
             unset = subprocess.run(fx.args, cwd='/', env={**fx.env, 'CLOUDBENCH_BROWSER_PROVIDER': 'kernel'},
                                    capture_output=True, text=True, timeout=10)
             self.assertEqual(unset.returncode, 78, unset.stderr)
-            self.assertIn('maximum 16.', unset.stderr)
-            self.assertEqual(json.loads(unset.stdout)['max_concurrent_benches'], 16)
+            self.assertEqual(unset.stderr, PROVIDER_REFUSAL_600_TILION)
+            self.assertEqual(json.loads(unset.stdout)['max_concurrent_benches'], 70)
             (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=kernel\nGITHUB_TOKEN=fixture_github\n')
             # No Fly API read, no flyctl invocation (not even version), no GitHub read, no state.
             self.assertEqual(requests, [])
@@ -3720,7 +3724,7 @@ class RunBenchShardedRouting(unittest.TestCase):
             git_env = hermetic_git_env()
             (root/'back-end').mkdir()
             for env_file in ('agents/.env', 'back-end/.env'):  # untracked, as in a real checkout
-                # A Kernel fleet: an unset BROWSER_PROVIDER means the Tilion default and its 20-browser pilot cap.
+                # A Kernel fleet: an unset BROWSER_PROVIDER means the Tilion default and its 250-browser cap.
                 private(root/env_file, 'FIXTURE=1\nBROWSER_PROVIDER=kernel\n')
             (root/'.gitignore').write_text('.env\n.context/\n__pycache__/\n')
             subprocess.run(git[:3] + ['init', '-q'], check=True, env=git_env)
