@@ -317,6 +317,22 @@ async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 
     return 0 if failed == 0 else 1
 
 
+async def run_tests_then_join_native_callbacks(domain_filters: list[str] | None, concurrency: int) -> int:
+    """Run the suites, then let Temporal SDK native callbacks finish before asyncio.run returns.
+
+    Suites start WorkflowEnvironment servers and Workers whose shutdown futures
+    resolve from Tokio threads; exiting while one is still in Python aborts the
+    process during interpreter finalization after every test passed.
+    """
+    from helpers.process_exit import drain_native_python_callbacks
+
+    try:
+        return await run_tests(domain_filters, concurrency)
+    finally:
+        if not await drain_native_python_callbacks():
+            print("[BlackboxRunner] Native SDK callback still executing Python at runner exit", file=sys.stderr)
+
+
 def _usage_error(message: str) -> NoReturn:
     print(f"Error: {message}\n{__doc__}", file=sys.stderr)
     sys.exit(2)
@@ -363,7 +379,7 @@ def main() -> None:
         return
 
     domain_filters, concurrency = parse_args(args)
-    exit_code = asyncio.run(run_tests(domain_filters or None, concurrency))
+    exit_code = asyncio.run(run_tests_then_join_native_callbacks(domain_filters or None, concurrency))
     sys.exit(exit_code)
 
 
