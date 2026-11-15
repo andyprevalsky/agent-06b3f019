@@ -113,15 +113,27 @@ def execute(request: dict, root: Path) -> dict:
     folder.mkdir(parents=True, exist_ok=False)
     rows = {}
     setup_ok = True
+    # Cases that declare the same `sweep` with an identical spec (the backend recipe: every
+    # case is the one `test:coverage:sharded` run) share one execution and its verdict.
+    swept = {}
     with cancellation_handlers():
         try:
             if recipe.get('setup'):
                 setup_ok = run_step('setup', recipe['setup'], root, folder)['status'] == 'PASS'
             for name in selected:
+                spec = cases[name]
+                key = (spec.get('sweep'), json.dumps(spec, sort_keys=True)) if spec.get('sweep') else None
                 if not setup_ok or CANCEL.is_set():
                     rows[name] = {'status': 'UNVERIFIED', 'reason': 'setup failed or worker interrupted'}
+                elif key in swept:
+                    # Share only the execution; quarantined/FLAKY rows stay with the case that recorded them.
+                    first, execution = swept[key]
+                    rows[name] = {**execution, **case_outcomes(name, folder), 'shared_sweep_run_by': first}
+                    report_case(name, rows[name], folder)
                 else:
-                    rows[name] = run_step(name, cases[name], root, folder)
+                    rows[name] = run_step(name, spec, root, folder)
+                    if key is not None:
+                        swept[key] = (name, dict(rows[name]))
                     rows[name].update(case_outcomes(name, folder))
                     report_case(name, rows[name], folder)
         finally:
