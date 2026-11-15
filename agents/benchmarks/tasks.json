@@ -6015,6 +6015,12 @@
   },
   {
     "name": "browser-auth-guest-purchase",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:896710fd9bdc4326914365053da347e2",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 2} | Agent status: ACTIVE (expected COMPLETED) | Browser agent aeb2dafa-36c8-5945-ab58-a24fa46f2518 recorded 0 trajectory step(s); expected at least 5 per browser agent",
+      "evidence": "PR #1992 smoke gate on e7af654e05 FLAKY 896710fd9bdc4326914365053da347e2 (first attempt FAILED run 20261113-015501-1857759, same-ref rerun PASSED); passed natively on 1b85b08dd with this PR's bytes unchanged"
+    },
     "title": "Hosted Purchase: Buy Without An Account",
     "description": "No saved credentials and the shop lets shoppers buy without an account; the browser agent buys as a guest instead of creating an account.",
     "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
