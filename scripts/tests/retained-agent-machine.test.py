@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import unittest
+from http.client import IncompleteRead
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -537,14 +538,19 @@ class RetainedWorkerTests(unittest.TestCase):
                     self.assertLessEqual(clock[0], 960)
                     self.assertLessEqual(native.waits, 900 // 20 + 2)
 
-        # A refresh that names another holder means the lease was lost: fail closed.
+        # A refresh granting a new nonce means ours lapsed: fail closed and release that new lease too.
         value = self.released()
+        released = []
 
         class LostLeaseHTTP(CapturedReplacingHTTP):
             def __call__(self, request, timeout):
                 suffix = request.full_url.split("/machines/1234", 1)[1]
                 if suffix == "/lease?ttl=500":
-                    return io.BytesIO(json.dumps({"data": {"nonce": "another-holder"}}).encode())
+                    return io.BytesIO(json.dumps({"data": {"nonce": "replacement-nonce"}}).encode())
+                if suffix == "/lease" and request.method == "DELETE":
+                    released.append(request.get_header("Fly-machine-lease-nonce"))
+                    self.leased = False
+                    return io.BytesIO(b"{}")
                 if suffix.startswith("/wait?"):
                     self.assert_wait(request, suffix)
                     clock[0] += 20
@@ -557,6 +563,27 @@ class RetainedWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lease"):
                 self.run_operation(native, args("reuse"), value)
         self.assertFalse(native.waited)
+        self.assertEqual(released, ["replacement-nonce"])
+
+    def test_stopped_wait_refreshes_an_aged_lease_before_post_wait_verification(self):
+        clock = [0.0]
+        calls = []
+
+        def native(request, timeout):
+            suffix = request.full_url.split("/machines/1234", 1)[1]
+            calls.append((request.get_method(), suffix.split("?", 1)[0] if suffix.startswith("/wait") else suffix))
+            assert request.get_header("Fly-machine-lease-nonce") == "owned-native-nonce"
+            if suffix.startswith("/wait?"):
+                clock[0] += 250  # a slow final /wait leaves the lease older than the refresh threshold
+                return io.BytesIO(b'{"ok":true}')
+            return io.BytesIO(json.dumps({"data": {"nonce": "owned-native-nonce"}}).encode())
+
+        fly = pool.Fly("prod", "1234")
+        fly.nonce, fly.leased_at = "owned-native-nonce", 0.0
+        with patch.object(pool, "urlopen", native), patch.object(pool, "monotonic", lambda: clock[0]):
+            self.assertEqual(pool.wait_stopped(fly, "native-version-2"), {"ok": True})
+        self.assertEqual(calls, [("GET", "/wait"), ("POST", "/lease?ttl=500")])
+        self.assertEqual(fly.leased_at, 250)
 
     def test_native_reads_replay_transient_fly_failures_but_writes_do_not(self):
         """2026-10-20 reset and 2026-10-26 read timeout each killed a production cutover on one read."""
@@ -567,6 +594,7 @@ class RetainedWorkerTests(unittest.TestCase):
             ConnectionResetError("Connection reset by peer"),
             TimeoutError("The read operation timed out"),
             URLError("fixture unreachable"),
+            IncompleteRead(b"{"),
         ):
             with self.subTest(failure=repr(failure)):
                 native = ScriptedHTTP(failure, {"id": "1234"})

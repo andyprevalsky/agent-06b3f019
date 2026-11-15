@@ -18,6 +18,7 @@ import os
 import re
 import sys
 from contextlib import contextmanager
+from http.client import HTTPException
 from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -202,7 +203,7 @@ TRANSIENT_ATTEMPTS = 3
 def transient(exc):
     if isinstance(exc, HTTPError):
         return exc.code in (408, 429) or 500 <= exc.code < 600
-    return isinstance(exc, (URLError, ConnectionError, TimeoutError))
+    return isinstance(exc, (URLError, ConnectionError, TimeoutError, HTTPException))
 
 
 def backoff(attempt):
@@ -236,7 +237,7 @@ def wait_stopped(fly, version):
     while True:
         fly.keep_lease()
         try:
-            return fly.request(
+            completed = fly.request(
                 "GET",
                 f"/wait?state=stopped&instance_id={quote(version, safe='')}&timeout={STOPPED_WAIT_SECONDS}",
                 replay=False,
@@ -252,6 +253,10 @@ def wait_stopped(fly, version):
             if failures >= TRANSIENT_ATTEMPTS:
                 raise
             sleep(backoff(failures - 1))
+            continue
+        # Post-wait verification and custody writes run under the same lease.
+        fly.keep_lease()
+        return completed
 
 
 class Fly:
@@ -283,6 +288,10 @@ class Fly:
     def keep_lease(self):
         """Extend our own lease during a long native wait (fly-go RefreshLease).
 
+        Verified against the Machines API on 2026-11-15: POST /lease?ttl= with
+        the holder's nonce answers 201 with the same nonce and a later expiry,
+        and a replay answers the same; acquiring without the nonce answers 409.
+
         The refresh is bound to our nonce and only re-extends our own lease, so
         replaying it after a transient failure is idempotent; a lost lease is
         refused natively or answered with another holder and fails closed.
@@ -290,7 +299,10 @@ class Fly:
         if not self.nonce or monotonic() - self.leased_at < LEASE_REFRESH_AFTER_SECONDS:
             return
         granted = self.request("POST", f"/lease?ttl={LEASE_TTL_SECONDS}", replay=True)
-        if not isinstance(granted, dict) or (granted.get("data") or {}).get("nonce") != self.nonce:
+        nonce = (granted.get("data") or {}).get("nonce") if isinstance(granted, dict) else None
+        if nonce != self.nonce:
+            if isinstance(nonce, str) and nonce:
+                self.nonce = nonce  # ours lapsed and Fly granted a new lease: release that one too
             raise ValueError("Native lease refresh did not extend this owner's lease")
         self.leased_at = monotonic()
 

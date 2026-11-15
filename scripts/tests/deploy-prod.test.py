@@ -853,6 +853,14 @@ class FlyTest(Base):
         self.assertIn(('stage-finish', 'cooperative-cutover'), fake.factory)
         self.assertEqual(lanes['semantic']['status'], dp.NOT_SELECTED)
 
+    def test_resume_fly_exported_fly_token_beats_agents_env(self) -> None:
+        (self.root / 'agents').mkdir()
+        (self.root / 'agents' / '.env').write_text('FLY_API_TOKEN="fo1_SEKRIT_stale_0006"\n')
+        fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED', 'SUCCEEDED']))
+        self.main(fake, '--lanes', 'fly', '--resume-fly', environ={'FLY_API_TOKEN': 'fo1_SEKRIT_exported_0007'})
+        self.assertEqual(fake.kinds()[:2], ['production', 'worker-deployment-queue.ts'])
+        self.assertEqual(fake.runs[1][2]['FLY_API_TOKEN'], 'fo1_SEKRIT_exported_0007')
+
     def test_resume_fly_without_fly_token_fails_actionably_before_resuming(self) -> None:
         fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED']))
         self.assertEqual(self.main(fake, '--lanes', 'fly', '--resume-fly'), 1)
