@@ -312,6 +312,8 @@ def test_campaign_inventory_normal_cli_resolves_home_fly_client_for_shared_relay
     initialize ... (FileNotFoundError: ... 'flyctl')": the parent's shared relay
     calls bare ``flyctl``. The campaign exec'd by the real CLI here runs the real
     shared-relay startup against a HOME-installed fake client; nothing reaches Fly.
+    The App identity read is a direct Machines API request since R62, so the
+    fixture answers it in-process; the relay's bare ``flyctl proxy`` still runs.
     """
     checkout = tmp_path / 'checkout'
     scripts = checkout / 'scripts'
@@ -327,14 +329,11 @@ def test_campaign_inventory_normal_cli_resolves_home_fly_client_for_shared_relay
     client = home / '.fly/bin/flyctl'
     client.parent.mkdir(parents=True)
     calls = tmp_path / 'flyctl-calls.jsonl'
-    # status answers like the pinned client; proxy refuses, so no transport opens.
+    # proxy refuses, so no transport opens.
     client.write_text(
         f'#!{sys.executable}\n'
         'import json, sys\n'
         f'open({str(calls)!r}, "a").write(json.dumps(sys.argv) + "\\n")\n'
-        'if sys.argv[1:2] == ["status"]:\n'
-        '    print(json.dumps({"Name": "navi-whisper-lux-bench", "Organization": {"Slug": "fixture"}, "Network": ""}))\n'
-        '    raise SystemExit(0)\n'
         'raise SystemExit(9)\n')
     client.chmod(0o700)
     receipt = tmp_path / 'dispatch.json'
@@ -347,6 +346,9 @@ def test_campaign_inventory_normal_cli_resolves_home_fly_client_for_shared_relay
         'inventory.mkdir()\n'
         "(inventory / 'owner').write_text('app=navi-whisper-lux-bench\\n')\n"
         "(base / 'campaign').mkdir()\n"
+        "metadata = json.dumps({'Name': 'navi-whisper-lux-bench', 'Organization': {'Slug': 'fixture'}, 'Network': ''})\n"
+        "campaign['start_shared_relay'].__globals__['read_relay_app_metadata'] = (\n"
+        "    lambda *args, **kwargs: __import__('subprocess').CompletedProcess(args, 0, metadata.encode(), b''))\n"
         'try:\n'
         "    campaign['start_shared_relay'](Path(os.environ['FIXTURE_CAMPAIGN_ROOT']), base / 'campaign', base, inventory, None)\n"
         "    outcome = 'started'\n"
@@ -378,7 +380,6 @@ def test_campaign_inventory_normal_cli_resolves_home_fly_client_for_shared_relay
     assert 'FileNotFoundError' not in dispatched['outcome'], dispatched['outcome']
     invoked = [json.loads(line) for line in calls.read_text().splitlines()] if calls.is_file() else []
     assert invoked == [
-        [str(client), 'status', '-a', 'navi-whisper-lux-bench', '--json'],
         [str(client), 'proxy', '0:1', '::1', '-a', 'navi-whisper-lux-bench', '--bind-addr', '127.0.0.1', '-q'],
     ], dispatched['outcome']
     assert dispatched['outcome'] == 'ValueError: shared transport bootstrap did not initialize'

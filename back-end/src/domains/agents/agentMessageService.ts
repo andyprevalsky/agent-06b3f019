@@ -5,7 +5,6 @@
 import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
 import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
-import { isInternalSubagentMessage } from '../../providers/chat/contextScope';
 import {
   broadcastCreatedMessage,
   createMessage,
@@ -16,10 +15,7 @@ import {
 import { recordPersonMessage } from '../../providers/personMessageStamp';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
-import {
-  isAgentAuthoredRow as isAgentAuthoredMetadata,
-  withCredentialProvenance,
-} from './credentialContext';
+import { isAgentAuthoredRow, withCredentialProvenance } from './credentialContext';
 import { buildUserMessageSignalValue } from './agentMessageSignal';
 export { buildUserMessageSignalValue } from './agentMessageSignal';
 import * as repo from './repo';
@@ -63,22 +59,6 @@ function resolveRole(
     return { role: body.role };
   }
   return { role: 'USER' };
-}
-
-/**
- * Internal USER rows that are not the user's input to this agent's own loop
- * (metadata only, never text): agent-authored rows (credentialContext) plus
- * rows scoped to one child's work stream. A browser task writes each OTP it
- * reads from the user's inboxes onto its owner as a USER row tagged with its
- * own subAgentId; the owner's model never reads such a row (contextScope), so
- * signalling it woke the owner's waits for nothing and fed the code to its
- * response-schema feedback.
- */
-function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
-  return (
-    isAgentAuthoredMetadata(metadata) ||
-    isInternalSubagentMessage({ role: 'USER', text: '', metadata })
-  );
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */
@@ -395,7 +375,6 @@ export async function postMessage(
   // Agent-authored USER rows (background-agent notifications, agent-to-agent
   // messages) are polled by the owning workflow, which already woke itself;
   // echoing them back as receive_user_response would read as user feedback.
-  // A child task's own rows (a browser's OTP row) are that child's input only.
   // A Browser-composer message belongs to that browser task: the browser reads
   // it at its next step, so the owner's loop is never signalled for it.
   // User messages lift a user pause; generation-stamped workflow writes leave it alone.
