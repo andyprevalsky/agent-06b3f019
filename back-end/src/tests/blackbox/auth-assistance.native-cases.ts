@@ -342,6 +342,62 @@ export const authAssistanceNativeTests: Test[] = [
       }),
   ],
   [
+    'native resend code is a typed owner action: hands control back, signals intent, re-arms',
+    () =>
+      withPhone(async (h) => {
+        const f = await fixture(h);
+        const body = { ...f.body, criticalReason: 'verification_code' };
+        const created = await h.request(f.userId, '/', {
+          api: 'auth-assistance',
+          method: 'POST',
+          body,
+        });
+        assert.equal(created.status, 201);
+        const id = (created.data.request as { id: string }).id;
+        const complete = (payload?: Record<string, unknown>) =>
+          h.request(f.userId, `/${id}/complete`, {
+            api: 'auth-assistance',
+            actor: 'user',
+            method: 'POST',
+            ...(payload === undefined ? {} : { body: payload }),
+          });
+        assert.equal((await complete({ action: 'type_code' })).status, 400);
+        assert.equal(
+          (await complete({ action: 'resend_code', userMessage: 'resend please' })).status,
+          403,
+          'Resend action smuggled user text into native completion'
+        );
+        assert.equal(h.authSignals, 0);
+        const resent = await complete({ action: 'resend_code' });
+        assert.equal(resent.status, 200);
+        assert.equal(resent.data.completed, true);
+        assert.deepEqual(h.authSignalResponses, ['__AUTH_ASSISTANCE_RESEND_CODE__']);
+        assert.equal(h.authResumes, 1);
+        const attention = await prisma.agentAttentionRequest.findUniqueOrThrow({ where: { id } });
+        assert.equal(attention.userResponse, '__AUTH_ASSISTANCE_RESEND_CODE__');
+        const lease = await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: f.leaseId } });
+        assert.equal(lease.controlOwner, 'agent', 'Resend left phone control with the user');
+        assert.equal(lease.attentionRequestId, null);
+        const retry = await complete({ action: 'resend_code' });
+        assert.equal(retry.status, 200);
+        assert.equal(retry.data.alreadyCompleted, true);
+        assert.equal(h.authSignalResponses.at(-1), '__AUTH_ASSISTANCE_RESEND_CODE__');
+        assert.equal((await complete()).status, 409, 'Completion replaced the committed resend');
+        const rearmed = await h.request(f.userId, '/', {
+          api: 'auth-assistance',
+          method: 'POST',
+          body: { ...body, requestKey: randomUUID(), expectedCursor: lease.actionCursor },
+        });
+        assert.equal(rearmed.status, 201);
+        const next = rearmed.data.request as { id: string; completedAt: string | null };
+        assert.notEqual(next.id, id);
+        assert.equal(next.completedAt, null);
+        const armed = await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: f.leaseId } });
+        assert.equal(armed.attentionRequestId, next.id);
+        assert.equal(armed.controlOwner, 'user');
+      }),
+  ],
+  [
     'native attention rejects in-flight reads and unknown input cannot complete or replay',
     () =>
       withPhone(async (h) => {

@@ -121,7 +121,9 @@ async def recover_truncated(
     if retry_partial_errors and not result_required:
         raise ValueError("Partial provider retries require a collected whole-result reply")
     source = (
-        _recover_structured_truncation(attempt, kwargs, retry_partial_errors=retry_partial_errors)
+        _recover_structured_truncation(
+            attempt, kwargs, retry_partial_errors=retry_partial_errors, collected=result_required
+        )
         if needs_result(
             tools=kwargs.get("tools"),
             tool_choice=kwargs.get("tool_choice"),
@@ -136,7 +138,11 @@ async def recover_truncated(
 
 
 async def _recover_structured_truncation(
-    attempt: Callable[..., AsyncIterator[StreamChunk]], kwargs: Dict[str, Any], *, retry_partial_errors: bool = False
+    attempt: Callable[..., AsyncIterator[StreamChunk]],
+    kwargs: Dict[str, Any],
+    *,
+    retry_partial_errors: bool = False,
+    collected: bool = False,
 ) -> AsyncIterator[StreamChunk]:
     started = time.monotonic()
     deadline_s = kwargs.get("deadline_s")
@@ -184,7 +190,11 @@ async def _recover_structured_truncation(
             failure = exc
             remaining = [stage for stage in remaining if stage != "larger_limit"]
 
-        cut_off = finish_reason == "length" and not saw_tool_call
+        # A live stream already delivered its tool call, so only a reply with none
+        # is retried. A collected whole result has delivered nothing yet: a tool
+        # call cut off at the limit is a partial reply (its arguments can stop
+        # mid-value), and the restart below makes the collector drop it.
+        cut_off = finish_reason == "length" and (not saw_tool_call or collected)
         elapsed = time.monotonic() - started
         out_of_time = deadline_s is not None and float(deadline_s) - elapsed < MIN_RETRY_BUDGET_S
         if not (cut_off or failure) or not remaining or out_of_time:

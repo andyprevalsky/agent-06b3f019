@@ -113,6 +113,7 @@ export class Harness {
   };
   beforeAuthCompletion?: () => Promise<void>;
   authSignals = 0;
+  authSignalResponses: (string | undefined)[] = [];
   authResumes = 0;
   echoInputResult = false;
   observationResult: unknown = undefined;
@@ -384,8 +385,9 @@ export class Harness {
           beforeCompletionClaim: async () => {
             await this.beforeAuthCompletion?.();
           },
-          signalCompleted: async () => {
+          signalCompleted: async (_workflowId, _agentId, _requestId, _message, response) => {
             this.authSignals++;
+            this.authSignalResponses.push(response);
           },
           resumeAgent: async () => {
             this.authResumes++;

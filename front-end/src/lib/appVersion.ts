@@ -19,6 +19,10 @@
  *     newer build already reloaded for this session -------------> [IDLE] (no loop)
  * [ANY] --vite:preloadError (a chunk of the replaced deploy is gone)--> [RELOADING]
  *       (once per session per build; with unsent text the error surfaces instead)
+ *
+ * The current state is published as <html data-version-check="checking|idle|pending|reloading">
+ * (absent until the first check), so e2e steps can tell a settled page from one about to
+ * reload onto a newer deploy.
  */
 
 /** Build id baked in by vite.config.ts (production builds only). */
@@ -37,6 +41,15 @@ export const APP_VERSION_POLL_INTERVAL_MS = 5 * 60_000;
 export const APP_VERSION_IDLE_BEFORE_RELOAD_MS = 2 * 60_000;
 
 const RELOAD_GUARD_PREFIX = 'rose:version-reload:';
+
+/** The diagram's states, published on <html data-version-check>. */
+type VersionCheckState = 'checking' | 'idle' | 'pending' | 'reloading';
+
+function publishState(state: VersionCheckState): void {
+  const root = document.documentElement;
+  // The page is leaving: a check that settles meanwhile does not make it look idle.
+  if (root.dataset.versionCheck !== 'reloading') root.dataset.versionCheck = state;
+}
 
 /** Input events that mark the user as active (passive listeners). */
 const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const;
@@ -92,6 +105,7 @@ function reloadOnce(target: string, reason: string, reload: () => void): boolean
     window.name += marker;
   }
   console.warn(`[AppVersion] ${reason}; reloading`);
+  publishState('reloading');
   reload();
   return true;
 }
@@ -112,6 +126,8 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
     if (checking || now() - lastCheck < APP_VERSION_MIN_CHECK_INTERVAL_MS) return;
     checking = true;
     lastCheck = now();
+    let next: VersionCheckState = 'idle';
+    publishState('checking');
     try {
       const deployed = await fetchDeployedBuildId(fetchImpl);
       if (!deployed || deployed === buildId || document.visibilityState !== 'visible') return;
@@ -119,11 +135,13 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
         trigger === 'interval' && now() - lastActivity < APP_VERSION_IDLE_BEFORE_RELOAD_MS;
       if (active || hasUnsentText()) {
         lastCheck = Number.NEGATIVE_INFINITY;
+        next = 'pending';
         return;
       }
       reloadOnce(deployed, `build ${buildId} replaced by ${deployed} (${trigger})`, reload);
     } finally {
       checking = false;
+      publishState(next);
     }
   };
 
@@ -162,5 +180,6 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
     window.removeEventListener('load', onLoad);
     for (const type of ACTIVITY_EVENTS) window.removeEventListener(type, onActivity);
     clearInterval(poll);
+    delete document.documentElement.dataset.versionCheck;
   };
 }

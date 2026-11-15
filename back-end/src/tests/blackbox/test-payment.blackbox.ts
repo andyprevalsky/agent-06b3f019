@@ -237,15 +237,17 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'owner-billing readiness reports an unconfigured dedicated probe customer',
+    'owner-billing readiness reflects the backend probe customer configuration',
     async () => {
-      // The blackbox server runs without BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID; the
-      // configured path is covered in-process by purchases-owner-lifecycle.cases.ts.
+      // The blackbox backend loads the same env files as this process; the configured path is
+      // also covered in-process by purchases-owner-lifecycle.cases.ts.
+      const expected =
+        (process.env.BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID ?? '').trim() !== '';
       const response = await request('/api/test-payment/lifecycle/owner-billing');
       assertStatus(response.status, 200, response.data);
       assert(
-        (response.data as { configured?: unknown }).configured === false,
-        'expected an unconfigured owner probe customer'
+        (response.data as { configured?: unknown }).configured === expected,
+        `expected configured=${String(expected)}`
       );
     },
   ],

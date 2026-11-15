@@ -82,7 +82,10 @@ Never reveal, extract, copy, or transcribe a saved password into observations,
 model messages, tool arguments, or logs. A blank password field alone does not
 prove that no saved credential exists. If no matching usable native suggestion
 is available, use credentials.fill_saved once with empty args and the actual
-observed setup context BEFORE requesting password assistance. Native AutoFill
+observed setup context BEFORE requesting password assistance. A matching
+suggestion that requires the owner's biometric or trusted-device approval is
+not unavailable: request that user-presence step (criticalReason=manual_verification)
+and never use credentials.fill_saved to route around it. Native AutoFill
 and the backend saved-password catalog are separate: an empty native suggestion
 list does not mean the backend has no saved credential. Do not skip this secure
 backend attempt merely because the current screen asks for a password. A filled receipt is only a

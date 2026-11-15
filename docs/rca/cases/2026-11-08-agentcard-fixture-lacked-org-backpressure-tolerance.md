@@ -24,6 +24,8 @@ sources:
   - PR #1813
   - PR #1786 deploy attempt 4, smoke campaign deploy-cloud/604a576acbf1c746c131fe58ef25977da4cad6fa81cd612760fc5c2fb16f7bd9
   - commit 34fd7d036b165e235a02a05197a4ddc00f6bc46e (failed source)
+  - PR #2005
+  - commit 00bdc7bd13e3c2989beac90a1dc789a6d64586d1 (PR #2005 merge, shipped)
 repro: cd back-end && env -u FLY_APP_NAME npx tsx src/tests/unit/agentcard-benchmark-float.test.ts (and, for the 2026-11-13 recurrence, src/tests/unit/agentcard-benchmark-float-burst.test.ts), plus test_agentcard_setup_retries_only_the_structured_org_rate_limit and test_abandon_retries_typed_org_auth_rejection_after_reconciling in agents/tests/blackbox/benchmark.blackbox.py; on the pre-fix behaviour the first verifyBenchmarkOrgFixture call rejects with "AgentCard Organization MCP list_cardholders failed: Invalid or expired organization token", and the KYC case reports "Missing expected rejection"; both pass on the fix
 status: mitigated
 ---

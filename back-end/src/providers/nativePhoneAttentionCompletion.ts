@@ -2,7 +2,12 @@
 import { setupAfterAttention } from './phoneSetupState';
 import { nativeCompletionRetry } from './nativePhoneAttentionRetry';
 import type { Prisma } from '@prisma/client';
-import { getNativePhoneTarget, NativePhoneAttentionError } from './nativePhoneAttention';
+import {
+  getNativePhoneTarget,
+  NativePhoneAttentionError,
+  nativePhoneResponse,
+  type NativePhoneUserAction,
+} from './nativePhoneAttention';
 import { lockNativePhoneDevice, validateNativePhoneLease } from './nativePhoneAttentionBinding';
 import { resumedPrivacy } from './phoneInputPrivacy';
 import { LEASE_TIMEOUT_MS } from './phoneAccountPolicy';
@@ -14,8 +19,10 @@ export async function completeNativePhoneAttention(
   agentId: string,
   now: Date,
   userMessage: unknown,
-  initiallyCompleted: boolean
+  initiallyCompleted: boolean,
+  action?: NativePhoneUserAction
 ) {
+  const response = nativePhoneResponse(action);
   // This guard precedes every authored-message write, including completed retries.
   if (
     userMessage !== undefined &&
@@ -43,7 +50,7 @@ export async function completeNativePhoneAttention(
   )
     throw new NativePhoneAttentionError(403, 'Native attention binding is invalid');
   if (request.completedAt !== null)
-    return nativeCompletionRetry(tx, request, device, target, initiallyCompleted);
+    return nativeCompletionRetry(tx, request, device, target, initiallyCompleted, response);
   const { lease, agent } = await validateNativePhoneLease(tx, userId, agentId, target, device.id);
   if ((agent.temporalWorkflowId ?? agent.id) !== request.attentionRequest.workflowId)
     throw new NativePhoneAttentionError(409, 'Native attention workflow changed');
@@ -57,7 +64,7 @@ export async function completeNativePhoneAttention(
   await tx.userAuthAssistanceRequest.update({ where: { id }, data: { completedAt: now } });
   const answered = await tx.agentAttentionRequest.updateMany({
     where: { id, userResponse: null },
-    data: { userResponse: '__AUTH_ASSISTANCE_COMPLETED__' },
+    data: { userResponse: response },
   });
   if (answered.count !== 1) throw new NativePhoneAttentionError(409, 'Native attention changed');
   const [clock] = await tx.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
@@ -90,5 +97,6 @@ export async function completeNativePhoneAttention(
     interrupted: false,
     workflowId: request.attentionRequest.workflowId,
     userMessage: null,
+    response,
   };
 }
