@@ -52,8 +52,11 @@ async function reconcileActive(tx: Transaction, lease: IPhoneLease) {
     await closeLease(tx, lease.id, 'CANCELLED');
     return;
   }
-  // A paused agent cannot act on the phone; it must not starve the FIFO queue.
-  if (agent.status === 'PAUSED') return closeLease(tx, lease.id, 'RELEASED');
+  // A paused agent cannot act on the phone; it must not starve the FIFO queue. A pause for this
+  // lease's own phone auth keeps the hold so the owner can act on a live phone; the pending-auth
+  // branch below still bounds it by the user-control grace, and other pauses release at once.
+  if (agent.status === 'PAUSED' && lease.attentionRequestId === null)
+    return closeLease(tx, lease.id, 'RELEASED');
   if (lease.browserTaskId !== null) {
     const task = await tx.browserSession.findFirst({
       where: { id: lease.browserTaskId, agentId: lease.agentId, context: { userId: lease.userId } },

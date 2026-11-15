@@ -4,6 +4,7 @@ import {
   setupState,
   sealSetup,
   configurationState,
+  type SetupState,
 } from '../../providers/phoneSetupState';
 import { connectionDto } from '../../providers/phoneConnectionState';
 import { proofCurrent } from '../../providers/phoneSetupVerification';
@@ -23,31 +24,19 @@ export async function configurationAfterConfirmedStop(tx: Transaction, device: I
     !(await accountPermitted(tx, device.userId)) ||
     state.expectedPhone !== owner?.phone ||
     privacyState(device.privateInputEncrypted).active ||
-    state.attempt?.reasonCode === 'observed_signed_out' ||
-    connectionDto(device, state, true, false).status !== 'ready' ||
-    !configurationProvenanceBound(state) ||
-    !configuration.verification
+    state.attempt?.reasonCode === 'observed_signed_out'
   )
     return device.setupEncrypted;
+  const ready = connectionDto(device, state, true, false).status === 'ready';
+  // An in-progress first setup keeps its verified steps too; it is still not promoted.
+  if (!ready && state.completedConfiguration === undefined)
+    return carryChecks(state, state, device.providerEpoch)
+      ? sealSetup(state)
+      : device.setupEncrypted;
+  if (!ready || !configurationProvenanceBound(state) || !configuration.verification)
+    return device.setupEncrypted;
 
-  const context = {
-    attemptId: configuration.attempt?.id,
-    profileRevision: state.profileRevision,
-    workflowId: configuration.attempt?.workflowId,
-    providerEpoch: device.providerEpoch,
-    expectedPhone: state.expectedPhone ?? null,
-    floorAt: configuration.attempt?.floorAt,
-    floorCursor: configuration.attempt?.floorCursor,
-  };
-  for (const [target, proof] of Object.entries(configuration.verification.checks)) {
-    if (target === 'runtime' || !proofCurrent(proof, context)) continue;
-    // A control session ended, not a device reset. Retain when/where the settings
-    // were observed; advancing the transport binding is not a fresh observation.
-    proof.observedProviderEpoch ??= proof.providerEpoch;
-    proof.providerEpoch = device.providerEpoch + 1;
-  }
-  delete configuration.verification.checks.runtime;
-  if (state.verification) delete state.verification.checks.runtime;
+  carryChecks(configuration, state, device.providerEpoch);
   const admission = state.readinessAdmission;
   if (admission) {
     const lease = await tx.iPhoneLease.findFirst({
@@ -80,4 +69,28 @@ export async function configurationAfterConfirmedStop(tx: Transaction, device: I
     else delete state.readinessAdmission;
   }
   return sealSetup(state);
+}
+
+/** Rebind current non-runtime proofs to the next transport epoch; runtime always expires. */
+function carryChecks(configuration: SetupState, state: SetupState, providerEpoch: number) {
+  if (!configuration.verification) return false;
+  const context = {
+    attemptId: configuration.attempt?.id,
+    profileRevision: state.profileRevision,
+    workflowId: configuration.attempt?.workflowId,
+    providerEpoch,
+    expectedPhone: state.expectedPhone ?? null,
+    floorAt: configuration.attempt?.floorAt,
+    floorCursor: configuration.attempt?.floorCursor,
+  };
+  for (const [target, proof] of Object.entries(configuration.verification.checks)) {
+    if (target === 'runtime' || !proofCurrent(proof, context)) continue;
+    // A control session ended, not a device reset. Retain when/where the settings
+    // were observed; advancing the transport binding is not a fresh observation.
+    proof.observedProviderEpoch ??= proof.providerEpoch;
+    proof.providerEpoch = providerEpoch + 1;
+  }
+  delete configuration.verification.checks.runtime;
+  if (state.verification) delete state.verification.checks.runtime;
+  return true;
 }
