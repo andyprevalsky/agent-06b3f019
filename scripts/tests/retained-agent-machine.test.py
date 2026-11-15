@@ -6,9 +6,12 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.client import IncompleteRead
 from pathlib import Path
 from types import SimpleNamespace
@@ -644,6 +647,131 @@ class RetainedWorkerTests(unittest.TestCase):
                     self.assertEqual(len(native.calls), 1)
         self.assertTrue(self.pauses)
         self.assertTrue(all(0 < seconds <= 8 for seconds in self.pauses))
+
+    def test_connect_phase_failure_replays_a_write_that_never_left(self):
+        """2026-11-15 run 43669103359: the retirement metadata POST died in connect() (Errno 101)."""
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path.endswith("/redirect"):
+                    self.send_response(307)
+                    self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if self.path.endswith("/lost-response"):
+                    self.close_connection = True
+                    return  # the write landed but no response comes back
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        real_connect = socket.create_connection
+        connects = []
+
+        def unreachable_once(address, *rest, **options):
+            connects.append(address)
+            if len(connects) == 1:
+                raise OSError(101, "Network is unreachable")
+            return real_connect(address, *rest, **options)
+
+        api = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        suffix = "/metadata/" + pool.POOL_KEY
+        with patch.object(pool, "API", api), patch("socket.create_connection", unreachable_once):
+            self.assertEqual(pool.Fly("prod", "1234").request("POST", suffix, {"value": "idle"}), {})
+        self.assertEqual(received, [b'{"value": "idle"}'])
+        self.assertEqual(len(connects), 2)
+        self.assertEqual(self.pauses, [1])
+        # Negative control: a write that reached Fly and lost its answer is never replayed.
+        received.clear()
+        with patch.object(pool, "API", api), self.assertRaises(Exception) as caught:
+            pool.Fly("prod", "1234").request("POST", "/lost-response", {"value": "idle"})
+        self.assertFalse(pool.not_sent(caught.exception))
+        self.assertEqual(received, [b'{"value": "idle"}'])
+        # A redirect is never followed, so a second hop cannot pose as "never sent".
+        received.clear()
+        with patch.object(pool, "API", api), self.assertRaises(HTTPError) as caught:
+            pool.Fly("prod", "1234").request("POST", "/redirect", {"value": "idle"})
+        self.assertEqual(caught.exception.code, 307)
+        self.assertEqual(received, [b'{"value": "idle"}'])
+        # Bounded: a connect that never succeeds raises after three attempts.
+        connects.clear()
+
+        def unreachable(address, *rest, **options):
+            connects.append(address)
+            raise OSError(101, "Network is unreachable")
+
+        with (
+            patch.object(pool, "API", api),
+            patch("socket.create_connection", unreachable),
+            self.assertRaises(URLError) as caught,
+        ):
+            pool.Fly("prod", "1234").request("POST", suffix, {"value": "idle"})
+        self.assertTrue(pool.not_sent(caught.exception))
+        self.assertEqual(len(connects), pool.TRANSIENT_ATTEMPTS)
+        self.assertEqual(received, [b'{"value": "idle"}'])
+
+    def test_lease_waits_out_an_orphaned_pool_lease_but_not_a_foreign_holder(self):
+        """2026-11-15 run 43669305097: recovery 3s after a dead controller hit 409 on its unreleased lease."""
+        orphan = {"data": {"description": "cooperative-worker-pool", "owner": "rose", "expires_at": 1}}
+        native = ScriptedHTTP(
+            http_error(409), orphan, http_error(409), orphan, {"data": {"nonce": "n-1"}}, {}
+        )
+        with patch.object(pool, "urlopen", native):
+            fly = pool.Fly("prod", "1234")
+            with fly.lease():
+                self.assertEqual(fly.nonce, "n-1")
+        self.assertEqual(
+            native.calls,
+            [("POST", "/lease"), ("GET", "/lease")] * 2 + [("POST", "/lease"), ("DELETE", "/lease")],
+        )
+        self.assertEqual(self.pauses, [pool.LEASE_ORPHAN_POLL_SECONDS] * 2)
+        # The orphan lapses between the 409 and the holder read (404): acquire again at once.
+        self.pauses.clear()
+        native = ScriptedHTTP(http_error(409), http_error(404), {"data": {"nonce": "n-2"}}, {})
+        with patch.object(pool, "urlopen", native):
+            with pool.Fly("prod", "1234").lease():
+                pass
+        self.assertEqual(
+            native.calls, [("POST", "/lease"), ("GET", "/lease"), ("POST", "/lease"), ("DELETE", "/lease")]
+        )
+        self.assertEqual(self.pauses, [])
+        # Negative control: another holder (flyctl, a human) is never waited out.
+        self.pauses.clear()
+        foreign = {"data": {"description": "flyctl deploy", "owner": "andy", "expires_at": 9}}
+        native = ScriptedHTTP(http_error(409), foreign)
+        with patch.object(pool, "urlopen", native), self.assertRaisesRegex(ValueError, "flyctl deploy"):
+            with pool.Fly("prod", "1234").lease():
+                self.fail("a foreign lease must not be entered")
+        self.assertEqual(native.calls, [("POST", "/lease"), ("GET", "/lease")])
+        self.assertEqual(self.pauses, [])
+        # Bounded: an orphan that never lapses fails once the TTL plus margin has passed.
+        clock = [0]
+        native = ScriptedHTTP(*[http_error(409), orphan] * 100)
+
+        def pause(seconds):
+            clock[0] += seconds
+
+        with (
+            patch.object(pool, "urlopen", native),
+            patch.object(pool, "monotonic", lambda: clock[0]),
+            patch.object(pool, "sleep", pause),
+            self.assertRaisesRegex(ValueError, "cooperative-worker-pool"),
+        ):
+            with pool.Fly("prod", "1234").lease():
+                self.fail("an unexpired lease must not be entered")
+        self.assertGreaterEqual(clock[0], pool.LEASE_TTL_SECONDS)
+        self.assertLessEqual(clock[0], pool.LEASE_TTL_SECONDS + pool.LEASE_ORPHAN_MARGIN_SECONDS)
 
     def test_lost_ack_retry_rejects_empty_or_nonstring_version_before_wait(self):
         for version in ("", None, 7):

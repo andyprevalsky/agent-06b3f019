@@ -51,7 +51,18 @@ def for_each_machine(operation, records):
     errors = [future.exception() for future in futures if future.exception() is not None]
     hard = [error for error in errors if not isinstance(error, PoolCapacityPending)]
     if errors:
-        raise (hard or errors)[0]
+        raised = (hard or errors)[0]
+        # Only one error can be raised; a dropped one (2026-11-15: a failed lease
+        # release that orphaned a native lease) must still reach the log.
+        for record, future in zip(records, futures):
+            error = future.exception()
+            if error is not None and error is not raised:
+                print(
+                    f"Concurrent Machine operation also failed on {record.get('id')!r}: {error!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        raise raised
     return [future.result() for future in futures]
 
 
