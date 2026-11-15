@@ -27,7 +27,7 @@ sources:
   - commit b380b1eae733dec70c4409d6ce9aa658ffe4f587
   - task .context/deploy-runs/main705-b5d81c3e2-qualification-20261016/A-FAILURE-RECEIPT.json
   - task .context/test-runs/fleet-proof-test_signal_waits_for_owned_producer_before_recovery-97jeu3ju/fixture/output.log
-repro: python3 scripts/tests/fleet-stability-cleanup.test.py FleetFailureCleanup.test_repeated_waiter_cancellation_keeps_exact_cleanup
+repro: python3 scripts/tests/fleet-stability-cleanup.test.py FleetFailureCleanup.test_waiter_probes_survive_trapped_signal_storm
 status: fixed
 ---
 
@@ -152,6 +152,20 @@ consecutive passes together with the original test, a 20-run scratch storm of
 about 3,000 TERMs each passed 20/20, and the full fleet-stability-cleanup suite
 passes. The unchanged original test also passed 96/96 under 6-core CPU load
 on the buggy source, which is why the dense storm is the discriminating repro.
+
+### Deterministic regression — November 15, 2026
+
+A post-merge review of #1992 found that the cancel-case storm reproduces only
+intermittently (it passed 3/3 on the parent commit there, and 1-3/6 failed
+here), because the waiter runs few substitutions per case. The permanent
+FleetFailureCleanup.test_waiter_probes_survive_trapped_signal_storm now runs
+the waiter's own identity and group probes (cloudbench_pid_matches_start,
+cloudbench_process_group_exists) 1500 times in a TERM-trapped shell that
+receives TERM every 2 ms. It failed 8/8 on the pre-fix library with
+`unexpected EOF` and passed 10/10 on the fix, including 3/3 under 6-core CPU
+load. A flakiness cross-review passed it after adding a bounded signal
+deadline and an explicit unreaped-child PID check. The cancel-case storm now
+only signals a PID whose proc-start birth still matches.
 
 ## Solution
 
