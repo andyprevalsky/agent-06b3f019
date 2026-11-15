@@ -367,10 +367,13 @@ export interface McpShare {
   owner_name: string | null;
 }
 
-/** Live 'mcp' grants a teammate holds, one per shared integration (first team wins). */
+/** Live 'mcp' grants a teammate holds, one per shared integration (lowest team id wins). */
 async function mcpGrants(userId: string, integrationId?: string) {
   const byIntegration = new Map<string, McpShare>();
-  for (const grant of await resolveTeamDataAccess(userId)) {
+  const grants = (await resolveTeamDataAccess(userId)).sort((a, b) =>
+    a.teamId.localeCompare(b.teamId)
+  );
+  for (const grant of grants) {
     if (grant.provider !== 'mcp' || grant.ownerUserId === userId) continue;
     if (integrationId !== undefined && grant.integrationId !== integrationId) continue;
     if (byIntegration.has(grant.integrationId)) continue;
@@ -389,7 +392,8 @@ async function sharedRows(grants: Map<string, McpShare>) {
   if (grants.size === 0) return [];
   const found = await prisma.integration.findMany({
     where: { id: { in: [...grants.keys()] }, name: 'mcp', type: 'TOOL_SETUP' },
-    orderBy: { createdAt: 'asc' },
+    // Stable order keeps each shared server's de-collided slug (and tool names) fixed.
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
   return found.filter(
     (row) => mcpConfig(row.config) !== null && grants.get(row.id)?.owner_user_id === row.userId

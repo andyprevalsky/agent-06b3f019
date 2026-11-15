@@ -29,7 +29,6 @@ import { randomUUID, share, teamFixture, unshare } from './teams-capabilities.ha
 const REDIRECT = 'http://localhost:5173/integrations/mcp/callback';
 let fixture: McpFixture;
 const saved = { ...mcpNetwork };
-const agentIds: string[] = [];
 
 before(async () => {
   fixture = await startMcpFixture();
@@ -38,7 +37,6 @@ before(async () => {
 });
 after(async () => {
   Object.assign(mcpNetwork, saved);
-  await prisma.agent.deleteMany({ where: { id: { in: agentIds } } });
   await fixture.close();
 });
 
@@ -55,9 +53,9 @@ async function refused(run: Promise<unknown>, status: number) {
   assert.equal(error.status, status, error.message);
 }
 
+/** A code agent of `userId` (teams-harness removes the user's agents after the file). */
 async function agentToken(userId: string) {
   const agentId = randomUUID();
-  agentIds.push(agentId);
   await prisma.agent.create({
     data: { id: agentId, userId, goal: 'teams mcp', busId: agentId, status: 'ACTIVE' },
   });
