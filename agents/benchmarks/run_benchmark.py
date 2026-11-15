@@ -4062,6 +4062,9 @@ async def ensure_payment_lifecycle_cleanup(
             )
             if lifecycle_error is None:
                 print("    🧹 Reused already-reconciled payment lifecycle")
+                # The owner production probe purges its settled records on every passing path.
+                if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+                    await purge_owner_lifecycle_records(base_url, agent_id)
                 return current_lifecycle
 
         lifecycle = await _start_payment_abandonment_with_recovery(
