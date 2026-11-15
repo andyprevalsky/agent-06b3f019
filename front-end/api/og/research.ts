@@ -35,10 +35,7 @@ export default async function handler(req: Request) {
       /<meta name="description" content="[^"]*" \/>/,
       `<meta name="description" content="${safeDesc}" />`,
     )
-    .replace(
-      /<link rel="canonical" href="[^"]*" \/>/,
-      `<link rel="canonical" href="${postUrl}" />`,
-    )
+    .replace(/<link rel="canonical" href="[^"]*" \/>/, `<link rel="canonical" href="${postUrl}" />`)
     // Open Graph
     .replace(
       /<meta property="og:title" content="[^"]*" \/>/,
