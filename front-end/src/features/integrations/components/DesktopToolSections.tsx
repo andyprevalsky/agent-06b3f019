@@ -10,7 +10,7 @@
  *     setting_up → syncing chip + the shared sync bar; chip action "Open setup"
  *                  focuses the setup agent
  *     failed     → error chip, its reason under the chips; chip action "Retry"
- *                  reopens the form with the same request
+ *                  reopens the form with the same request (disabled while a submit is pending)
  *   MCP servers row "MCP servers": one chip per server ("N tools")
  *     connected  → synced chip, × removes it
  *     needs_auth → warning chip; chip action "Sign in" (reconnect → OAuth)
@@ -113,6 +113,7 @@ function RowForm({
 function cliAccount(
   row: Cli['integrations'][number],
   retry: (request: string) => void,
+  submitting: boolean,
 ): DesktopAccountView {
   const base = { provider: 'cli', accountId: row.id, label: row.name };
   if (row.status === 'connected') return { ...base, tone: 'synced', title: 'Connected' };
@@ -132,6 +133,8 @@ function cliAccount(
     errorText: row.error || 'Setup failed',
     onResync: () => retry(row.request),
     resyncLabel: 'Retry',
+    // Retry rewrites the draft: never while another submission is pending.
+    disabled: submitting,
   };
 }
 
@@ -163,7 +166,7 @@ function CliRow({ cli }: { cli: Cli }) {
       preset: DropdownIconPreset.cli,
       glyph: glyph(<Terminal className="h-[70%] w-[70%]" />),
     },
-    accounts: cli.integrations.map((row) => cliAccount(row, retry)),
+    accounts: cli.integrations.map((row) => cliAccount(row, retry, cli.submitting)),
     availability: 'ready',
     onConnect: () => setOpen(true),
     connecting: cli.submitting,

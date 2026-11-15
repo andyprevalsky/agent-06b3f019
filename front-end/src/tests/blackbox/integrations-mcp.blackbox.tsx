@@ -423,6 +423,50 @@ describe('Rose Desktop tool rows: pending actions', () => {
     await waitFor(() => expect(card.queryByLabelText('MCP server URL')).toBeNull());
   });
 
+  it("disables a failed CLI's Retry while another CLI submission is pending", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const failed = {
+      id: 'cli-failed',
+      name: 'Stripe CLI',
+      request: 'Stripe CLI',
+      agent_id: null,
+      status: 'failed',
+      error: 'Setup ended without a verified connection.',
+    };
+    server.use(
+      http.get(`${API_BASE}/integrations/cli`, () => HttpResponse.json({ integrations: [failed] })),
+      http.post(`${API_BASE}/integrations/cli`, async () => {
+        await gate;
+        return HttpResponse.json(
+          {
+            integration: {
+              id: 'cli-new',
+              name: 'Vercel CLI',
+              request: 'Vercel CLI',
+              agent_id: null,
+              status: 'setting_up',
+              error: null,
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+    renderWithProviders(<Integrations />, { roseDesktop: true });
+    const card = within(await screen.findByRole('region', { name: 'CLIs' }));
+    const user = userEvent.setup();
+    const retry = await card.findByRole('button', { name: 'Retry' });
+    await user.click(card.getByRole('button', { name: 'Add CLI' }));
+    await user.type(card.getByLabelText('CLI to connect'), 'Vercel CLI');
+    await user.click(card.getByRole('button', { name: 'Connect CLI' }));
+    await waitFor(() => expect(retry).toBeDisabled());
+    release();
+    await waitFor(() => expect(card.getByRole('button', { name: 'Retry' })).toBeEnabled());
+  });
+
   it("disables other servers' actions while one server reconnects", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
