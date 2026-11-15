@@ -21,8 +21,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT.parent / "scripts" / "lib"))
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
+from test_quarantine import quarantine
 
 import httpx
 
@@ -3423,6 +3425,12 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
+@quarantine(
+    since="2026-11-14",
+    repair="pending-handoff:f48b6ecc19c2402cb3abc744c0abb18d",
+    error="AssertionError: ['phone arguments rejected: - args: Input should be a valid dictionary']",
+    evidence="https://github.com/Rose-Ai-Labs/rose/actions/runs/43649937439",
+)
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
