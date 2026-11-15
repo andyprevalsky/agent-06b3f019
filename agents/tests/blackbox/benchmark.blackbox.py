@@ -13920,6 +13920,32 @@ def test_tamy_identity_fixture_declaration_drives_the_run_user():
     ]
 
 
+async def test_owner_probe_purges_records_when_lifecycle_already_reconciled():
+    """Live owner run 2026-11-15 (agent 5728b052): the production probe passed through the
+    already-reconciled branch of ensure_payment_lifecycle_cleanup, which returned before the purge,
+    leaving the probe purchase on the owner account."""
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+
+    task = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    sandbox = bench.get_task_by_name("agent-payment-abandonment")
+    reconciled = {"purchase": {"status": "VOIDED"}}
+    for current, expected_purges in ((task, 1), (sandbox, 0)):
+        purge = AsyncMock()
+        with (
+            patch.object(bench, "_validate_payment_lifecycle", return_value=None),
+            patch.object(bench, "purge_owner_lifecycle_records", purge),
+        ):
+            result = await bench.ensure_payment_lifecycle_cleanup(
+                "https://benchmark.invalid", "agent-reconciled", current, current_lifecycle=reconciled
+            )
+        assert result is reconciled
+        assert purge.await_count == expected_purges, (current.name, purge.await_count)
+        if expected_purges:
+            purge.assert_awaited_once_with("https://benchmark.invalid", "agent-reconciled")
+
+
 async def test_parallel_tasks_keep_their_own_run_user():
     """A parallel sibling can neither borrow nor erase another task's run identity.
 
@@ -29946,6 +29972,10 @@ async def run_all_tests():
     r.record(
         "tamy_identity_fixture_declaration_drives_run_user",
         test_tamy_identity_fixture_declaration_drives_the_run_user,
+    )
+    await r.record_async(
+        "owner_probe_purges_records_when_lifecycle_already_reconciled",
+        test_owner_probe_purges_records_when_lifecycle_already_reconciled,
     )
     await r.record_async(
         "parallel_tasks_keep_their_own_run_user",
