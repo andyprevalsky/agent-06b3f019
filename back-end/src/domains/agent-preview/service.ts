@@ -9,18 +9,11 @@
  * agent's unguessable UUID. It returns only a short title and a coarse state:
  * no goal text beyond a title fallback, cost, results, run time or ETA.
  */
-import type { AgentStatus } from '@prisma/client';
+import { AGENT_ID_PATTERN, MAX_PREVIEW_TITLE_CHARACTERS } from './config';
 import { findAgentPreviewRow } from './repo';
+import type { AgentPreview, AgentPreviewState, AgentStatus } from './types';
 
-export type AgentPreviewState = 'started' | 'done' | 'stopped';
-
-export interface AgentPreview {
-  title: string;
-  state: AgentPreviewState;
-}
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_TITLE = 80;
+export type { AgentPreview, AgentPreviewState };
 
 export function previewState(status: AgentStatus): AgentPreviewState {
   if (status === 'COMPLETED') return 'done';
@@ -36,16 +29,16 @@ export function previewTitle(title: string | null, goal: string): string {
   const source = titled !== '' ? titled : firstLine !== '' ? firstLine : 'Your Rose task';
   const text = source.replace(/\s+/g, ' ');
   const characters = Array.from(text);
-  return characters.length <= MAX_TITLE
+  return characters.length <= MAX_PREVIEW_TITLE_CHARACTERS
     ? text
     : `${characters
-        .slice(0, MAX_TITLE - 1)
+        .slice(0, MAX_PREVIEW_TITLE_CHARACTERS - 1)
         .join('')
         .trimEnd()}…`;
 }
 
 export async function getAgentPreview(agentId: string): Promise<AgentPreview | null> {
-  if (!UUID.test(agentId)) return null;
+  if (!AGENT_ID_PATTERN.test(agentId)) return null;
   const row = await findAgentPreviewRow(agentId);
   if (!row) return null;
   return { title: previewTitle(row.title, row.goal), state: previewState(row.status) };

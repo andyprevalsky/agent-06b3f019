@@ -1,22 +1,12 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { isLinqEnabled } from '../../providers/linq';
 
-const SURGE_PHONE = '+14154498072';
+/** Rose's Surge (SMS) number; the Linq number comes from LINQ_FROM_PHONE. */
+export const SURGE_PHONE = '+14154498072';
 
-/**
- * Rose's number for this recipient: the Linq number when their texts route via
- * Linq (same rule as smsQueue), else the Surge number. Saving a number that
- * never answers them would strand their replies.
- */
-export function rosePhoneFor(recipientPhone?: string | null): string {
-  const linqPhone = process.env.LINQ_FROM_PHONE ?? '';
-  if (linqPhone === '') return SURGE_PHONE;
-  const routed =
-    recipientPhone !== null && recipientPhone !== undefined && recipientPhone !== ''
-      ? isLinqEnabled(recipientPhone)
-      : isLinqEnabled();
-  return routed ? linqPhone : SURGE_PHONE;
+/** Read per call: the Linq number is rollout configuration, not a build constant. */
+export function linqFromPhone(): string {
+  return process.env.LINQ_FROM_PHONE ?? '';
 }
 
 /** Rose contact email */

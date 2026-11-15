@@ -1,9 +1,11 @@
 // eslint-disable-next-line no-restricted-imports -- domain-specific vCard library, single consumer
 import vCardsJS from 'vcards-js';
 import * as repo from './repo';
+import { isLinqEnabled } from '../../providers/linq';
 import { createLogger } from '../../providers/logger';
 import {
-  rosePhoneFor,
+  SURGE_PHONE,
+  linqFromPhone,
   ROSE_EMAIL,
   ROSE_ORG,
   ROSE_URL,
@@ -18,6 +20,21 @@ const log = createLogger('VCard');
 // type so field shapes (several are string | string[]) stay in sync rather than
 // drifting against a hand-rolled interface.
 type VCard = ReturnType<typeof vCardsJS>;
+
+/**
+ * Rose's number for this recipient: the Linq number when their texts route via
+ * Linq (same rule as smsQueue), else the Surge number. Saving a number that
+ * never answers them would strand their replies.
+ */
+export function rosePhoneFor(recipientPhone?: string | null): string {
+  const linqPhone = linqFromPhone();
+  if (linqPhone === '') return SURGE_PHONE;
+  const routed =
+    recipientPhone !== null && recipientPhone !== undefined && recipientPhone !== ''
+      ? isLinqEnabled(recipientPhone)
+      : isLinqEnabled();
+  return routed ? linqPhone : SURGE_PHONE;
+}
 
 function applyDefaultPhoto(vCard: VCard) {
   vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 async function main(): Promise<void> {
   const saved = { ...process.env };
   try {
-    const { rosePhoneFor } = await import('../../domains/vcard/config');
+    const { rosePhoneFor } = await import('../../domains/vcard/service');
     const linq = '+12054015445';
     const surge = '+14154498072';
     Object.assign(process.env, {
