@@ -175,9 +175,10 @@ Without a refund, a caller's retry still advances to the next rung on a new exit
 
 **Verified.**
 - The browser-session domain passes locally.
-- Live Kernel provider parity passed on Blacksmith on four fixed sources (two live-probes rounds after main moved the case there).
-- The final gate round passed all 17 gates on `4c0ec0165`.
-- Production Render and backend probes passed at the merge SHA.
+- Live Kernel provider parity passed on Blacksmith on four fixed sources: `dff3073e5` and `41e018685` in backend coverage (11-08 cycles, archived under `.context/deploy-cycles-pr1809-20261108/`), then `845860844` and `4c0ec0165` in live probes after main moved the case there.
+- The final gate round passed all 17 gates on `4c0ec0165`. Its smoke ran with the five `agent-payment-*` tasks elected out (Andy, 2026-11-15 02:13:52Z, "skip agent card tests"); the previous round on `845860844` ran them and passed 11/11.
+- Production at the merge SHA: Render (verified in the first production run, carried forward), backend probes and the production semantic lane passed.
+- Symptoms: the archive allows five search strings, so this update replaced the bare `'net::ERR_TUNNEL_CONNECTION_FAILED'` (still matched inside the two longer strings) and `'198 passed, 1 failed, 199 total'` with the two `/rotate-proxy 500` strings.
 
 **Still open.**
 - Why the proxy failed the tunnel. No CONNECT response is retained. The `browser-checkpoint:restore-navigation` retry warnings now log each attempt, so a recurrence will show whether a same-session retry recovers. The November 14 finding (about 5% of Steel exits refuse example.com for a whole session) suggests some refusals will exhaust the bounded retry; that case still fails the rotation, and the caller's next rotation moves to a new exit.
