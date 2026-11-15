@@ -3,8 +3,11 @@ import { prisma } from "../../back-end/src/providers/database";
 import { seedTeamDataFixture } from "../../back-end/src/tests/blackbox/data-teams.fixture";
 import {
   TEAM_INTEGRATIONS_MARKER,
+  TEAM_REPO_MARKER,
   seedTeamIntegrationsFixture,
+  seedTeamRepoFixture,
   teamIntegrationsExpectation,
+  teamRepoExpectation,
 } from "../../back-end/src/tests/blackbox/team-integrations.fixture";
 
 async function main() {
@@ -33,6 +36,17 @@ async function main() {
       JSON.stringify({
         marker,
         ...teamIntegrationsExpectation(shared),
+        fixture_user_id: userId,
+      }) + "\n",
+    );
+    return;
+  }
+  if (marker === TEAM_REPO_MARKER) {
+    const repo = await seedTeamRepoFixture(userId, marker);
+    process.stdout.write(
+      JSON.stringify({
+        marker,
+        ...teamRepoExpectation(repo),
         fixture_user_id: userId,
       }) + "\n",
     );

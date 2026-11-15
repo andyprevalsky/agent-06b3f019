@@ -6,11 +6,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 # Each task's (record marker, db_fixtures label). team_data_fixture.ts picks the seeder by marker:
-# ROSE-TEAM-SHARED seeds team-integrations.fixture.ts, every other marker data-teams.fixture.ts.
+# ROSE-TEAM-SHARED and ROSE-TEAM-REPO seed team-integrations.fixture.ts, every other marker
+# data-teams.fixture.ts.
 TASK_FIXTURES = {
     'team-daily-investor-email-count': ('ROSE-TEAM-INVESTORS', 'team_data_v1'),
     'team-daily-access-boundaries': ('ROSE-TEAM-BOUNDARIES', 'team_data_v1'),
     'team-daily-shared-integrations': ('ROSE-TEAM-SHARED', 'team_integrations_v1'),
+    'team-daily-shared-repo': ('ROSE-TEAM-REPO', 'team_repo_v1'),
 }
 
 

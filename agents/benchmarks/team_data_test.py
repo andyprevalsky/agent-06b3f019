@@ -10,10 +10,14 @@ import pytest
 from benchmarks.team_data import TASK_FIXTURES, apply_team_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
+BLACKBOX = ROOT / 'back-end/src/tests/blackbox'
+# label -> (seeder, the marker constant team_data_fixture.ts dispatches on; None = the default seeder)
 SEEDERS = {
-    'team_data_v1': ROOT / 'back-end/src/tests/blackbox/data-teams.fixture.ts',
-    'team_integrations_v1': ROOT / 'back-end/src/tests/blackbox/team-integrations.fixture.ts',
+    'team_data_v1': (BLACKBOX / 'data-teams.fixture.ts', None),
+    'team_integrations_v1': (BLACKBOX / 'team-integrations.fixture.ts', 'TEAM_INTEGRATIONS_MARKER'),
+    'team_repo_v1': (BLACKBOX / 'team-integrations.fixture.ts', 'TEAM_REPO_MARKER'),
 }
+GREP_FIXTURES = {'team_data_v1', 'team_integrations_v1'}
 
 
 def _catalog() -> dict:
@@ -26,7 +30,10 @@ def test_daily_catalog_requires_real_grep_and_grounded_judging():
         task = tasks[name]
         assert task['group'] == 'daily' and task['status'] == 'ready'
         assert task['demo_cache'] == 'off' and task['enforce_declared_evaluators'] is True
-        assert task['min_tool_counts']['grep'] >= 3
+        if fixture in GREP_FIXTURES:
+            assert task['min_tool_counts']['grep'] >= 3
+        else:
+            assert task['requires_claude_code'] is True and task['min_tool_counts']['spawn_claude_code_agent'] >= 1
         assert marker in task['prompt']
         assert {'message_person', 'send_email', 'spawn_browser_agent'} <= set(task['forbidden_tools'])
         assert task['environment']['db_fixtures'] == [fixture]
@@ -39,16 +46,19 @@ def test_each_fixture_label_has_one_seeder_and_markers_are_distinct():
     assert len(set(markers)) == len(markers)
     assert {fixture for _, fixture in TASK_FIXTURES.values()} == set(SEEDERS)
     entrypoint = Path(__file__).with_name('team_data_fixture.ts').read_text()
-    seeded = re.search(r"TEAM_INTEGRATIONS_MARKER = '([^']+)'", SEEDERS['team_integrations_v1'].read_text())
-    assert seeded and 'marker === TEAM_INTEGRATIONS_MARKER' in entrypoint
-    # The entrypoint seeds team-integrations only for its marker; every other marker keeps data-teams.
-    assert [name for name, (marker, _) in TASK_FIXTURES.items() if marker == seeded.group(1)] == [
-        name for name, (_, fixture) in TASK_FIXTURES.items() if fixture == 'team_integrations_v1']
+    for label, (seeder, constant) in SEEDERS.items():
+        if constant is None:
+            continue
+        seeded = re.search(rf"{constant} = '([^']+)'", seeder.read_text())
+        assert seeded and f'marker === {constant}' in entrypoint
+        # The entrypoint seeds this label only for its marker; every other marker keeps data-teams.
+        assert [name for name, (marker, _) in TASK_FIXTURES.items() if marker == seeded.group(1)] == [
+            name for name, (_, fixture) in TASK_FIXTURES.items() if fixture == label]
 
 
 def test_shared_integrations_task_judges_every_seeded_value_and_private_record():
     task = _catalog()['team-daily-shared-integrations']
-    seeder = SEEDERS['team_integrations_v1'].read_text()
+    seeder = SEEDERS['team_integrations_v1'][0].read_text()
     judge = next(e['judge_prompt'] for e in task['evaluators'] if e['method'] == 'single_turn_llm_judge')
     assert task['min_tool_counts']['grep'] >= 4
     assert task['tags'] == _catalog()['team-daily-investor-email-count']['tags']
@@ -66,6 +76,29 @@ def test_shared_integrations_task_judges_every_seeded_value_and_private_record()
         assert private in judge and private in seeder and private not in task['prompt']
     assert 'owner_user_id' in task['prompt'] and 'owner_user_id' in judge
     assert {'whatsapp', 'linkedin', 'granola'} <= set(re.findall(r'[a-z]+', judge))
+
+
+def test_shared_repo_task_requires_a_code_agent_on_the_shared_ref():
+    task = _catalog()['team-daily-shared-repo']
+    seeder = SEEDERS['team_repo_v1'][0].read_text()
+    judge = next(e['judge_prompt'] for e in task['evaluators'] if e['method'] == 'single_turn_llm_judge')
+    assert task['requires_claude_code'] is True and task['min_tool_counts'] == {'spawn_claude_code_agent': 1}
+    assert {'spawn_agent', 'spawn_claude_code_agent'} <= set(task['expected_tools'])
+    # spawn_agent type=code runs as spawn_claude_code_agent, so forbidding it would fail every pass.
+    assert 'spawn_claude_code_agent' not in task['forbidden_tools']
+    assert 'e2b_code_sandbox' in task['environment']['services']
+    repo_url = re.search(r"repoUrl: '([^']+)'", seeder).group(1)
+    assert task['environment']['live_targets'] == [repo_url]
+    shared_ref = 'gh:' + repo_url.removeprefix('https://github.com/').lower()
+    for fact in (shared_ref, 'Hello World!', '7fd1a60b01f91b314f59955a4e4d4e80d8edf11d', 'github_repo_ref', 'type=code'):
+        assert fact in judge
+    for fact in ("readmeFirstLine: 'Hello World!'", "headCommit: '7fd1a60b01f91b314f59955a4e4d4e80d8edf11d'",
+                 "defaultBranch: 'master'"):
+        assert fact in seeder
+    for private in ('SECRET_REPO_FOLDER_DO_NOT_EXPOSE', 'gh:octocat/spoon-knife'):
+        assert private in judge and private in seeder and private not in task['prompt']
+    # The agent must find the repo in its shared data map; the prompt never names it.
+    assert 'octocat' not in task['prompt'].lower() and 'github_repo_ref' in task['prompt']
 
 
 @pytest.mark.parametrize('base,database', [
@@ -98,6 +131,7 @@ def test_fixture_passes_exact_local_identity_and_reports_failure():
     ('team-daily-investor-email-count', 'ROSE-TEAM-INVESTORS'),
     ('team-daily-access-boundaries', 'ROSE-TEAM-BOUNDARIES'),
     ('team-daily-shared-integrations', 'ROSE-TEAM-SHARED'),
+    ('team-daily-shared-repo', 'ROSE-TEAM-REPO'),
 ])
 def test_each_task_dispatches_its_own_marker(task_name, marker):
     from types import SimpleNamespace

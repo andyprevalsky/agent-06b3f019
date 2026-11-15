@@ -1,12 +1,23 @@
 /**
- * Team-shared WhatsApp, LinkedIn, Granola, Fireflies and Plaid on isolated synthetic owners
- * (docs/plans/active/share-all-integrations.md). Every row a teammate's agent may read is owned by
- * a synthetic owner, never by the reader, so the bench user's real single-account rows never collide.
- * Grants use the stored shapes: '' for WhatsApp/LinkedIn, '' plus the pinned account email for
- * meeting notes, and the PlaidItem id for one bank login.
+ * Team-shared WhatsApp, LinkedIn, Granola, Fireflies, Plaid and a GitHub repo on isolated synthetic
+ * owners (docs/plans/active/share-all-integrations.md). Every row a teammate's agent may read is owned
+ * by a synthetic owner, never by the reader, so the bench user's real single-account rows never
+ * collide. Grants use the stored shapes: '' for WhatsApp/LinkedIn, '' plus the pinned account email
+ * for meeting notes, the PlaidItem id for one bank login and the canonical ref for a repo.
  */
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
+import {
+  GITHUB_REPO_INTEGRATION_NAME,
+  githubRepoIdentity,
+  type GithubRepoIdentity,
+} from '../../providers/githubRepos/refs';
+import {
+  connectGithubRepo,
+  findGithubRepoConnection,
+  grantGithubRepoAccess,
+  type GithubRepoConnectionRecord,
+} from '../../providers/githubRepos/store';
 
 export const TEAM_INTEGRATIONS_MARKER = 'ROSE-TEAM-SHARED';
 /** Values a teammate's agent must find (shared) or must never see (private). */
@@ -16,6 +27,18 @@ export const TEAM_INTEGRATIONS_EXPECTED = {
   granolaCode: 'HARBOR-12',
   sharedBank: { institution: 'Lighthouse Credit Union', transactions: 4, total: '1134.60' },
   privateValues: ['EMBER-93', 'GLACIER-58', 'Juniper Private Bank', '6565.50'],
+} as const;
+
+export const TEAM_REPO_MARKER = 'ROSE-TEAM-REPO';
+/** octocat/Hello-World is public and unchanged since 2012-03-06, so its facts are stable. */
+export const TEAM_REPO_EXPECTED = {
+  repoUrl: 'https://github.com/octocat/Hello-World',
+  defaultBranch: 'master',
+  readmeFirstLine: 'Hello World!',
+  headCommit: '7fd1a60b01f91b314f59955a4e4d4e80d8edf11d',
+  /** The outsider's repo, shared only with a team the reader is not in. */
+  unsharedRepoUrl: 'https://github.com/octocat/Spoon-Knife',
+  privateValues: ['SECRET_REPO_FOLDER_DO_NOT_EXPOSE', 'gh:octocat/spoon-knife'],
 } as const;
 
 const SHARED_TRANSACTIONS: Array<[string, string, string]> = [
@@ -37,9 +60,11 @@ const fixtureEmail = (marker: string, key: UserKey, id: string) =>
 
 async function deleteOwners(userIds: string[]) {
   if (userIds.length === 0) return;
-  // Integration and Person carry no User relation; users cascade teams, members and documents.
+  // Integration, Person and GithubRepoAccess carry no User relation; users cascade teams, members,
+  // folders and documents, and integrations cascade repo connections, Plaid rows and shares.
   await prisma.integration.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.person.deleteMany({ where: { userId: { in: userIds } } });
+  await prisma.githubRepoAccess.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.user.deleteMany({ where: { userId: { in: userIds } } });
 }
 
@@ -56,10 +81,8 @@ export async function cleanupTeamIntegrationsMarker(marker = TEAM_INTEGRATIONS_M
   await deleteOwners(prior.map((user) => user.userId));
 }
 
-export async function seedTeamIntegrationsFixture(
-  readerId: string = randomUUID(),
-  marker = TEAM_INTEGRATIONS_MARKER
-) {
+/** The reader plus fresh synthetic owner and outsider users, after removing an earlier seed. */
+async function fixtureUsers(marker: string, readerId: string) {
   await cleanupTeamIntegrationsMarker(marker);
   const createdReader = !(await prisma.user.findUnique({ where: { userId: readerId } }));
   const ids: Record<UserKey, string> = {
@@ -77,7 +100,6 @@ export async function seedTeamIntegrationsFixture(
       create: { userId: ids[key], email: emails[key], name: `Team integrations ${key}` },
     });
   }
-  const teams = { shared: randomUUID(), unrelated: randomUUID() };
   const member = (key: UserKey, owner = false) => ({
     userId: ids[key],
     email: emails[key],
@@ -85,6 +107,15 @@ export async function seedTeamIntegrationsFixture(
     status: 'ACCEPTED',
     acceptedAt: new Date(),
   });
+  return { ids, emails, createdReader, member };
+}
+
+export async function seedTeamIntegrationsFixture(
+  readerId: string = randomUUID(),
+  marker = TEAM_INTEGRATIONS_MARKER
+) {
+  const { ids, emails, createdReader, member } = await fixtureUsers(marker, readerId);
+  const teams = { shared: randomUUID(), unrelated: randomUUID() };
   await prisma.team.create({
     data: {
       id: teams.shared,
@@ -297,10 +328,131 @@ export function teamIntegrationsExpectation(fixture: TeamIntegrationsFixture) {
   };
 }
 
-export async function cleanupTeamIntegrationsFixture(fixture: TeamIntegrationsFixture) {
+export async function cleanupTeamIntegrationsFixture(fixture: {
+  ids: Record<UserKey, string>;
+  createdReader: boolean;
+}) {
   await deleteOwners([
     fixture.ids.owner,
     fixture.ids.outsider,
     ...(fixture.createdReader ? [fixture.ids.reader] : []),
   ]);
+}
+
+const repoIdentity = (url: string): GithubRepoIdentity => {
+  const identity = githubRepoIdentity(url);
+  if (identity === null) throw new Error(`Not a GitHub repo URL: ${url}`);
+  return identity;
+};
+
+/**
+ * A teammate's connected public repo shared with the reader's team. The owner connected it through a
+ * folder whose startup script must never reach the reader's code session; the outsider's repo is
+ * shared only with a team the reader is not in. Clone access is the owner's GithubRepoAccess grant.
+ */
+export async function seedTeamRepoFixture(
+  readerId: string = randomUUID(),
+  marker = TEAM_REPO_MARKER
+) {
+  const expected = TEAM_REPO_EXPECTED;
+  const shared = repoIdentity(expected.repoUrl);
+  // The reader's own connection would win over the share, so the run would prove nothing about it.
+  if ((await findGithubRepoConnection(readerId, shared.canonicalRef)) !== null)
+    throw new Error(
+      `Reader ${readerId} already connects ${shared.canonicalRef}; the shared-repo fixture needs a reader without it`
+    );
+  const { ids, emails, createdReader, member } = await fixtureUsers(marker, readerId);
+  const teams = { shared: randomUUID(), unrelated: randomUUID() };
+  await prisma.team.create({
+    data: {
+      id: teams.shared,
+      name: `${marker} Builders`,
+      ownerUserId: ids.owner,
+      members: { create: [member('owner', true), member('reader')] },
+    },
+  });
+  await prisma.team.create({
+    data: {
+      id: teams.unrelated,
+      name: `${marker} Unrelated`,
+      ownerUserId: ids.outsider,
+      members: { create: [member('outsider', true), member('owner')] },
+    },
+  });
+  const folder = await prisma.project.create({
+    data: {
+      userId: ids.owner,
+      name: `${marker} Owner folder`,
+      repoUrl: shared.repoUrl,
+      defaultBranch: expected.defaultBranch,
+      syncSalt: randomUUID(),
+      startupScript: `echo ${expected.privateValues[0]}`,
+    },
+  });
+  const connect = async (
+    key: 'owner' | 'outsider',
+    identity: GithubRepoIdentity,
+    defaultBranch: string,
+    folderId: string | null
+  ) => {
+    const connection = await connectGithubRepo({
+      userId: ids[key],
+      identity,
+      defaultBranch,
+      connectedRoseProjectRef: folderId,
+      source: 'connect',
+    });
+    await grantGithubRepoAccess(ids[key], identity.repoUrl);
+    return connection;
+  };
+  const repo = await connect('owner', shared, expected.defaultBranch, folder.id);
+  const outsiderRepo = await connect(
+    'outsider',
+    repoIdentity(expected.unsharedRepoUrl),
+    'main',
+    null
+  );
+  const share = (teamId: string, ownerKey: 'owner' | 'outsider', row: GithubRepoConnectionRecord) =>
+    prisma.teamIntegrationShare.create({
+      data: {
+        teamId,
+        integrationId: row.integrationId,
+        ownerUserId: ids[ownerKey],
+        provider: GITHUB_REPO_INTEGRATION_NAME,
+        accountId: row.canonicalRef,
+      },
+    });
+  await share(teams.shared, 'owner', repo);
+  await share(teams.unrelated, 'outsider', outsiderRepo);
+  return {
+    marker,
+    ids,
+    emails,
+    teams,
+    repo: {
+      canonicalRef: repo.canonicalRef,
+      repoUrl: repo.repoUrl,
+      integrationId: repo.integrationId,
+    },
+    folderId: folder.id,
+    createdReader,
+  };
+}
+
+export type TeamRepoFixture = Awaited<ReturnType<typeof seedTeamRepoFixture>>;
+
+/** The exact repo and facts a benchmark judge and the fixture runner report. */
+export function teamRepoExpectation(fixture: TeamRepoFixture) {
+  const expected = TEAM_REPO_EXPECTED;
+  return {
+    teams: fixture.teams,
+    owner_user_id: fixture.ids.owner,
+    repo: {
+      github_repo_ref: fixture.repo.canonicalRef,
+      repo_url: fixture.repo.repoUrl,
+      default_branch: expected.defaultBranch,
+    },
+    expected: { readme_first_line: expected.readmeFirstLine, head_commit: expected.headCommit },
+    private_values: expected.privateValues,
+  };
 }
