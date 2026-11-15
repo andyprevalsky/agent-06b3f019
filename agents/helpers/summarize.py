@@ -1281,6 +1281,8 @@ Just write plain text describing what was done."""
             "summary": f"Agent completed goal: {goal}",
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "tool_counts": {},
+            # Lets a caller holding a speculative summary regenerate instead.
+            "generation_failed": True,
         }
     finally:
         if demo_cache_token is not None:

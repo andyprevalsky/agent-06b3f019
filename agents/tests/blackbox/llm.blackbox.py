@@ -6772,9 +6772,10 @@ async def test_call_planner_llm_activity_happy_path():
     # Planner always uses rose-1-ultra, even when the caller passed "rose".
     assert planner_body["model"] == "claude-opus-5-5"
     assert planner_body["stream"] is True
-    # Anthropic's literal "max" stalls — we normalize to "xhigh" (the highest
-    # reliably-streaming level, mirroring gpt_auth which maps "max" → "xhigh").
-    assert planner_body["output_config"]["effort"] == "xhigh"
+    # The planner's "max" sentinel resolves to its deadline-fit tier: at xhigh
+    # Opus 5.5 emitted nothing before the planner's fixed 220s deadline on the
+    # raise-5m planner request (set_plan RoseDeadlineError); high finished in 83s.
+    assert planner_body["output_config"]["effort"] == "high"
 
 
 async def test_call_llm_activity_happy_path_with_messages_list():

@@ -521,7 +521,11 @@ async def test_code_agent_cannot_ask_a_question():
             assert code == 1 and "unknown option --pinned" in err, (code, out, err)
             code, out, err = await _cli(fake, home, "--help", rose_desktop=rose_desktop)
             assert code == 0 and not any(word in out for word in ("approve", "wait", "--pinned", "--option")), out
-        assert fake.calls == [], f"no question request reached Rose: {fake.calls}"
+        # The MCP server's tool listing reads the user's connected MCP servers (GET .../mcp);
+        # nothing else may reach Rose: no question, approval or wait request.
+        assert all(c["method"] == "GET" and c["path"].endswith("/mcp") for c in fake.calls), (
+            f"no question request reached Rose: {fake.calls}"
+        )
 
 
 async def test_cli_display_dedupes_by_content_hash():

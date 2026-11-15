@@ -8,6 +8,8 @@
  *
  *   connection setting_up --> [SETUP] floating progress card at the top of the screen,
  *       fills by done steps / total, each step listed under it (✓ / spinner / ○ / ✕)
+ *       plus a muted "About N min left" line, hidden while the device's setupState is
+ *       awaiting_user or the user holds phone control (setup waiting on the owner)
  *     --connection ready--> [CONNECTED] card shows "Connected" with every step ✓,
  *       then hides after CONNECTED_CARD_MS (fast /connection polling already stopped)
  *   connection never setting_up during this mount --> no card
@@ -58,7 +60,16 @@ export function PhoneDeviceView() {
       aria-label="iPhone"
       className="absolute inset-0 flex min-h-0 flex-col text-white"
     >
-      {setup !== null && <IPhoneSetupProgress connection={setup} variant="floating" />}
+      {setup !== null && (
+        <IPhoneSetupProgress
+          connection={setup}
+          variant="floating"
+          waitingOnUser={
+            model.device?.setupState === 'awaiting_user' ||
+            model.device?.holder?.controlOwner === 'user'
+          }
+        />
+      )}
       <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-2">
         <PhoneDeviceLive model={model} settingUp={settingUp} />
       </div>

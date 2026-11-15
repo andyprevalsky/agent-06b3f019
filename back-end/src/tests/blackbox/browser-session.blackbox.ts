@@ -50,7 +50,7 @@ import { runBrowserPauseAbortCases } from './browser-session-pause-abort.cases';
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
 import { runBrowserPrivateRestoreCases } from './browser-session-private-restore.cases';
 import { runBrowserApprovalE2ECases } from './browser-session-approval-e2e.cases';
-import { runQuarantinedProviderLifecycleCases } from './browser-session-provider-lifecycle.quarantine';
+import { runBrowserProviderLifecycleCases } from './browser-session-provider-lifecycle.cases';
 import {
   runBrowserRootTeardownSavesStateCases,
   runBrowserTerminalPauseCases,
@@ -566,7 +566,7 @@ async function runAll() {
     ['--close-disconnect-only', runBrowserCloseDisconnectCases],
     ['--pause-abort-only', runBrowserPauseAbortCases],
     ['--cold-import-only', runBrowserColdImportCases],
-    ['--provider-lifecycle-only', runQuarantinedProviderLifecycleCases],
+    ['--provider-lifecycle-only', runBrowserProviderLifecycleCases],
     ['--approval-e2e-only', runBrowserApprovalE2ECases],
     ['--private-restore-only', runBrowserPrivateRestoreCases],
     ['--logical-browser-only', runLogicalBrowserCases],
@@ -598,7 +598,7 @@ async function runAll() {
   await runBrowserPrivateRestoreCases();
   await runBrowserApprovalE2ECases();
   await runBrowserTerminalPauseCases();
-  await runQuarantinedProviderLifecycleCases();
+  await runBrowserProviderLifecycleCases();
   await runBrowserRootTeardownSavesStateCases();
   await runBrowserResumeCustodyCases();
   await runLogicalBrowserCases();

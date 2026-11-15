@@ -455,19 +455,25 @@ def _build_cache_namespace(
 
 
 DEFAULT_REASONING_EFFORT = "xhigh"
+# Our "max" sentinel is sent only by the planner, whose rose.complete deadline
+# is a fixed 220s. It means the highest tier that reliably finishes a
+# long-horizon plan inside that deadline, not the provider's top tier: on the
+# raise-5m planner request gpt-6.1-sol streamed only reasoning for the whole
+# 220s at xhigh (5/5 calls), took 183s at high and 128s at medium.
+MAX_SENTINEL_REASONING_EFFORT = "medium"
 
 
 def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     """Normalize effort for OpenAI Responses / Codex.
 
     OpenAI accepts none / minimal / low / medium / high / xhigh / max (model-
-    dependent). Our "max" sentinel maps to xhigh (highest reliably-streaming
-    tier). Default is xhigh so every body always carries reasoning.effort.
+    dependent). Our "max" sentinel maps to MAX_SENTINEL_REASONING_EFFORT.
+    Default is xhigh so every body always carries reasoning.effort.
     """
     if effort == "minimal":
         return "low"
     if effort == "max":
-        return "xhigh"
+        return MAX_SENTINEL_REASONING_EFFORT
     return effort or DEFAULT_REASONING_EFFORT
 
 
