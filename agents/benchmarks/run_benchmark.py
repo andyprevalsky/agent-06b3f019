@@ -479,7 +479,11 @@ AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
 # and production needs LIVE-mode values where the sandbox fixture needs TEST-mode ones. Must equal
 # BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID in back-end/src/domains/purchases/config.ts; provisioned
 # once by `back-end/scripts/setup-benchmark-payment.ts --live`.
-AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID = "00000000-0000-4000-8000-000000000107"
+# 2026-11-14 (user directive): the live production lifecycle probe runs as the OWNER account. Only
+# the owner's benchmark agents take the charged customer path, against a dedicated live Stripe
+# customer (BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID on the backend), never the owner's own
+# Subscription; the probe's settled purchase records are purged after it passes.
+AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID = USER_ID
 AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES = {
     AGENT_PAYMENT_PRODUCTION_TASK_NAME,
     "agent-payment-production-purchase",
@@ -2662,63 +2666,40 @@ async def _preflight_message_person_bridge(base_url: str) -> None:
 # deploy.md Step 13c's identity rules travel with the task's own fail-closed path, so an agent
 # that hits it needs no other document and never asks the user for credentials.
 PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
-    "Provision the non-admin production identity once. Every credential it needs is already in "
-    "back-end/.env; do not ask the user for any of them. Run (DIRECT_URL: the 6543 pooler fails "
-    "with \"Can't reach database server\"):\n"
-    "  cd back-end && set -a && . ./.env && set +a && \\\n"
-    "    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
-    "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID}\n"
-    "Guardrails: require the dedicated benchmark user's normal signed live v2 connection, consent "
-    "and approved KYC first (never Andy's or another actor's identity). A legacy cardholder is not "
-    "a v2 connected user; never create an identity automatically or bypass pending KYC; never enter a card "
-    "number. When the live customer has no saved card the script prints a one-time hosted Stripe "
-    "Checkout link: a human saves the live card there once, then re-run the command."
+    "The live production lifecycle probe runs as the owner account. One-time setup (no user "
+    "credentials beyond the owner's own AgentCard login): (1) the owner completes the normal signed "
+    "live AgentCard v2 connection with consent and approved KYC; (2) provision the dedicated live "
+    "Stripe customer and save a card through its printed hosted Checkout link:\n"
+    "  cd back-end && set -a && . ./.env && set +a && STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
+    "    BENCHMARK_ALLOW_LIVE_STRIPE=true npx tsx scripts/setup-benchmark-payment.ts --owner-billing\n"
+    "  then set BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID=<printed cus_...> on Render (and the "
+    "Rose project env). The owner's own Subscription and billing are never touched; never enter a "
+    "card number from a script."
 )
 
 
-def _production_payment_identity_gap(usage: dict) -> Optional[str]:
-    """Why the production payment identity cannot complete a purchase, or None when it can.
-
-    `resolveAndIssuePurchaseCard` 402s a non-admin with no `Subscription.stripeCustomerId`, and an
-    agent with no credit headroom stops at OUT_OF_CREDITS before it ever reaches checkout. Both are
-    provisioning gaps, not product failures, so name them before the run spends live money.
-    """
-    tier = usage.get("tier")
-    if tier is None or tier == "":
-        return "it has no Subscription row, so no Stripe billing customer — every mint would 402"
-    remaining = usage.get("remaining")
-    if not isinstance(remaining, (int, float)) or isinstance(remaining, bool) or remaining <= 0:
-        return f"it has no credit headroom (remaining={remaining!r}) — the agent stops at OUT_OF_CREDITS"
-    if usage.get("stripeLivemode") is not True:
-        return f"Stripe billing mode must be live (stripeLivemode={usage.get('stripeLivemode')!r})"
-    return None
-
-
 async def _preflight_production_payment_identity(base_url: str) -> None:
-    """Fail fast when the production payment identity was never provisioned.
+    """Fail fast before any live mint when the owner lifecycle probe is not ready.
 
-    Without this the deploy gate mints a LIVE AgentCard, then dies minutes later on an opaque 402.
-    Admission requires an authoritative live billing mode before any allocation or fixture write.
+    Requires the backend's dedicated live billing customer for the probe and the owner's scoped
+    live v2 AgentCard connection with approved KYC and a live company-funded wallet.
     """
     user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get(f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers)
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Could not verify production payment identity {user_id} "
-            f"({response.status_code}): {response.text[:200]}"
+        billing = await client.get(f"{base_url}/api/test-payment/lifecycle/owner-billing", headers=headers)
+        status = await client.get(
+            f"{base_url}/api/agentcard/status",
+            headers={**headers, "x-user-id": user_id},
         )
-    gap = _production_payment_identity_gap(response.json())
-    if gap is None:
-        async with httpx.AsyncClient(timeout=15) as client:
-            status = await client.get(
-                f"{base_url}/api/agentcard/status",
-                headers={**headers, "x-user-id": user_id},
-            )
-        if status.status_code != 200:
-            raise RuntimeError(f"Could not verify live v2 AgentCard readiness ({status.status_code})")
+    gaps = []
+    if billing.status_code != 200:
+        gaps.append(f"owner billing readiness unavailable ({billing.status_code}): {billing.text[:200]}")
+    elif billing.json().get("configured") is not True:
+        gaps.append("BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID is not configured on the backend")
+    if status.status_code != 200:
+        gaps.append(f"could not verify live v2 AgentCard readiness ({status.status_code})")
+    else:
         readiness = status.json()
         if not (
             readiness.get("apiVersion") == 2
@@ -2727,19 +2708,33 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
             and readiness.get("livemode") is True
             and readiness.get("fundsSource") == "company_flow"
         ):
-            raise RuntimeError(
-                "Production payment identity needs a scoped live v2 AgentCard connection, "
-                "approved KYC and a live company-funded wallet before running paid probes. "
-                "Complete the normal signed live connection for the dedicated benchmark user; "
-                "a legacy cardholder or sandbox fixture cannot satisfy this requirement."
+            gaps.append(
+                "the owner needs a scoped live v2 AgentCard connection, approved KYC and a live "
+                "company-funded wallet"
             )
+    if not gaps:
         return
     message = (
-        f"Production payment identity {user_id} is not provisioned: {gap}.\n"
+        f"Production payment lifecycle probe for {user_id} is not ready: {'; '.join(gaps)}.\n"
         f"{PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
     )
     print(f"\n    ⛔ {message}")
     raise RuntimeError(message)
+
+
+async def purge_owner_lifecycle_records(base_url: str, agent_id: str) -> None:
+    """Remove the owner's settled probe purchase records after the probe passed (best effort)."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/purge",
+            headers=headers,
+            json={"agentId": agent_id},
+        )
+    if resp.status_code != 200:
+        print(f"    ⚠ Owner lifecycle probe records NOT purged ({resp.status_code}): {resp.text[:300]}")
+        return
+    print(f"    🧹 Purged {resp.json().get('purged')} settled probe purchase record(s) from the owner account")
 
 
 async def _preflight_close_purchase_reuse_gate(base_url: str) -> None:
@@ -4030,6 +4025,8 @@ async def ensure_payment_lifecycle_cleanup(
         if lifecycle_error is not None:
             raise RuntimeError(lifecycle_error)
         print("    🧹 Confirmed payment-card transfer reclaim and Stripe refund")
+        if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+            await purge_owner_lifecycle_records(base_url, agent_id)
         return lifecycle
     except AgentCardReleaseStall:
         raise
