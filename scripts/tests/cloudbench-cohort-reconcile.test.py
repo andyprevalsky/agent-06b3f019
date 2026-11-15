@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import re
 import signal
-import sys
 import tempfile
 import subprocess
 import time
@@ -15,9 +14,6 @@ import unittest
 from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
-import test_quarantine as tq
-
 MODULE=ROOT/'scripts/cloudbench-cohort-reconcile.py'
 loader=importlib.machinery.SourceFileLoader('ticket_fixture',str(ROOT/'scripts/tests/cloudbench-cleanup-admission-tickets.test.py'))
 spec=importlib.util.spec_from_loader(loader.name,loader)
@@ -89,6 +85,8 @@ reap_orphaned_fleet_proxies(){
 }
 campaign_inventory_capture(){ inventory_index_healthy; }
 inventory_refresh_wait_tick(){
+ [ -z "${PUBLISH_HOST_DELAY:-}" ] || sleep "$PUBLISH_HOST_DELAY"
+ if [ "${NO_PUBLISH:-0}" = 1 ];then SECONDS=$((SECONDS+1));echo "$SECONDS" >> "$CASE/logical-ticks";return 0;fi
  echo tick >> "$CASE/refresh-ticks"
  mkdir -p "$INVENTORY_INDEX/.generation-after"
  date +%s > "$INVENTORY_INDEX/.generation-after/published_at"
@@ -113,12 +111,17 @@ exit "$status"
         if current.is_symlink():current.unlink()
         current.symlink_to(name)
 
-    def spawn(self,index,sealed=True):
+    def spawn(self,index,sealed=True,extra=None):
         env=dict(self.ticket.env,CASE=str(self.root),BARRIER=str(int(self.barrier)),APP='fixture',FLEET_OWNER_HOST='fixture',FLEET_OWNERSHIP_ROOT=str(self.ownership),FLEET_REGISTRY_DIR=str(self.ownership/('current-'+str(index))),POOL_REUSE_ONLY='0',ROOT_DIR=str(ROOT),CLOUDBENCH_SCRIPT_SNAPSHOT=os.environ.get('CLOUDBENCH_TEST_RECONCILE_HELPER_DIR',str(ROOT/'scripts')),RUN_BENCH_CLEANUP_COHORT_DIR=str(self.ticket.cohort)if sealed else '',RUN_BENCH_CLEANUP_COHORT_ID='c001'if sealed else '',RUN_BENCH_CLEANUP_JOB=self.ticket.jobs[index]if sealed else '',RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(self.ticket.cohort)if sealed else '',RUN_BENCH_CAMPAIGN_COHORT='c001'if sealed else '',RUN_BENCH_CAMPAIGN_JOB_ID=self.ticket.jobs[index]if sealed else '',RUN_BENCH_CAMPAIGN_JOB_GENERATION='1')
         if self.campaign:
             env.update(CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=str(self.index),INVENTORY_INDEX=str(self.index),SNAPSHOT_LOOP_TOKEN='publisher',SNAPSHOT_LOOP_PID=str(os.getpid()),INVENTORY_PUBLISHER_BORROWED='1',INVENTORY_CAMPAIGN_PARENT_PID=str(os.getpid()),INVENTORY_CAMPAIGN_PARENT_START='test',INVENTORY_CLOCK_EPOCH=str(int(time.time())),INVENTORY_CLOCK_SECONDS='0',SNAPSHOT_REFRESH_TIMEOUT='1',CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS='1',CAPACITY_ADMISSION_DEADLINE='10',FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED='0')
-            self_body='inventory_pid_matches_start(){ return 0; }\n'+self.body
+            # The fixture publisher is immediate, so the 1 s borrowed wait must not
+            # be spent by the host: as in cloudbench_campaign_inventory_test.py,
+            # unsetting SECONDS removes bash's whole-second wall-clock binding (a
+            # SECONDS+1 deadline can expire microseconds after it is set).
+            self_body='inventory_pid_matches_start(){ return 0; }\nunset SECONDS; SECONDS=0\n'+self.body
         else:self_body=self.body
+        env.update(extra or {})
         child=subprocess.Popen(['bash','-c',self.functions+self_body],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
         self.children.append(child);self.ticket.children.append(child)
         (self.root/('birth-'+str(child.pid))).write_text(tickets.birth(child.pid))
@@ -272,9 +275,6 @@ class CohortReconciliation(unittest.TestCase):
         lease.write_text(json.dumps(winner));done.write_text(json.dumps(baseline))
         f.assert_records_preserved()
 
-    @tq.quarantine(since='2026-11-15', repair='pending-handoff:b7248ac5873d434aa5320ab2bea17f4c',
-                   error='FAIL: test_campaign_noop_and_mutation_share_the_completed_barrier (__main__.CohortReconciliation.test_campaign_noop_and_mutation_share_the_completed_barrier) (mutated=True)',
-                   evidence='.context/deploy-pipeline-pr2104/rca/b7248ac5873d434aa5320ab2bea17f4c.json')
     def test_campaign_noop_and_mutation_share_the_completed_barrier(self):
         for mutated in (False,True):
             with self.subTest(mutated=mutated):
@@ -314,6 +314,26 @@ class CohortReconciliation(unittest.TestCase):
                     code,out,err=f.join(f.spawn(7));self.assertNotEqual(code,0,out+err)
                 else:self.assertIsNone(receipt['inventory'])
                 f.assert_records_preserved()
+
+    def test_campaign_wait_is_spent_by_the_logical_clock_not_host_time(self):
+        # Host delay before publication does not consume the 1-tick borrowed wait.
+        f=ReconciliationFixture(self,width=3,campaign=True,mutated=True)
+        code,out,err=f.join(f.spawn(0,extra={'PUBLISH_HOST_DELAY':'1.05'}));self.assertEqual(code,0,out+err)
+        self.assertIn('mutated=1',out)
+        self.assertEqual(len((f.root/'refresh-ticks').read_text().splitlines()),1)
+        receipt=json.loads((f.ticket.cohort/'stale-reconcile.completed.json').read_text())
+        self.assertEqual((receipt['may_have_mutated'],receipt['inventory']['generation']),(1,'.generation-after'))
+        f.assert_records_preserved()
+        # Negative control: the logical clock still expires an unpublished wait, fail closed.
+        f=ReconciliationFixture(self,width=3,campaign=True,mutated=True)
+        code,out,err=f.join(f.spawn(0,extra={'NO_PUBLISH':'1'}));self.assertNotEqual(code,0,out+err)
+        self.assertIn('timed out waiting for a new healthy parent inventory generation',err)
+        self.assertFalse((f.root/'refresh-ticks').exists())
+        # One tick reaches the local 1 s deadline; the caller cap (10) never fires.
+        self.assertEqual((f.root/'logical-ticks').read_text().splitlines(),['1'])
+        self.assertFalse((f.ticket.cohort/'stale-reconcile.completed.json').exists())
+        self.assertNotEqual(json.loads((f.ticket.cohort/'stale-reconcile.failed.json').read_bytes())['status'],0)
+        f.assert_records_preserved()
 
     def test_dead_winner_without_completion_is_recovered_by_successor(self):
         f=ReconciliationFixture(self,barrier=True)
