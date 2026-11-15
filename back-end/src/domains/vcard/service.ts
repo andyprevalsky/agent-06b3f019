@@ -3,7 +3,7 @@ import vCardsJS from 'vcards-js';
 import * as repo from './repo';
 import { createLogger } from '../../providers/logger';
 import {
-  ROSE_PHONE,
+  rosePhoneFor,
   ROSE_EMAIL,
   ROSE_ORG,
   ROSE_URL,
@@ -23,11 +23,11 @@ function applyDefaultPhoto(vCard: VCard) {
   vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');
 }
 
-function buildBaseVCard(name: string): VCard {
+function buildBaseVCard(name: string, phone: string = rosePhoneFor()): VCard {
   const vCard = vCardsJS();
   vCard.firstName = name;
   vCard.lastName = '';
-  vCard.cellPhone = ROSE_PHONE;
+  vCard.cellPhone = phone;
   vCard.email = ROSE_EMAIL;
   vCard.organization = ROSE_ORG;
   vCard.url = ROSE_URL;
@@ -58,7 +58,7 @@ export async function generatePersonalizedVCard(userId: string): Promise<{
       user?.systemName !== null && user?.systemName !== undefined && user.systemName !== ''
         ? user.systemName
         : DEFAULT_SYSTEM_NAME;
-    const vCard = buildBaseVCard(systemName);
+    const vCard = buildBaseVCard(systemName, rosePhoneFor(user?.phone));
     const sanitized = systemName
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, '-')
