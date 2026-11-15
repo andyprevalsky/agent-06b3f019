@@ -11,6 +11,7 @@
  * Split out of supervisorHandler.ts so the handler stays about the tool loop.
  */
 
+import { userArchiveRoot } from '../llmArchiveRecord';
 import { createStreamingCompletion, CompletionMessage, CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { computeSubscriptionLeases } from '../computeSubscriptionLeases';
@@ -123,9 +124,13 @@ export async function callSupervisorLlm(
     messages: groundedMessages,
     temperature: 0.3,
     response_model: reactionOnly ? SUPERVISOR_REACTION_MODEL : SUPERVISOR_RESPONSE_MODEL,
-    // Dev/benchmark request+response dump (llmDump is a no-op in production), so a
-    // supervisor decision can be replayed and its raw output inspected.
-    dump_context: { call_site: 'sms_supervisor', agent_id: `sms-supervisor-${userId}` },
+    // Supervisor turns are user-level conversation (no agent tree yet): they
+    // archive under the documented per-user root `user-<userId>`.
+    dump_context: {
+      call_site: 'sms_supervisor',
+      agent_id: `sms-supervisor-${userId}`,
+      root_agent_id: userArchiveRoot(userId),
+    },
     ...(providerRoute !== undefined ? { provider_route: providerRoute } : {}),
     // Compute tokens only on benchmark overrides that need them.
     ...(sendComputeTokens && claudeToken ? { claude_token: claudeToken } : {}),

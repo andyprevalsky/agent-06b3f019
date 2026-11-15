@@ -346,6 +346,44 @@ def _use_r2_archive() -> bool:
     return backend == "r2" or (_is_production() and backend != "local")
 
 
+_NONPROD_R2_OPT_IN = "TRACE_ARCHIVE_ALLOW_NONPROD_R2"
+
+
+def _production_runtime() -> bool:
+    """Same production test the backend applies before writing the prod bucket."""
+    return bool(
+        os.environ.get("FLY_APP_NAME")
+        or os.environ.get("FLY_MACHINE_ID")
+        or os.environ.get("ENVIRONMENT", "").strip().lower() == "production"
+        or os.environ.get("NODE_ENV", "").strip().lower() == "production"
+    )
+
+
+def _r2_publish_permitted(path: str = "", *, log: bool = True) -> bool:
+    """Dev/test runs never publish into the R2 trace bucket without an explicit opt-in.
+
+    A refused artifact is kept in the local archive instead, with an ERROR log
+    and the `nonprod_r2_refused` counter naming the opt-in.
+    """
+    if _production_runtime() or os.environ.get(_NONPROD_R2_OPT_IN, "").strip().lower() in _TRUE_VALUES:
+        return True
+    if log:
+        refused = _count("nonprod_r2_refused")
+        if refused == 1 or refused & (refused - 1) == 0:
+            logger.error(
+                "trace_archive.nonprod_r2_refused",
+                path=_safe_path(path),
+                refused=refused,
+                reason=f"non-production process; set {_NONPROD_R2_OPT_IN}=1 to publish traces to the R2 bucket",
+            )
+    return False
+
+
+def _r2_publication() -> bool:
+    """Whether writes publish through the backend to R2 (quiet check)."""
+    return _use_r2_archive() and _r2_publish_permitted(log=False)
+
+
 def _object_key(root_agent_id: str, path: str = "") -> str:
     suffix = _safe_path(path)
     prefix = f"trace-archive/{_safe_segment(root_agent_id)}"
@@ -929,13 +967,15 @@ def store_encrypted_artifact(
     metadata: dict[str, Any],
 ) -> Optional[str]:
     """Store an already-encrypted artifact locally or through the backend."""
+    if _refuse_unbound_root(root_agent_id, path):
+        return None
     root_agent_id = _safe_segment(root_agent_id)
     path = "/".join(_safe_segment(part) for part in path.split("/") if part)
     if not path:
         return None
 
     backend = os.environ.get("TRACE_ARCHIVE_BACKEND", "").strip().lower()
-    if _is_production() or backend == "r2":
+    if (_is_production() or backend == "r2") and _r2_publish_permitted(path):
         ref = _post_backend_artifact(root_agent_id=root_agent_id, path=path, ciphertext=ciphertext, metadata=metadata)
         if ref:
             return ref
@@ -992,13 +1032,16 @@ def _closed_file_completed(future: Future[Optional[dict[str, str]]]) -> None:
 
 # Artifacts ship to the backend as base64-in-JSON; a single oversized body (e.g.
 # a browser session video) freezes the Node event loop on parse/GC for minutes
-# (observed: 355s backend log gap → suite-wide ConnectErrors). Oversized
-# artifacts are dropped with a warning — archive is best-effort by contract.
-_DEFAULT_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
-# Match the backend batch contract, below its existing 100 MiB JSON parser cap.
+# (observed: 355s backend log gap → suite-wide ConnectErrors). The limit bounds
+# the encrypted (post-gzip) body; an artifact above it is rejected with an
+# ERROR log and the `artifact_too_large` counter, never silently.
+# Backend ingest contract: ciphertext <= 72 MiB per record (base64 <= 96 MiB);
+# plaintext is only bomb-guarded (1 GiB) there, so it is never a Python limit.
+_DEFAULT_MAX_ARTIFACT_BYTES = 72 * 1024 * 1024
+# Match the backend batch contract: JSON body <= 96 MiB + 64 KiB framing.
 _BATCH_MAX_RECORDS = 256
-_BATCH_MAX_BYTES = 64 * 1024 * 1024
-_BATCH_MAX_CIPHERTEXT_BYTES = 33 * 1024 * 1024
+_BATCH_MAX_BYTES = 96 * 1024 * 1024 + 64 * 1024
+_BATCH_MAX_CIPHERTEXT_BYTES = _DEFAULT_MAX_ARTIFACT_BYTES
 
 
 def _publish_artifact_batch(root_agent_id: str, artifacts: list[dict[str, Any]]) -> bool:
@@ -1053,6 +1096,8 @@ def _publish_artifact_batch(root_agent_id: str, artifacts: list[dict[str, Any]])
 def archive_files(*, root_agent_id: str, artifacts: Iterable[tuple[str, Path, str, Optional[bool]]]) -> bool:
     if not archive_enabled():
         return True
+    if _refuse_unbound_root(root_agent_id, "files"):
+        return False
     safe_root = _safe_segment(root_agent_id)
     completion: Future[None] = Future()
     _track_archive_future(safe_root, completion)
@@ -1099,7 +1144,7 @@ def _archive_files_owned(*, root_agent_id: str, artifacts: Iterable[tuple[str, P
             all_acknowledged = False
             continue
         ciphertext, metadata = encrypted
-        if not _use_r2_archive():
+        if not _r2_publication():
             if not store_encrypted_artifact(
                 root_agent_id=safe_root, path=path, ciphertext=ciphertext, metadata=metadata
             ):
@@ -1164,6 +1209,8 @@ def archive_closed_files_in_background(
         return None
     if len({path for path, *_ in artifacts}) != len(artifacts):
         return None
+    if _refuse_unbound_root(root_agent_id, "files"):
+        return None
     safe_root = _safe_segment(root_agent_id)
 
     def publish() -> Optional[dict[str, str]]:
@@ -1206,7 +1253,7 @@ def archive_closed_files_in_background(
                 del encrypted, ciphertext
             if len(json.dumps({"rootAgentId": safe_root, "artifacts": batch}).encode()) > _BATCH_MAX_BYTES:
                 return None
-            if _use_r2_archive():
+            if _r2_publication():
                 with _archive_publication_lease(safe_root, exclusive=False):
                     acknowledged = _publish_artifact_batch(safe_root, batch)
             else:
@@ -1260,7 +1307,7 @@ def _async_writes_enabled() -> bool:
 
 def _expected_ref(safe_root: str, safe_path: str) -> str:
     backend = os.environ.get("TRACE_ARCHIVE_BACKEND", "").strip().lower()
-    if _is_production() or backend == "r2":
+    if (_is_production() or backend == "r2") and _r2_publish_permitted(log=False):
         return f"trace-archive/{safe_root}/{safe_path}"
     return str(_local_root() / safe_root / safe_path)
 
@@ -1324,7 +1371,7 @@ def flush_archive_writes(root_agent_id: str, timeout_s: float = 25.0) -> bool:
         if unfinished:
             return False
 
-    if _use_r2_archive():
+    if _r2_publication():
         with _archive_publication_lease(safe_root, exclusive=True, deadline=deadline) as acquired:
             if not acquired:
                 return False
@@ -1341,6 +1388,49 @@ def flush_archive_writes(root_agent_id: str, timeout_s: float = 25.0) -> bool:
     return True
 
 
+def _count(name: str) -> int:
+    from helpers.llm_archive_record import increment_counter
+
+    return increment_counter(name)
+
+
+def _refuse_unbound_root(root_agent_id: Any, path: str) -> bool:
+    """Every artifact belongs to a real root bundle; never write `unbound`."""
+    from helpers.llm_archive_record import is_bound_id
+
+    if is_bound_id(root_agent_id) and _safe_segment(str(root_agent_id)) != "unbound":
+        return False
+    refused = _count("unbound_refused")
+    logger.error("trace_archive.unbound_refused", path=_safe_path(path), root_agent_id=root_agent_id, refused=refused)
+    return True
+
+
+def _encrypt_within_limit(
+    *, root_agent_id: str, path: str, body: bytes, content_type: str, compress: Optional[bool]
+) -> Optional[tuple[bytes, dict[str, Any]]]:
+    encrypted = encrypt_artifact(body, path=path, content_type=content_type, compress=compress)
+    if encrypted is None:
+        return None
+    ciphertext, metadata = encrypted
+    # The limit bounds the encrypted wire body the backend must parse, so it is
+    # measured after compression: a large JSON trace that compresses below it
+    # is archived in full. Anything still above it is a loud, counted error.
+    limit = _max_artifact_bytes()
+    if len(ciphertext) > limit:
+        count = _count("artifact_too_large")
+        logger.error(
+            "trace_archive.artifact_too_large",
+            root_agent_id=_safe_segment(root_agent_id),
+            path=_safe_path(path),
+            plaintext_bytes=len(body),
+            ciphertext_bytes=len(ciphertext),
+            limit=limit,
+            rejected=count,
+        )
+        return None
+    return ciphertext, metadata
+
+
 def _archive_bytes_now(
     *,
     root_agent_id: str,
@@ -1349,7 +1439,9 @@ def _archive_bytes_now(
     content_type: str,
     compress: Optional[bool],
 ) -> Optional[dict[str, Any]]:
-    encrypted = encrypt_artifact(body, path=path, content_type=content_type, compress=compress)
+    encrypted = _encrypt_within_limit(
+        root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=compress
+    )
     if encrypted is None:
         return None
     ciphertext, metadata = encrypted
@@ -1357,6 +1449,55 @@ def _archive_bytes_now(
     if not ref:
         return None
     return {"ref": ref, "metadata": metadata}
+
+
+def _spill_archive_job(
+    *,
+    root_agent_id: str,
+    path: str,
+    content_type: str,
+    body_factory: Callable[[], bytes],
+    compress: Optional[bool],
+) -> Optional[dict[str, Any]]:
+    """Queue full: persist durably now instead of dropping the artifact.
+
+    R2 mode writes the encrypted pair to the durable outbox, which the root's
+    next successful publish and its terminal flush drain; local mode writes the
+    artifact directly. No network I/O happens on the caller's thread.
+    """
+    safe_root = _safe_segment(root_agent_id)
+    safe_path = _safe_path(path)
+    try:
+        body = body_factory()
+        encrypted = _encrypt_within_limit(
+            root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=compress
+        )
+        if encrypted is None:
+            return None
+        ciphertext, metadata = encrypted
+        if (_is_production() or os.environ.get("TRACE_ARCHIVE_BACKEND", "").strip().lower() == "r2") and (
+            _r2_publish_permitted(path)
+        ):
+            _write_outbox(safe_root, safe_path, ciphertext, metadata)
+        else:
+            _write_local(safe_root, safe_path, ciphertext, metadata)
+    except Exception as exc:
+        # Same containment as the worker path: a full disk or a failing body
+        # factory is an archive failure (None), never the caller's exception.
+        failed = _count("queue_spill_failed")
+        logger.error(
+            "trace_archive.queue_spill_failed",
+            root_agent_id=safe_root,
+            path=safe_path,
+            error_type=type(exc).__name__,
+            error=str(exc)[:200],
+            failed=failed,
+        )
+        return None
+    spilled = _count("queue_spilled")
+    if spilled == 1 or spilled & (spilled - 1) == 0:
+        logger.warning("trace_archive.queue_spilled", root_agent_id=safe_root, path=safe_path, spilled_jobs=spilled)
+    return {"ref": _expected_ref(safe_root, safe_path), "metadata": metadata}
 
 
 def _submit_archive_job(
@@ -1374,35 +1515,24 @@ def _submit_archive_job(
     if not safe_path:
         return None
 
-    drain_backend_outbox_after_success = _use_r2_archive()
-    # Best-effort telemetry must never apply blocking backpressure to the agent
-    # event loop. At 65+ concurrent jobs the old blocking acquire starved the
-    # loop, delaying a 45s recording timeout until 142s and preventing the FE
-    # recording pointer from being saved. Keep memory bounded and drop overflow.
+    drain_backend_outbox_after_success = _r2_publication()
+    # Never block the agent event loop on a queue slot (at 65+ concurrent jobs
+    # a blocking acquire starved the loop and delayed a 45s recording timeout
+    # to 142s). Overflow is no longer dropped: it is encrypted and persisted
+    # to the durable outbox (or local archive) without network I/O.
     if not _take_archive_slot(existing_publisher=True):
         _ARCHIVE_DROPPED_JOBS += 1
-        drop_count = _ARCHIVE_DROPPED_JOBS
-        if drop_count == 1 or drop_count & (drop_count - 1) == 0:
-            logger.warning(
-                "trace_archive.queue_saturated",
-                root_agent_id=safe_root,
-                path=safe_path,
-                dropped_jobs=drop_count,
-            )
-        return None
+        return _spill_archive_job(
+            root_agent_id=root_agent_id,
+            path=path,
+            content_type=content_type,
+            body_factory=body_factory,
+            compress=compress,
+        )
 
     def _job() -> None:
         try:
             body = body_factory()
-            if len(body) > _max_artifact_bytes():
-                logger.warning(
-                    "trace_archive.artifact_too_large",
-                    root_agent_id=safe_root,
-                    path=safe_path,
-                    bytes=len(body),
-                    limit=_max_artifact_bytes(),
-                )
-                return
             result = _archive_bytes_now(
                 root_agent_id=root_agent_id,
                 path=path,
@@ -1441,14 +1571,7 @@ def archive_bytes(
 ) -> Optional[dict[str, Any]]:
     if not archive_enabled():
         return None
-    if len(body) > _max_artifact_bytes():
-        logger.warning(
-            "trace_archive.artifact_too_large",
-            root_agent_id=_safe_segment(root_agent_id),
-            path=path,
-            bytes=len(body),
-            limit=_max_artifact_bytes(),
-        )
+    if _refuse_unbound_root(root_agent_id, path):
         return None
     in_loop = True
     try:
@@ -1487,6 +1610,8 @@ def archive_json_deferred(
     content_type: str = "application/json",
 ) -> Optional[dict[str, Any]]:
     if not archive_enabled():
+        return None
+    if _refuse_unbound_root(root_agent_id, path):
         return None
     in_loop = True
     try:

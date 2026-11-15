@@ -99,6 +99,14 @@ MAX_ACTIVITY_ATTEMPTS = 1
 # from the same step on a live worker/generation/session.
 BROWSER_DRAIN_YIELD_STATUS = "yielded_for_deploy_drain"
 BROWSER_SESSION_EXPIRING = "browser_session_expiring"
+# The provider ended the session mid-task (Tilion CDP 1012 / connect 410
+# shutdown): the step's CDP client is gone and the backend no longer offers this
+# native. The manager restarts the task from the same step, and its resume
+# restores the last durable browser checkpoint on a replacement session.
+BROWSER_PROVIDER_SESSION_LOST = "browser_provider_session_lost"
+# Replacements one browser task may take for provider-ended sessions; past this
+# the provider is unhealthy and the task fails loudly instead of re-allocating.
+BROWSER_PROVIDER_SESSION_MAX_RECOVERIES = 2
 BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS = int(os.getenv("BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS", "45"))
 # Terminal disconnect before payment/write-lock return must not block the
 # workflow forever when CDP/session.stop() hangs after a dead Kernel session.
