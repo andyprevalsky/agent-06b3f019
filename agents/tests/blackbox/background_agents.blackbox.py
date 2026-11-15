@@ -1216,6 +1216,73 @@ async def test_a_foreground_spawn_parked_for_a_deploy_handoff_is_resumed_not_rel
         assert not _notifications(harness), "a foreground result is never re-sent as a notification"
 
 
+async def test_a_parked_wait_for_on_a_carried_background_browser_finishes_on_the_next_generation():
+    """A wait_for parked on a background browser spawn resumes once the browser is relaunched.
+
+    RCA 2026-11-15-generation-handoff-parked-wait-for-deadlocks-carried-background-task:
+    prod agent 08aa04a2 parked wait_for (foreground) and its background phone/browser spawn
+    at one cutover. ``_run_agent_turns`` re-entered the parked wait_for before relaunching
+    the carried background records, so wait_for waited on a task that never ran again and
+    the agent stayed ACTIVE and silent for 25+ minutes.
+    """
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    harness = _Harness()
+    browser_id, wait_id = "toolu_bg_browser", "toolu_wait"
+    browser_resume = {"phase": "activity", "write_lock_resume_state": {"step": 21}}
+    wait_resume = {"mode": "agents", "deadline": "2026-10-19T14:00:00+00:00", "started_at": _BASE.isoformat()}
+    with _workflow_env(harness):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        wf._tool_parking_enabled = True
+
+        async def parks_browser(tool_name, tool_args, tool_call_id):
+            assert wf._park_pending_tool(tool_call_id, browser_resume) is True
+            return {"success": True, "generation_handoff": True, "pending_tool_resume": True}
+
+        wf._execute_tool = parks_browser
+        await wf._execute_tool_once("spawn_agent", dict(BROWSER_ARGS), browser_id)
+        await wf._background_handles[browser_id]
+        assert wf._pending_background_ids() == [browser_id]
+        wf._active_tool_calls[wait_id] = ("wait_for", {"agents": ["/root/checkout"]})
+        assert wf._park_pending_tool(wait_id, wait_resume) is True
+        snapshot = wf._background_state_snapshot()
+        parked = list(wf._pending_tool_resumes)
+    assert [r["tool_call_id"] for r in parked] == [wait_id]
+
+    ran = []
+
+    async def next_generation_tool(wf2, tool_name, tool_args, tool_call_id):
+        ran.append((tool_name, tool_call_id, wf2._take_tool_resume(tool_call_id)))
+        if tool_name == "spawn_agent":
+            return {"success": True, "message": "Phone connected."}
+        while browser_id in wf2._pending_background_ids():  # the parked wait_for's condition
+            await asyncio.sleep(0.01)
+        return {"success": True, "message": "checkout already finished."}
+
+    async def no_llm_turns(**_kwargs):
+        return {"status": "completed", "context": []}
+
+    with _workflow_env(harness), patch("workflows.agent_workflow.run_agent", no_llm_turns):
+        wf2 = _workflow(harness)
+        wf2.current_phase = "EXECUTE"
+        wf2._restore_background_state(snapshot)
+        wf2._pending_tool_resumes = parked
+        wf2._execute_tool = lambda name, args, call_id: next_generation_tool(wf2, name, args, call_id)
+        try:
+            result = await asyncio.wait_for(wf2._run_agent_turns(), timeout=5)
+        except asyncio.TimeoutError:
+            raise AssertionError(f"parked wait_for never finished: the carried browser never ran ({ran})") from None
+        except GenerationHandoffRequested as exc:
+            raise AssertionError(f"unexpected handoff {exc}") from None
+        assert result["status"] == "completed", result
+        assert ("spawn_agent", browser_id, browser_resume) in ran, ran
+        assert ("wait_for", wait_id, wait_resume) in ran, ran
+        assert wf2._pending_background_ids() == []
+        assert wf2._background_finished[browser_id]["status"] == "completed"
+        assert [n["metadata"]["fromAgentAddress"] for n in _notifications(harness)] == ["/root/checkout"]
+
+
 def test_tool_schemas_and_prompts_register_agent_messaging():
     from tools.prompts import TOOL_PROMPTS
     from utils.tool_schemas import (
@@ -3015,6 +3082,10 @@ async def run_all_tests():
     await r.record_async(
         "foreground_spawn_parked_for_handoff_is_resumed_not_relaunched",
         test_a_foreground_spawn_parked_for_a_deploy_handoff_is_resumed_not_relaunched,
+    )
+    await r.record_async(
+        "parked_wait_for_on_carried_background_browser_finishes",
+        test_a_parked_wait_for_on_a_carried_background_browser_finishes_on_the_next_generation,
     )
     await r.record_async(
         "dag_planned_spawn_background_dependent_sees_result",
