@@ -3830,6 +3830,77 @@ async def test_agentcard_setup_retries_transient_upstream_failure():
         assert calls == [409]
 
 
+async def test_agentcard_setup_retries_a_timed_out_idempotent_attempt():
+    """Regression (PR #2005 smoke round 4, 2026-11-13): agent-payment-idempotent-abandonment's second
+    setup POST rode out an AgentCard org 429/401 storm inside the backend (list_cardholders attempts
+    1..5) and answered after 31.5 s, past the client's unchanged 30 s request bound. The ReadTimeout
+    escaped the setup retry loop, the task ERRORed before any agent existed and the whole smoke
+    campaign INFRA-stopped. Every setup action is idempotent, so a timed-out attempt spends one of
+    the same scheduled retries as a 5xx; the request bound and the attempt count stay unchanged.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"status":"connected"}'
+
+        def json(self):
+            return {"status": "connected"}
+
+    def fake_client(outcomes):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, timeout):
+                assert timeout == 30, "the per-request bound is unchanged"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                outcome = outcomes[min(len(calls), len(outcomes) - 1)]
+                calls.append(outcome)
+                if outcome == "timeout":
+                    raise bench.httpx.ReadTimeout("")
+                return FakeResponse()
+
+        return FakeClient, calls
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with patch.object(bench, "_api_headers", fake_headers), patch.object(bench.asyncio, "sleep", fake_sleep):
+        client, calls = fake_client(["timeout", 200])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "complete") == {
+                "status": "connected"
+            }
+        assert calls == ["timeout", 200]
+        assert sleeps == [bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS[0]]
+
+        sleeps.clear()
+        client, calls = fake_client(["timeout"])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except bench.httpx.ReadTimeout:
+                pass
+            else:
+                raise AssertionError("a timeout on every attempt must still fail the setup")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+        assert sleeps == list(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+
 async def test_agentcard_setup_retries_only_the_structured_org_rate_limit():
     """2026-11-08 deploy smoke: prepare-residual returned the org-wide MCP throttle.
 
@@ -6733,6 +6804,83 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
 
 
+async def test_owned_cleanup_abandon_retries_until_the_cleanup_deadline():
+    """Regression (PR #2005 smoke round 5, 2026-11-13): agent-payment-idempotent-abandonment timed
+    out under an AgentCard org throttle. Owned cleanup's abandonment start then gave up after its
+    separate 3-attempt cap (30 s waits on the org 401) about 120 s into the unchanged 180 s cleanup
+    deadline. The driver withheld its cleanup acknowledgement, and the campaign INFRA-stopped. The
+    cleanup deadline is now the one bound: a throttle that clears inside it completes cleanup, and
+    the attempt count can never end the drain before it.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    root, purchase = "00000000-0000-4000-8000-0000000c1ea0", "11111111-2222-4333-8444-555555555555"
+    row = {
+        "purchase_id": purchase,
+        "agent_id": root,
+        "status": "HELD",
+        "funding_status": "FUNDED",
+        "total_cents": 4396,
+        "card_id": "card_cleanup",
+        "stripe_payment_intent_id": "pi_cleanup",
+        "provider_transfer_id": "owt_cleanup",
+        "reclaim_provider_transfer_id": None,
+        "user_id": root,
+        "stripe_customer_id": "cus_cleanup",
+        "stripe_livemode": False,
+    }
+    throttled = Exception(
+        'Failed to abandon test payment: 401 {"error":"AgentCard Organization MCP list_transfers failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+    posts = []
+    refusals = 4  # one more refusal than the old 3-attempt cap allowed
+
+    async def abandon(_base_url, agent_id):
+        posts.append(agent_id)
+        if len(posts) <= refusals:
+            raise throttled
+        return {"purchase": {"status": "VOIDED"}}
+
+    async def lifecycle(_base_url, agent_id, **options):
+        if options == {"stripe_custody": True}:
+            # The drained purchase's read-only Stripe custody: an unspent, cancelled PaymentIntent.
+            return {"agentId": agent_id, "stripeCustody": [{
+                "purchaseId": purchase, "userId": root, "agentId": root, "purchaseStatus": "VOIDED",
+                "paymentIntentId": "pi_cleanup", "customerId": "cus_cleanup", "livemode": False,
+                "status": "canceled", "currency": "usd", "amountCents": 4396, "amountReceivedCents": 0,
+                "amountCapturableCents": 0, "refundedCents": 0, "outcome": "unspent"}]}
+        return {"purchase": {"status": "HELD"}, "walletFunding": {"status": "FUNDED"}}
+
+    def sessions(_base_url, _root, require_deleted=False):
+        released = len(posts) > refusals
+        current = dict(row, status="VOIDED", funding_status="RECLAIMED") if released else dict(row)
+        return {"tree_agent_ids": [root], "root_user_id": root, "purchase_cleanup": [current]}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with (
+        patch.object(bench.asyncio, "sleep", fake_sleep),
+        patch.object(bench, "abandon_test_payment", abandon),
+        patch.object(bench, "get_test_payment_lifecycle", lifecycle),
+        patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=sessions),
+    ):
+        evidence = {}
+        result = await bench._finalize_owned_root_payments("http://backend", root, evidence)
+    assert result["root_agent_id"] == root
+    assert len(posts) == 5, posts
+    assert evidence["payment_snapshot"]["purchase_cleanup"][0]["status"] == "VOIDED"
+
+    # A throttle that never clears is still bounded by the unchanged cleanup deadline, not by the count.
+    assert bench.PAYMENT_CLEANUP_TIMEOUT_SECONDS == 180
+    assert bench.PAYMENT_CLEANUP_ABANDON_ATTEMPTS * 2 > bench.PAYMENT_CLEANUP_TIMEOUT_SECONDS
+
+
 async def test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline():
     """Regression (smoke INFRA stop 2026-11-12, PRs #1975/#1981/#1983): a stalled release always
     runs the real owned payment drain to its deadline, and its stall proof was one provider-backed
@@ -7015,6 +7163,114 @@ async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_can
                 poll_interval_seconds=0,
                 recover_lifecycle=cancelled,
             )
+
+
+async def test_release_stall_survives_failed_final_reads_when_owned_ledger_holds_it():
+    """Regression (PR #2005 smoke round 2, 2026-11-13): agent-payment-abandonment observed the exact
+    release stall, then every later lifecycle read failed in an AgentCard org 401/429 storm. The
+    task-phase deadline refused the stall because its final read failed, so the row was a native
+    ERROR, the gate re-ran the task and would have minted a new card. The last successful in-window
+    observation now qualifies only while a DB-only read of the owned ledger still holds that exact
+    stall; a ledger that left it, a foreign card, or a run without an owned ledger stays strict.
+    """
+    import pytest
+    from copy import deepcopy
+
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("agent-payment-abandonment")
+    stalled = _agentcard_release_stall_lifecycle()
+    storm = RuntimeError(
+        'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP list_cards failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+
+    def ledger(lifecycle, **changes):
+        return {
+            "tree_agent_ids": [lifecycle["agentId"]],
+            "purchase_cleanup": [
+                {
+                    "purchase_id": lifecycle["purchase"]["id"],
+                    "agent_id": lifecycle["agentId"],
+                    "status": "HELD",
+                    "funding_status": "RECLAIMING",
+                    "card_id": lifecycle["purchase"]["cardId"],
+                    "stripe_payment_intent_id": lifecycle["purchase"]["stripePaymentIntentId"],
+                    "total_cents": lifecycle["purchase"]["totalCents"],
+                    "provider_transfer_id": lifecycle["orgTransfer"]["id"],
+                    "reclaim_provider_transfer_id": None,
+                    **changes,
+                }
+            ],
+        }
+
+    async def storm_reads(_base, _aid):
+        raise storm
+
+    async def wait(lifecycle, exact_root_sessions):
+        with (
+            patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=exact_root_sessions),
+        ):
+            return await bench._wait_for_expected_payment_lifecycle(
+                "http://benchmark.invalid",
+                lifecycle["agentId"],
+                task,
+                deepcopy(lifecycle),
+                timeout_seconds=0.05,
+                # The runner's own poll interval paces the failed reads toward the deadline.
+                poll_interval_seconds=0.01,
+                fetch_lifecycle=storm_reads,
+            )
+
+    with pytest.raises(bench.AgentCardReleaseStall) as caught:
+        await wait(stalled, lambda _base, _root: ledger(stalled))
+    assert caught.value.lifecycle["orgTransfer"]["releasedCents"] == 0
+
+    foreign = _agentcard_release_stall_lifecycle(cardId="card_someone_else")
+    for lifecycle, read in (
+        (stalled, lambda _base, _root: ledger(stalled, funding_status="RECLAIM_FAILED")),
+        (stalled, lambda _base, _root: ledger(stalled, card_id="card_other")),
+        (foreign, lambda _base, _root: ledger(foreign)),
+    ):
+        with pytest.raises(RuntimeError) as strict:
+            await wait(lifecycle, read)
+        assert not isinstance(strict.value, bench.AgentCardReleaseStall), lifecycle
+
+    # Round 2's exact exit: the deadline expires inside an owned recovery POST after a failed read.
+    calls = 0
+
+    async def storm_then_slow_recovery(_base, _aid):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise storm
+        await asyncio.Event().wait()  # the recovery never answers; only the owned deadline ends it
+        return deepcopy(stalled)
+
+    with (
+        patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}),
+        patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=lambda _b, _r: ledger(stalled)),
+        pytest.raises(bench.AgentCardReleaseStall),
+    ):
+        await bench._wait_for_expected_payment_lifecycle(
+            "http://benchmark.invalid",
+            stalled["agentId"],
+            task,
+            deepcopy(stalled),
+            timeout_seconds=0.2,
+            poll_interval_seconds=0,
+            recover_lifecycle=storm_then_slow_recovery,
+        )
+
+    def no_owned_ledger(_base, _root):
+        raise RuntimeError("provider verification requires an owned cloud stack")
+
+    with pytest.raises(RuntimeError) as local:
+        await wait(stalled, no_owned_ledger)
+    assert not isinstance(local.value, bench.AgentCardReleaseStall)
+    assert "remained unavailable" in str(local.value)
 
 
 async def test_abandonment_waits_for_cron_reconciliation():
@@ -28050,6 +28306,10 @@ async def run_all_tests():
         "owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup
     )
     await r.record_async(
+        "owned_cleanup_abandon_retries_until_the_cleanup_deadline",
+        test_owned_cleanup_abandon_retries_until_the_cleanup_deadline,
+    )
+    await r.record_async(
         "owned_release_stall_proof_survives_auth_flap_within_deadline",
         test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline,
     )
@@ -28060,6 +28320,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_release_policy_fetch_cancel_strict",
         test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
+    )
+    await r.record_async(
+        "release_stall_survives_failed_final_reads_with_owned_ledger",
+        test_release_stall_survives_failed_final_reads_when_owned_ledger_holds_it,
     )
     await r.record_async(
         "agentcard_release_policy_fresh_stall_after_recovered_read_error",
@@ -29050,6 +29314,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_setup_retries_transient_upstream_failure",
         test_agentcard_setup_retries_transient_upstream_failure,
+    )
+    await r.record_async(
+        "agentcard_setup_retries_a_timed_out_idempotent_attempt",
+        test_agentcard_setup_retries_a_timed_out_idempotent_attempt,
     )
     await r.record_async(
         "agentcard_setup_retries_only_the_structured_org_rate_limit",

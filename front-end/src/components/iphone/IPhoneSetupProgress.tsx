@@ -12,6 +12,12 @@
  *   variant inline   → the row bar under Integrations' iPhone row (muted text, no list)
  *   variant floating → small card hovering over the top of the Phone screen
  *
+ *   floating time-left line (one small muted line under the status text):
+ *     [STARTING|STEPS] → "About N min left" (sum of SETUP_STEP_MINUTES, setupTimeLeft.ts, over steps not done;
+ *                        whole minutes) | "Almost done" when under 1 min
+ *     hidden while [WAITING ON USER] (waitingOnUser: device setupState awaiting_user or the
+ *       user holds control), on [FAILED], on [READY], and always in the inline variant
+ *
  * Styling is SyncProgressView's (rose→violet gradient, 4px track, shimmer).
  * Pure presentation: useIPhoneConnection owns the /iphone/connection polling.
  */
@@ -19,6 +25,8 @@ import { Check, Circle, Loader2, X } from 'lucide-react';
 
 import { FLOWING_GRADIENT, GLOW, SHIMMER, SYNC_GRADIENT } from '@/components/ui/syncGradient';
 import type { IPhoneConnection, IPhoneSetupStep } from '@/lib/api/iphone';
+
+import { setupTimeLeftLabel } from './setupTimeLeft';
 
 function iphoneSetupFraction(connection: IPhoneConnection) {
   const steps = connection.setupProgress?.steps ?? [];
@@ -47,9 +55,12 @@ const STEP_WORD: Record<IPhoneSetupStep['status'], string> = {
 export function IPhoneSetupProgress({
   connection,
   variant,
+  waitingOnUser = false,
 }: {
   connection: IPhoneConnection;
   variant: 'inline' | 'floating';
+  /** The setup is paused on the owner (verification code, user control): no estimate. */
+  waitingOnUser?: boolean;
 }) {
   const { steps, ready, total, done, pct } = iphoneSetupFraction(connection);
   const floating = variant === 'floating';
@@ -116,6 +127,14 @@ export function IPhoneSetupProgress({
           </>
         )}
       </p>
+      {floating && !ready && failed === undefined && !waitingOnUser && (
+        <p
+          className="mt-0.5 truncate text-[11px] text-white/55"
+          data-testid="iphone-setup-time-left"
+        >
+          {setupTimeLeftLabel(steps)}
+        </p>
+      )}
       {floating && steps.length > 0 && (
         <ol className="mt-1.5 flex flex-col gap-1" aria-label="iPhone setup steps">
           {steps.map((step) => {

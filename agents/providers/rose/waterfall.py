@@ -100,6 +100,11 @@ def _openrouter_tool_choice(tool_choice: Any, model: str = "") -> Any:
 
 
 DEFAULT_REASONING_EFFORT = "xhigh"
+# Our "max" sentinel is sent only by the planner (fixed 220s rose.complete
+# deadline) and means its deadline-fit tier. The ultra waterfall leads with
+# openai/gpt-6.1-sol, which reasons past 220s at xhigh on long-horizon plans;
+# match gpt_auth's calibration for that model family.
+MAX_SENTINEL_REASONING_EFFORT = "medium"
 
 # `rose.waterfall.step_skipped` reasons for a model in `skip_models`.
 SKIP_REASON_CUT_OFF = "reply_cut_off_at_output_limit"
@@ -115,13 +120,13 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     """Normalize effort for OpenRouter reasoning.effort.
 
     OpenRouter accepts max / xhigh / high / medium / low / minimal / none.
-    Our "max" sentinel maps to xhigh. Default is xhigh so every waterfall
-    step body is well-formed (effort always present).
+    Our "max" sentinel maps to MAX_SENTINEL_REASONING_EFFORT. Default is xhigh
+    so every waterfall step body is well-formed (effort always present).
     """
     if effort == "minimal":
         return "low"
     if effort == "max":
-        return "xhigh"
+        return MAX_SENTINEL_REASONING_EFFORT
     return effort or DEFAULT_REASONING_EFFORT
 
 
