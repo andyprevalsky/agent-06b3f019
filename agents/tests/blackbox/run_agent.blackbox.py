@@ -4940,6 +4940,10 @@ async def run_all_tests():
         test_run_agent_errors_when_compaction_still_over_trigger,
     )
     await r.record_async(
+        "run_agent_compacts_context_over_continuation_payload_budget",
+        test_run_agent_compacts_context_over_continuation_payload_budget,
+    )
+    await r.record_async(
         "run_agent_errors_when_compactor_breaker_open_over_trigger",
         test_run_agent_errors_when_compactor_breaker_open_over_trigger,
     )
