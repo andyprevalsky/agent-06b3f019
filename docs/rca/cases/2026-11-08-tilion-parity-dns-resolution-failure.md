@@ -30,6 +30,7 @@ sources:
   - plan:.context/production-mixed-mode-evidence/tilion-dns-waiver-prepared.json
   - PR #2225 live-probes gate, GitHub Actions runs 43744817065 (3489e309dc) and 43748598189 (c3933ed27d); passed in run 43690339328 (b614704d74)
   - commit 37308b16bd974838258f5ca8485471da73c708b5
+  - PR #2236 (merged d86911130bd763e6af9256a57a58f32e38725b1e); deploy live-probes gate GitHub Actions run 43753128538
 repro: GitHub Actions run 42529620811; back-end/src/tests/blackbox/browser-provider.tilion-dns-worker.support.ts; scripts/tests/deploy-live-probes.test.py (production-region pin)
 status: fixed
 ---
@@ -188,6 +189,11 @@ vendor contract, the backend fixture server the test starts and the
 - The live proof is the gate itself on Blacksmith.
 - Production code and configuration are unchanged. No production session was
   observed on west.
+- Shipped in PR #2236 (merged d86911130b). Its deploy `live-probes` gate ran the
+  original command on Blacksmith in GitHub Actions run 43753128538:
+  `browser-provider-live` PASS. The vendor contract ran on
+  `sess_c3d0eb61ab26449e8f0b73147ce46d12` (east) with no replacement, then
+  `PASS live Tilion provider parity (sessions=4, ...)`.
 
 Still open:
 - Production direct sessions have no DNS-dead detection. A production client
