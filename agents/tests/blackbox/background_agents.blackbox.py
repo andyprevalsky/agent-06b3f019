@@ -1256,8 +1256,12 @@ async def test_a_parked_wait_for_on_a_carried_background_browser_finishes_on_the
         ran.append((tool_name, tool_call_id, wf2._take_tool_resume(tool_call_id)))
         if tool_name == "spawn_agent":
             return {"success": True, "message": "Phone connected."}
-        while browser_id in wf2._pending_background_ids():  # the parked wait_for's condition
-            await asyncio.sleep(0.01)
+        # The parked wait_for's condition: the carried browser finishes. Without a
+        # relaunch nothing runs it, so the wait blocks forever (as in prod).
+        if browser_id in wf2._pending_background_ids():
+            handle = wf2._background_handles.get(browser_id)
+            await (handle if handle is not None else asyncio.Event().wait())
+        assert browser_id not in wf2._pending_background_ids()
         return {"success": True, "message": "checkout already finished."}
 
     async def no_llm_turns(**_kwargs):
