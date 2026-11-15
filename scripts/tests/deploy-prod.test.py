@@ -1302,6 +1302,24 @@ class OtherLanesTest(Base):
         fake = Fake(self.root, [])
         self.assertEqual(dp.lane_semantic(self.ctx(fake)), (True, 'chat-lifecycle-ratchet run 55 success', 0))
         self.assertEqual(fake.kinds(), ['production-semantic'])
+        exact = dp.lane_semantic(self.ctx(Fake(self.root, [])))[1]
+        self.assertNotIsInstance(exact, dp.Descendant)  # the exact binding stays an exact-SHA PASS
+        # Spec/live skew (run 43681354141): the live frontend served a strict descendant, whose specs ran.
+        live = 'd' * 40
+        self.write_production(status='passed', semantic={'run_id': '56', 'source_sha': live, 'binding': {
+            'kind': 'verified-by-descendant', 'live_frontend_commit': live, 'build_id': f'{live[:12]}-mw'}})
+        passed, reason, code = dp.lane_semantic(self.ctx(Fake(self.root, [])))
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertEqual(reason, f'verified by descendant {live}: chat-lifecycle-ratchet run 56 success with the specs '
+                                 f'of live frontend {live[:12]} (a descendant of {SHA[:12]})')
+        self.write_production(status='passed', semantic={'run_id': '57', 'source_sha': SHA, 'binding': {
+            'kind': 'verified-by-descendant', 'live_frontend_commit': live}})
+        self.assertEqual(dp.lane_semantic(self.ctx(Fake(self.root, []))), (False, (
+            f'production-semantic recorded a descendant binding to {live[:12]} but run 57 tested {SHA[:12]}; the '
+            'binding is unverified'), 1))
+        failed = Fake(self.root, [], handler=lambda argv, cwd, env, on_line: 1)
+        self.assertEqual(dp.lane_semantic(self.ctx(failed)), (False, 'production-semantic exited 1 (run 57)', 1))
 
     def test_agentcard_and_wmh_use_agents_venv(self) -> None:
         fake = Fake(self.root, [])

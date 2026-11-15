@@ -3948,6 +3948,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         """
         self._tool_parking_enabled = True
         try:
+            # Carried background records run again before parked foreground calls
+            # re-enter: a parked wait_for on one of them would otherwise wait forever.
+            # New background spawns stay disabled so a re-entered foreground spawn
+            # keeps running in the foreground.
+            self._relaunch_background_tasks()
             handoff_queue = await self._resume_pending_tools()
             if handoff_queue:
                 return {
@@ -3967,7 +3972,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             run_agent_kwargs["verifier_interrupts"] = self._dag_hooks()
             run_agent_kwargs["sync_environment_context"] = self._sync_environment_context
             run_agent_kwargs["get_environment_tail"] = self._environment_tail_seed
-            self._relaunch_background_tasks()
             self._background_spawns_enabled = True
             return await run_agent(**run_agent_kwargs)
         finally:
