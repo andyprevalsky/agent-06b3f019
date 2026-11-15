@@ -21,7 +21,8 @@ export default async function handler(req: Request) {
     });
   }
 
-  const ogImageUrl = `${url.origin}/api/og/image?slug=${encodeURIComponent(slug)}`;
+  // `v` bypasses the empty images cached while the renderer ran on the edge runtime.
+  const ogImageUrl = `${url.origin}/api/og/image?slug=${encodeURIComponent(slug)}&v=2`;
   const postUrl = `${url.origin}/research/${slug}`;
   const safeTitle = escapeHtml(post.title);
   const safeDesc = escapeHtml(post.description);
@@ -34,10 +35,7 @@ export default async function handler(req: Request) {
       /<meta name="description" content="[^"]*" \/>/,
       `<meta name="description" content="${safeDesc}" />`,
     )
-    .replace(
-      /<link rel="canonical" href="[^"]*" \/>/,
-      `<link rel="canonical" href="${postUrl}" />`,
-    )
+    .replace(/<link rel="canonical" href="[^"]*" \/>/, `<link rel="canonical" href="${postUrl}" />`)
     // Open Graph
     .replace(
       /<meta property="og:title" content="[^"]*" \/>/,

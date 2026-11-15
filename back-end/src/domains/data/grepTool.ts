@@ -39,6 +39,16 @@ const DOCUMENT_PROVIDER_ALIASES: Record<string, string> = {
 /** Shorthands that apply like flat filter keys (validate.normalize.ts BROADCAST_PARAMS). */
 const SHORTHAND_KEYS = ['person', 'since', 'until'] as const;
 
+/** Sources a teammate can share; mirrors agents/domains/grep/service.py _TEAM_SHAREABLE_SOURCES. */
+const TEAM_SHAREABLE_SOURCES = new Set([
+  'email',
+  'gmail',
+  'imessage',
+  'whatsapp',
+  'documents',
+  'transactions',
+]);
+
 /** Agent-side hints in the tool definition that the search itself does not take. */
 const AGENT_ONLY_KEYS = ['require_source_access'] as const;
 
@@ -161,18 +171,24 @@ async function unconnectedSources(
   params: Record<string, unknown>,
   requireSourceAccess: boolean
 ): Promise<SourceStatus[]> {
+  // A team-scoped call reads only teammates' shared accounts, which the search authorizes
+  // per account; the reader's own connector is irrelevant (agents/domains/grep/service.py).
+  const teamScoped =
+    typeof params.team_id === 'string' ||
+    (typeof params.owner_user_id === 'string' && params.owner_user_id !== userId);
   const probes: string[] = namedSources(params).filter(
     (source) =>
       source !== 'documents' &&
       isSourceName(source) &&
-      !(
-        (typeof params.team_id === 'string' ||
-          (typeof params.owner_user_id === 'string' && params.owner_user_id !== userId)) &&
-        ['email', 'gmail', 'imessage'].includes(source)
-      )
+      !(teamScoped && TEAM_SHAREABLE_SOURCES.has(source))
   );
   const provider = documentProvider(params);
-  if (namedSources(params).includes('documents') && provider !== undefined && requireSourceAccess) {
+  if (
+    namedSources(params).includes('documents') &&
+    provider !== undefined &&
+    requireSourceAccess &&
+    !teamScoped
+  ) {
     probes.push(provider);
   }
   if (probes.length === 0) return [];

@@ -9,7 +9,9 @@ import {
   buildAttention,
   mapAgentCard,
   mcpResultCode,
+  mapStripeHold,
   providerIntegrity,
+  withKnownStripeIntent,
 } from './lifecycleProviderRecords';
 import {
   listOrgCardWindow,
@@ -81,18 +83,6 @@ function resolveDependencies(
           limit: 100,
           ...(page !== undefined ? { page } : {}),
         })),
-  };
-}
-
-function mapStripeHold(hold: StripeHold | null): TestPaymentLifecycle['stripeHold'] {
-  if (hold === null) return null;
-  return {
-    id: hold.id,
-    livemode: hold.livemode,
-    status: hold.status,
-    amountCents: hold.amount,
-    amountCapturableCents: hold.amount_capturable,
-    amountReceivedCents: hold.amount_received,
   };
 }
 
@@ -173,7 +163,7 @@ async function buildV2LoadedLifecycle(
   const cardId = purchase.cardId;
   const intentId = purchase.stripePaymentIntentId;
   const emptyRefunds: StripeRefundList = { data: [] };
-  const [observation, stripeHold, stripeRefunds, stripeResults] = await Promise.all([
+  const [observation, stripeHold, stripeRefunds, searchedHolds] = await Promise.all([
     observeV2Lifecycle(purchase, dependencies.v2Request, dependencies.getV2OwnerId),
     intentId !== null && intentId !== '' ? retrieveStripeHold(intentId) : Promise.resolve(null),
     intentId !== null && intentId !== ''
@@ -181,6 +171,7 @@ async function buildV2LoadedLifecycle(
       : Promise.resolve(emptyRefunds),
     searchAllStripeHolds(agentId, searchStripeHolds),
   ]);
+  const stripeResults = withKnownStripeIntent(searchedHolds, stripeHold);
   return {
     agentId,
     integrity: {
@@ -228,7 +219,7 @@ async function buildLoadedLifecycle(
   const intentId = purchase.stripePaymentIntentId;
   const emptyRefunds: StripeRefundList = { data: [] };
   const cardholderId = await getOrgCardholderId(purchase.userId);
-  const [cardDetails, stripeHold, stripeRefunds, stripeResults, cardResults, transferResults] =
+  const [cardDetails, stripeHold, stripeRefunds, searchedHolds, cardResults, transferResults] =
     await Promise.all([
       cardId !== null && cardId !== ''
         ? loadCardSummary(purchase.userId, cardId, getCardSummary)
@@ -245,6 +236,7 @@ async function buildLoadedLifecycle(
         ? listOrgTransferWindow(purchase.createdAt, listOrgTransfers)
         : Promise.resolve<unknown[]>([]),
     ]);
+  const stripeResults = withKnownStripeIntent(searchedHolds, stripeHold);
   return {
     agentId,
     integrity: {

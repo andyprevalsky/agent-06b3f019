@@ -89,6 +89,7 @@ async def _run_single_iteration(
     get_pending_background_status_override=None,
     completion_handoff_override=None,
     llm_response_text="",
+    extra_run_agent_kwargs=None,
 ):
     from loop.run_agent import run_agent
 
@@ -243,6 +244,7 @@ async def _run_single_iteration(
             check_aborted=check_aborted_override,
             gpt_token=gpt_token,
             gpt_account_id=gpt_account_id,
+            **(extra_run_agent_kwargs or {}),
         )
 
     return result, posted_messages, executed_tools
@@ -1899,6 +1901,125 @@ async def test_verifier_is_interrupted_by_a_new_user_or_agent_message():
     assert result["score"] == 1.0 and not result.get("interrupted_by_message"), result
 
 
+async def test_completion_summary_hooks_bracket_the_attempt_completion_verifier():
+    """The completion summary may start when the verifier starts, never after it returns.
+
+    background-agent-message-smoke e7d8ba91 spent 74 s in the verifier and then
+    16 s in a serial completion summary, persisting COMPLETED at T+185 of a
+    180 s budget. The execute loop must announce the attempt before awaiting
+    the verifier, and report the verdict before the loop returns or retries.
+    """
+    for score, expected_status in ((1.0, "completed"), (0.4, None)):
+        events = []
+
+        async def started(context):
+            assert any(row.get("role") == "USER" for row in context), context
+            events.append("started")
+
+        async def settled(passed):
+            events.append(("settled", passed))
+
+        async def verifier(*_args, **_kwargs):
+            assert events == ["started"], f"summary hook must fire before the verifier runs: {events}"
+            events.append("verifier")
+            return {
+                "score": score,
+                "reasoning": "verified" if score >= 1.0 else "missing fields",
+                "structured_response": {"documents": []} if score >= 1.0 else None,
+                "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+            }
+
+        result, _posted, _executed = await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "tc-done", 1.0)],
+            skip_verification=False,
+            max_iterations=1,
+            verifier_override=verifier,
+            extra_run_agent_kwargs={"on_verification_started": started, "on_verification_settled": settled},
+        )
+        assert events == ["started", "verifier", ("settled", score >= 1.0)], events
+        if expected_status:
+            assert result["status"] == expected_status, result
+
+    # Verifier errors and plan-phase verification never adopt a summary.
+    events = []
+
+    async def started_err(_context):
+        events.append("started")
+
+    async def settled_err(passed):
+        events.append(("settled", passed))
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("verifier provider failed")
+
+    try:
+        await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "tc-err", 1.0)],
+            skip_verification=False,
+            max_iterations=1,
+            verifier_override=broken,
+            extra_run_agent_kwargs={"on_verification_started": started_err, "on_verification_settled": settled_err},
+        )
+    except RuntimeError as exc:
+        # The retry turn's real post_agent_message heartbeats outside an activity
+        # in this harness; the verdict hooks have already fired by then.
+        assert str(exc) == "Not in activity context", exc
+    assert events == ["started", ("settled", False)], events
+
+    events = []
+    try:
+        await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "tc-plan", 1.0)],
+            skip_verification=False,
+            is_plan_loop=True,
+            max_iterations=1,
+            extra_run_agent_kwargs={"on_verification_started": started_err, "on_verification_settled": settled_err},
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "Not in activity context", exc
+    assert events == [], f"plan verification must not start a completion summary: {events}"
+
+    # The summary sees the attempt's authored result, exactly like the verifier.
+    seen = []
+
+    async def capture(context):
+        seen.append([dict(m) for m in context])
+
+    async def settle_ok(_passed):
+        return None
+
+    await _run_single_iteration(
+        [{"tool": "attempt_completion", "result": "RFC 9110 HTTP Semantics; RFC 9111 HTTP Caching"}],
+        [("attempt_completion", "tc-authored", 1.0)],
+        skip_verification=False,
+        max_iterations=1,
+        extra_run_agent_kwargs={"on_verification_started": capture, "on_verification_settled": settle_ok},
+    )
+    authored = [m for m in seen[-1] if (m.get("metadata") or {}).get("title") == "Authored result"]
+    assert len(authored) == 1 and "RFC 9111 HTTP Caching" in authored[0]["text"], seen[-1]
+
+    # A failing summary hook is an optional speedup: verification still completes.
+    verdicts = []
+
+    async def broken_start(_context):
+        raise RuntimeError("summary scheduling failed")
+
+    async def record_settle(passed):
+        verdicts.append(passed)
+
+    result, _posted, _executed = await _run_single_iteration(
+        [{"tool": "attempt_completion"}],
+        [("attempt_completion", "tc-hook-fails", 1.0)],
+        skip_verification=False,
+        max_iterations=1,
+        extra_run_agent_kwargs={"on_verification_started": broken_start, "on_verification_settled": record_settle},
+    )
+    assert result["status"] == "completed" and verdicts == [True], (result.get("status"), verdicts)
+
+
 async def test_keyed_feedback_revision_supersedes_verdict_without_user_row():
     """Attention responses can change requirements without creating USER rows."""
     for final in (False, True):
@@ -3130,6 +3251,90 @@ async def test_run_agent_errors_when_compaction_still_over_trigger():
     assert result["status"] == "error"
     assert "Context compression ineffective" in result["message"]
     assert result["context"] == initial_context
+
+
+async def test_run_agent_compacts_context_over_continuation_payload_budget():
+    """A context under the token trigger but over the byte budget must still compact.
+
+    Prod 8789a5df (2026-11-15): a rose-1-ultra agent at ~191k tokens (far below
+    its window's trigger) carried 2,124,477 bytes of JSON-heavy tool results.
+    Its generation-handoff continue_as_new exceeded Temporal's 2 MiB payload
+    limit (TMPRL1103), every workflow task retry failed, the old queue never
+    retired and every agents/ cutover drain wedged. Compaction must keep the
+    serialized context under CONTEXT_PAYLOAD_COMPACTION_BYTES, and that budget
+    must leave room for the rest of the continuation under the 2 MiB limit.
+    """
+    import loop.run_agent as run_mod
+
+    class ContinuedAsNew(Exception):
+        pass
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    compressed = [{"role": "USER", "text": "summary", "timestamp": "2024-01-01T00:00:00Z"}]
+
+    async def fake_compress_context(**kwargs):
+        return compressed, True
+
+    overflowed = []
+
+    async def on_context_overflow(new_context):
+        overflowed.append(new_context)
+        raise ContinuedAsNew()
+
+    async def fail_llm(**kwargs):
+        raise AssertionError("LLM must not be called with a context over the payload budget")
+
+    # Prod-shaped: ASSISTANT turns whose bytes sit in codex_reasoning_items
+    # metadata the token estimate does not weigh (8789a5df: 668 KB of them).
+    reasoning = [{"type": "reasoning", "encrypted_content": "e" * 20_000}]
+    initial_context = [{"role": "USER", "text": "goal", "timestamp": "2024-01-01T00:00:00Z"}]
+    initial_context.extend(
+        {
+            "role": "ASSISTANT",
+            "text": "step",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "metadata": {"codex_reasoning_items": reasoning},
+        }
+        for _ in range(70)
+    )
+    assert run_mod._context_payload_bytes(initial_context) > run_mod.CONTEXT_PAYLOAD_COMPACTION_BYTES
+    compressor = AsyncMock(side_effect=fake_compress_context)
+    with (
+        patch.object(run_mod, "_compress_context", new=compressor),
+        patch.object(run_mod, "call_llm_structured_streaming", new=AsyncMock(side_effect=fail_llm)),
+    ):
+        assert run_mod._estimate_tokens(initial_context) < run_mod.compaction_trigger_tokens(1_000_000)
+        try:
+            await run_mod.run_agent(
+                agent_id="agent-test",
+                user_id="user-test",
+                system_prompt=system_prompt,
+                verifier_prompt_generator=verifier_prompt,
+                model="rose-labs/rose-1-flash",
+                tools=["attempt_completion"],
+                initial_context=initial_context,
+                is_inside_temporal_activity=True,
+                build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+                max_iterations=1,
+                max_context_tokens=1_000_000,
+                skip_verification=True,
+                skip_status_updates=True,
+                on_context_overflow=on_context_overflow,
+            )
+        except ContinuedAsNew:
+            pass
+        else:
+            raise AssertionError("run_agent must continue_as_new with the compacted context")
+
+    compressor.assert_awaited_once()
+    assert overflowed == [compressed]
+    # Budget + one turn of capped tool results + resume state stays under 2 MiB.
+    assert run_mod.CONTEXT_PAYLOAD_COMPACTION_BYTES + 600_000 < 2 * 1024 * 1024
 
 
 async def test_run_agent_errors_when_compactor_breaker_open_over_trigger():
@@ -4735,6 +4940,10 @@ async def run_all_tests():
         test_run_agent_errors_when_compaction_still_over_trigger,
     )
     await r.record_async(
+        "run_agent_compacts_context_over_continuation_payload_budget",
+        test_run_agent_compacts_context_over_continuation_payload_budget,
+    )
+    await r.record_async(
         "run_agent_errors_when_compactor_breaker_open_over_trigger",
         test_run_agent_errors_when_compactor_breaker_open_over_trigger,
     )
@@ -4799,6 +5008,10 @@ async def run_all_tests():
     await r.record_async(
         "verifier_interrupted_by_new_message",
         test_verifier_is_interrupted_by_a_new_user_or_agent_message,
+    )
+    await r.record_async(
+        "completion_summary_hooks_bracket_verifier",
+        test_completion_summary_hooks_bracket_the_attempt_completion_verifier,
     )
     await r.record_async(
         "keyed_feedback_revision_versions_verdict", test_keyed_feedback_revision_supersedes_verdict_without_user_row

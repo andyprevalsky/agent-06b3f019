@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test';
 import { test } from './folder-profile';
-import { FRONTEND_URL } from './helpers';
+import { FRONTEND_URL, acrossAppReload, expectAppVersionSettled } from './helpers';
 
 for (const width of [1280, 390]) {
   test(`folder ordering, icon counts and project collapse at ${width}px`, async ({ page }) => {
@@ -115,6 +115,35 @@ for (const width of [1280, 390]) {
       else if (request.method() !== 'GET') return route.fulfill({ status: 204 });
       await route.fulfill({ json: body });
     });
+    const group = page.getByTestId('rose-group-project').filter({ visible: true });
+    // Production builds compare their id with /version.json on every document load and reload
+    // once onto a newer deploy (src/lib/appVersion.ts); deploys promote during production runs
+    // (run 43682337505 reloaded mid-assertion at :188). The Vite dev server has no build id.
+    const versionFile = await page.request.get(`${FRONTEND_URL}/version.json`);
+    const served = (await versionFile.json().catch(() => null)) as { buildId?: string } | null;
+    // Whether this bundle publishes <html data-version-check> (expectAppVersionSettled).
+    let versionCheckObservable = Boolean(served?.buildId);
+    let promoted: string | null = null;
+    let holdPromotedCheck = false;
+    const versionReloads: string[] = [];
+    if (served?.buildId) {
+      await page.route(
+        (url) => url.pathname === '/version.json',
+        async (route) => {
+          const response = await route.fetch();
+          if (promoted === null) return route.fulfill({ response });
+          if (holdPromotedCheck) {
+            // As on the CI runner: the reloaded page's check answers once its sidebar is open.
+            holdPromotedCheck = false;
+            await expect(group).toBeVisible();
+          }
+          await route.fulfill({ response, json: { buildId: promoted } });
+        },
+      );
+      page.on('console', (message) => {
+        if (message.text().startsWith('[AppVersion]')) versionReloads.push(message.text());
+      });
+    }
     const openSidebar = async () => {
       if (width < 768) await page.getByRole('button', { name: 'Open menu', exact: true }).click();
       else {
@@ -122,9 +151,22 @@ for (const width of [1280, 390]) {
         await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
       }
     };
-    await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
-    await openSidebar();
-    const group = page.getByTestId('rose-group-project').filter({ visible: true });
+    // A navigation, this document's version check, and the sidebar it opens: repeated when the
+    // app reloads itself onto a newer build meanwhile, so later steps start on a settled page.
+    const loadSidebar = (navigate: () => Promise<unknown>) =>
+      acrossAppReload(
+        page,
+        async () => {
+          await navigate();
+          await openSidebar();
+          await expect(group).toBeVisible();
+          if (versionCheckObservable) versionCheckObservable = await expectAppVersionSettled(page);
+        },
+        1,
+      );
+    await loadSidebar(() =>
+      page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' }),
+    );
     for (const folder of folders) {
       const row = page.getByTestId(`rose-folder-${folder.id}`).filter({ visible: true });
       const icon = row.getByRole('img', { name: `${folder.count} agents`, exact: true });
@@ -183,9 +225,18 @@ for (const width of [1280, 390]) {
         .toEqual(['rose-folder-triple', 'rose-folder-double', 'rose-folder-single']);
     }
     const saved = await order();
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await openSidebar();
+    // The deploy of run 43682337505: promoted between this page's first load and its reload.
+    // Only a bundle that reports its version check can be held to it (a pre-attribute bundle
+    // would just replay the race).
+    if (served?.buildId && versionCheckObservable) {
+      promoted = `${served.buildId}-promoted`;
+      holdPromotedCheck = true;
+    }
+    await loadSidebar(() => page.reload({ waitUntil: 'domcontentloaded' }));
     await expect.poll(order).toEqual(saved);
+    if (promoted) {
+      expect(versionReloads).toContainEqual(expect.stringContaining(`replaced by ${promoted}`));
+    }
     await expect(
       page.getByRole('button', { name: 'Expand Home', exact: true }).filter({ visible: true }),
     ).toBeVisible();

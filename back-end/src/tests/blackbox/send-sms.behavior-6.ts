@@ -1,17 +1,24 @@
 /**
- * Completion notices reach SMS/WhatsApp only for agents the messaging agent
- * interacted with (Andy, 2026-11-12: "Only show completed agents notif if the
- * sms / whatsapp agent has interacted w that agent"). Prod agents 001fbe70 and
- * d6592fb1 were started on the web, never touched over SMS, and still texted
- * "I finished the task: …".
+ * Kickoff and completion notices reach SMS/WhatsApp/Linq only for agents the
+ * user touched from the phone. Andy, 2026-11-12: "Only show completed agents
+ * notif if the sms / whatsapp agent has interacted w that agent". Prod agents
+ * 001fbe70 and d6592fb1 were started on the web, never touched over SMS, and
+ * still texted "I finished the task: …". Andy, 2026-11-14: "only trigger
+ * messaging notifs when an agent has been touched by the messaging client".
+ * Kickoffs for web and Mac agents made up 18 of his 19 lifecycle texts over 48h.
+ * Same day: a relay is not a touch; "a touch should be if I respond and we reply".
  *
- *   interaction (per channel)              completion notify
- *   created   source SMS | WHATSAPP   ─┐
- *   messaged  supervisor reply_to_agent ├─▶ delivered on SMS (+ WhatsApp mirror)
- *   relayed   question / approval / cost limit / card setup ─┘
- *   none      (kickoff receipt only)  ───▶ skipped: no_messaging_agent_interaction
+ *   touch (the messaging agent acting on the user's message)   kickoff / completion
+ *   created   start_new_agent (source SMS | WHATSAPP)  ─┐
+ *   replied   reply_to_agent (answer, approve, reject)   ├─▶ delivered on SMS
+ *   budget    increase_budget                          ─┘    (+ WhatsApp mirror)
+ *   relayed question / approval / cost limit / card setup  ─▶ skipped:
+ *   none                                                  ─▶ no_messaging_agent_interaction
  *
- * Messaged cases run the real inbound webhook → supervisor (scripted tool
+ * Questions, approvals and setup handoffs that block an agent still reach the
+ * phone for every agent; delivering one is not a touch.
+ *
+ * Replied cases run the real inbound webhook → supervisor (scripted tool
  * calls) → reply_to_agent commit, then the worker's completion notify.
  */
 
@@ -163,11 +170,16 @@ async function assertCompletionDelivered(
   assert(sideEffect?.status === 'SUCCEEDED', `Completion side effect: ${sideEffect?.status}`);
 }
 
-/** Inbound message → supervisor reply_to_agent commit on `agentId`, over `channel`. */
+/**
+ * Inbound message → supervisor reply_to_agent commit on `agentId`, over `channel`.
+ * Returns once the touch marker on `rootId` is written: the commit posts the
+ * message first and the marker a few round trips later.
+ */
 async function supervisorRepliesToAgent(
   fixture: ScopedFixture,
   agentId: string,
-  channel: Channel
+  channel: Channel,
+  rootId: string = agentId
 ): Promise<void> {
   const instruction = `Use the blue shipping box (${agentId.substring(0, 8)}).`;
   await setFixtureOverride(
@@ -216,6 +228,10 @@ async function supervisorRepliesToAgent(
           metadata: { path: ['source'], equals: 'sms_supervisor' },
         },
       }),
+    20_000
+  );
+  await waitFor(
+    async () => ((await interactionMarkerKind(rootId)) === 'reply_to_agent' ? true : null),
     20_000
   );
 }
@@ -300,7 +316,7 @@ async function withFixture(
   }
 }
 
-// ==================== 1. SMS agent interacted ====================
+// ==================== 1. SMS touches ====================
 
 export async function testCompletionScope_smsCreatedAgentNotified() {
   await withFixture('SMS', async (fixture) => {
@@ -314,15 +330,6 @@ export async function testCompletionScope_smsSupervisorReplyNotified() {
     const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
     await supervisorRepliesToAgent(fixture, agentId, 'SMS');
     await assertCompletionDelivered(fixture, agentId, 'SMS');
-  });
-}
-
-export async function testCompletionScope_smsRelayedChildQuestionNotifiesRoot() {
-  await withFixture('SMS', async (fixture) => {
-    const rootId = await createAgent(fixture, 'WEB', 'ACTIVE');
-    const childId = await createAgent(fixture, 'WEB', 'ACTIVE', rootId);
-    await relayQuestion(fixture, childId, 'SMS');
-    await assertCompletionDelivered(fixture, rootId, 'SMS');
   });
 }
 
@@ -349,7 +356,7 @@ export async function testCompletionScope_smsReplyToChildNotifiesRoot() {
   await withFixture('SMS', async (fixture) => {
     const rootId = await createAgent(fixture, 'WEB', 'ACTIVE');
     const childId = await createAgent(fixture, 'WEB', 'ACTIVE', rootId);
-    await supervisorRepliesToAgent(fixture, childId, 'SMS');
+    await supervisorRepliesToAgent(fixture, childId, 'SMS', rootId);
     // Only the tree marker connects this root to the SMS agent: its own
     // conversation never saw an sms_supervisor message.
     const rootReplies = await prisma.message.count({
@@ -364,41 +371,17 @@ export async function testCompletionScope_smsReplyToChildNotifiesRoot() {
   });
 }
 
-export async function testCompletionScope_smsRelayedWriteLockNotified() {
-  await withFixture('SMS', async (fixture) => {
-    const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
-    await relayUpdate(fixture, agentId, 'write_lock');
-    await assertCompletionDelivered(fixture, agentId, 'SMS');
-  });
-}
-
-export async function testCompletionScope_smsRelayedCostLimitNotified() {
-  await withFixture('SMS', async (fixture) => {
-    const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
-    await relayUpdate(fixture, agentId, 'cost_limit');
-    await assertCompletionDelivered(fixture, agentId, 'SMS');
-  });
-}
-
-export async function testCompletionScope_smsRelayedAgentCardSetupNotified() {
-  await withFixture('SMS', async (fixture) => {
-    const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
-    await relayUpdate(fixture, agentId, 'agentcard_setup');
-    await assertCompletionDelivered(fixture, agentId, 'SMS');
-  });
-}
-
-export async function testCompletionScope_relayFromChildWithoutBusIdNotifiesRoot() {
+export async function testCompletionScope_replyToChildWithoutBusIdNotifiesRoot() {
   await withFixture('SMS', async (fixture) => {
     const rootId = await createAgent(fixture, 'WEB', 'ACTIVE');
     // A restored row can lack busId; the marker must still reach the root.
     const childId = await createAgent(fixture, 'WEB', 'ACTIVE', rootId, null);
-    await relayQuestion(fixture, childId, 'SMS');
+    await supervisorRepliesToAgent(fixture, childId, 'SMS', rootId);
     await assertCompletionDelivered(fixture, rootId, 'SMS');
   });
 }
 
-// ==================== 2. WhatsApp agent interacted ====================
+// ==================== 2. WhatsApp touches ====================
 
 export async function testCompletionScope_whatsappCreatedAgentNotified() {
   await withFixture('WHATSAPP', async (fixture) => {
@@ -415,61 +398,155 @@ export async function testCompletionScope_whatsappSupervisorReplyNotified() {
   });
 }
 
-export async function testCompletionScope_whatsappRelayedQuestionNotified() {
-  await withFixture('WHATSAPP', async (fixture) => {
-    const agentId = await createAgent(fixture, 'MAC_APP', 'ACTIVE');
-    await relayQuestion(fixture, agentId, 'WHATSAPP');
-    await assertCompletionDelivered(fixture, agentId, 'WHATSAPP');
+// ==================== 3. No touch → no completion notice ====================
+
+/** Completion notify for an untouched agent: skipped, nothing sent, nothing claimed. */
+async function assertCompletionSkipped(
+  fixture: ScopedFixture,
+  agentId: string,
+  label: string
+): Promise<void> {
+  const marker = `scope-silent-${agentId.substring(0, 8)}`;
+  const token = captureToken('completion-scope-silent');
+  const result = await notify(fixture, agentId, 'completion', { summary: marker }, token);
+  assert(
+    result.skipped === true && result.reason === 'no_messaging_agent_interaction',
+    `Expected ${label} completion to be skipped, got ${JSON.stringify(result)}`
+  );
+  const calls = (await readCapturesForToken(token)).filter((call) =>
+    call.requestBody?.includes(marker)
+  );
+  assert(calls.length === 0, `Expected no ${label} completion send, got ${calls.length}`);
+  const claim = await prisma.toolSideEffect.findUnique({
+    where: { operationKey: `lifecycle-sms.completion:${agentId}` },
   });
+  assert(claim === null, `Expected no ${label} completion claim, got ${claim?.status}`);
 }
 
-// ==================== 3. No interaction → no completion notice ====================
+async function interactionMarkerKind(rootId: string): Promise<unknown> {
+  const marker = await prisma.toolSideEffect.findUnique({
+    where: { operationKey: messagingAgentInteractionKey(rootId) },
+    select: { request: true },
+  });
+  const request = marker?.request;
+  if (request === null || request === undefined || typeof request !== 'object') return undefined;
+  return Array.isArray(request) ? undefined : request.kind;
+}
 
 export async function testCompletionScope_untouchedWebAgentNotNotified() {
   await withFixture('WHATSAPP', async (fixture) => {
     const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
-    // The kickoff receipt goes out for every root; it is not an interaction.
+    // A kickoff attempt is not a touch (and is itself skipped here).
     const kickoff = captureToken('completion-scope-kickoff');
     await notify(fixture, agentId, 'agent_started', { goal: 'Fix the bug report form' }, kickoff);
     await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
-
-    const marker = `scope-silent-${agentId.substring(0, 8)}`;
-    const token = captureToken('completion-scope-silent');
-    const result = await notify(fixture, agentId, 'completion', { summary: marker }, token);
+    await assertCompletionSkipped(fixture, agentId, 'an untouched web agent');
     assert(
-      result.skipped === true && result.reason === 'no_messaging_agent_interaction',
-      `Expected an untouched web agent's completion to be skipped, got ${JSON.stringify(result)}`
+      (await interactionMarkerKind(agentId)) === undefined,
+      'Expected no interaction marker for an untouched agent'
     );
-    const calls = (await readCapturesForToken(token)).filter((call) =>
-      call.requestBody?.includes(marker)
-    );
-    assert(calls.length === 0, `Expected no SMS/WhatsApp send, got ${calls.length}`);
-    const rows = await prisma.toolSideEffect.count({
-      where: {
-        operationKey: {
-          in: [`lifecycle-sms.completion:${agentId}`, messagingAgentInteractionKey(agentId)],
-        },
-      },
-    });
-    assert(rows === 0, `Expected no completion or interaction record, got ${rows}`);
   });
 }
 
-// ==================== 4. Non-completed agents unaffected ====================
-
-export async function testCompletionScope_untouchedAgentOtherNoticesStillSent() {
+export async function testTouchScope_relaysAreNotTouches() {
   await withFixture('WHATSAPP', async (fixture) => {
-    const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
-    const marker = `scope-running-${agentId.substring(0, 8)}`;
-    const token = captureToken('completion-scope-running');
-    await notify(fixture, agentId, 'agent_started', { goal: `Draft the memo ${marker}` }, token);
-    const kickoff = deliveredBodies(await readCapturesForToken(token), marker);
+    const relays: [string, (agentId: string) => Promise<void>][] = [
+      ['question', (agentId) => relayQuestion(fixture, agentId, 'WHATSAPP')],
+      ['write_lock', (agentId) => relayUpdate(fixture, agentId, 'write_lock')],
+      ['cost_limit', (agentId) => relayUpdate(fixture, agentId, 'cost_limit')],
+      ['agentcard_setup', (agentId) => relayUpdate(fixture, agentId, 'agentcard_setup')],
+    ];
+    for (const [kind, relay] of relays) {
+      const rootId = await createAgent(fixture, 'WEB', 'ACTIVE');
+      const childId = await createAgent(fixture, 'MAC_APP', 'ACTIVE', rootId);
+      // Each relay still reaches the phone (asserted inside the relay helper).
+      await relay(rootId);
+      await relay(childId);
+      assert(
+        (await interactionMarkerKind(rootId)) === undefined,
+        `A delivered ${kind} relay marked the tree as touched`
+      );
+      await prisma.agent.update({ where: { id: rootId }, data: { status: 'COMPLETED' } });
+      await assertCompletionSkipped(fixture, rootId, `a ${kind}-relayed web agent`);
+    }
+  });
+}
+
+export async function testTouchScope_replyOverridesLegacyRelayMarker() {
+  await withFixture('SMS', async (fixture) => {
+    const rootId = await createAgent(fixture, 'WEB', 'ACTIVE');
+    const childId = await createAgent(fixture, 'WEB', 'ACTIVE', rootId);
+    // Rows written while relays still counted carry the relay's kind.
+    await prisma.toolSideEffect.create({
+      data: {
+        operationKey: messagingAgentInteractionKey(rootId),
+        operationType: 'messaging-agent.interaction',
+        status: 'SUCCEEDED',
+        request: { agent_id: rootId, kind: 'write_lock' },
+      },
+    });
+    await assertCompletionSkipped(fixture, rootId, 'a legacy relay-marked web agent');
+    // Times out unless the reply overwrites the legacy relay marker.
+    await supervisorRepliesToAgent(fixture, childId, 'SMS', rootId);
+    const kind = await interactionMarkerKind(rootId);
     assert(
-      kickoff.SMS.length === 1 && kickoff.WHATSAPP.length === 1,
-      `Kickoff must still reach both channels: ${JSON.stringify(kickoff)}`
+      kind === 'reply_to_agent',
+      `Expected the reply to replace the relay marker, got ${String(kind)}`
     );
-    await relayQuestion(fixture, agentId, 'WHATSAPP');
-    const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-    assert(stored.status === 'ACTIVE', `Notices must not change agent status: ${stored.status}`);
+    await assertCompletionDelivered(fixture, rootId, 'SMS');
+  });
+}
+
+// ==================== 4. Kickoff follows the same scope ====================
+
+export async function testKickoffScope_untouchedAgentSilentQuestionsStillSent() {
+  await withFixture('WHATSAPP', async (fixture) => {
+    for (const source of ['WEB', 'MAC_APP'] as const) {
+      const agentId = await createAgent(fixture, source, 'ACTIVE');
+      const marker = `scope-running-${agentId.substring(0, 8)}`;
+      const token = captureToken('kickoff-scope-silent');
+      const result = await notify(
+        fixture,
+        agentId,
+        'agent_started',
+        { goal: `Draft the memo ${marker}` },
+        token
+      );
+      assert(
+        result.skipped === true && result.reason === 'no_messaging_agent_interaction',
+        `Expected an untouched ${source} agent's kickoff to be skipped, got ${JSON.stringify(result)}`
+      );
+      const calls = (await readCapturesForToken(token)).filter((call) =>
+        call.requestBody?.includes(marker)
+      );
+      assert(calls.length === 0, `Expected no ${source} kickoff send, got ${calls.length}`);
+      // A question that blocks the agent still reaches the phone on every channel.
+      await relayQuestion(fixture, agentId, 'WHATSAPP');
+      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert(stored.status === 'ACTIVE', `Notices must not change agent status: ${stored.status}`);
+    }
+  });
+}
+
+export async function testKickoffScope_messagingCreatedAgentKickoffSent() {
+  await withFixture('WHATSAPP', async (fixture) => {
+    for (const source of ['SMS', 'WHATSAPP'] as const) {
+      const agentId = await createAgent(fixture, source, 'ACTIVE');
+      const marker = `scope-kickoff-${agentId.substring(0, 8)}`;
+      const token = captureToken('kickoff-scope-sent');
+      const result = await notify(
+        fixture,
+        agentId,
+        'agent_started',
+        { goal: `Book the table ${marker}` },
+        token
+      );
+      assert(result.skipped !== true, `${source} kickoff was skipped: ${JSON.stringify(result)}`);
+      const bodies = deliveredBodies(await readCapturesForToken(token), marker);
+      assert(
+        bodies.SMS.length === 1 && bodies.WHATSAPP.length === 1,
+        `${source}-created kickoff must reach both channels: ${JSON.stringify(bodies)}`
+      );
+    }
   });
 }

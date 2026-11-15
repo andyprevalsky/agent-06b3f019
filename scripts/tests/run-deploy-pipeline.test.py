@@ -3418,7 +3418,35 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
         '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
         "esac\n")
     (bin_dir / "gh").chmod(0o755)
-    sem_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake)}
+    # The live frontend's /version.json (vite.config.ts productionBuildId): by
+    # default it serves the merge's own build, so the exact binding applies.
+    version_body = fake / "version.json"
+    version_body.write_text(json.dumps({"buildId": f"{merged[:12]}-mwfixture"}))
+
+    class VersionHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args) -> None:  # keep the fixture output clean
+            return
+
+        def do_GET(self) -> None:
+            with (fake / "version-requests.log").open("a") as log:
+                log.write(f"{self.path} {self.headers.get('Cache-Control')}\n")
+            if (fake / "version-fail").exists():
+                self.send_error(503, "fixture outage")
+                return
+            count = int((fake / "version-count").read_text()) + 1 if (fake / "version-count").exists() else 1
+            (fake / "version-count").write_text(str(count))
+            step = fake / f"version-{count}.json"  # an optional per-read sequence, then version.json
+            body = step.read_bytes() if step.exists() else version_body.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    version_server = ThreadingHTTPServer(("127.0.0.1", 0), VersionHandler)
+    threading.Thread(target=version_server.serve_forever, daemon=True).start()
+    sem_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake),
+               "DEPLOY_SEMANTIC_VERSION_URL": f"http://127.0.0.1:{version_server.server_address[1]}/version.json"}
     sem_env.pop("DEPLOY_GH_BIN", None)
     calls = fake / "calls.log"
     tokens = fake / "tokens.log"
@@ -3882,6 +3910,168 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     ran = run_semantic(state15f, env_override={**pool_env, "GH_TOKEN": "primary", "FAKE_GH_POOL_TOKEN": ""})
     assert ran.returncode == 0 and "token pool picked no member" in ran.stdout, ran.stdout
     assert {row[2] for row in token_lines()} == {"primary"}, token_lines()
+
+    # 16. Spec/live skew (2026-11-15, run 43681354141): the live frontend
+    #     already served a strict descendant of the merge whose PR changed the
+    #     UI and its spec (PR #2097 removed the 'Integration team sharing'
+    #     region), so the merge's own spec failed against intended live UI.
+    #     The lane binds the spec to the commit the live frontend serves: a
+    #     strict descendant is dispatched as source_sha and recorded
+    #     verified-by-descendant; the merge's own build stays an exact binding;
+    #     an ancestor build with an identical front-end/ (Vercel has not
+    #     promoted the merge yet) is source-equivalent and dispatches the
+    #     merge; an ancestor whose front-end/ differs is waited out and then
+    #     refused; an unrelated build or an unreadable /version.json
+    #     dispatches nothing.
+    def commit_tree(parent: str | None, files: dict[str, str], message: str) -> str:
+        """A commit on no branch (HEAD stays the merge the Fly gate binds)."""
+        index = fake / "fixture.index"
+        index.unlink(missing_ok=True)
+        git_env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        subprocess.run([*git, "read-tree", merged], check=True, env=git_env)
+        for relative, content in files.items():
+            blob = subprocess.run([*git, "hash-object", "-w", "--stdin"], input=content, check=True,
+                                  stdout=subprocess.PIPE, text=True).stdout.strip()
+            subprocess.run([*git, "update-index", "--add", "--cacheinfo", f"100644,{blob},{relative}"], check=True,
+                           env=git_env)
+        tree = subprocess.run([*git, "write-tree"], check=True, env=git_env, stdout=subprocess.PIPE,
+                              text=True).stdout.strip()
+        return subprocess.run([*git, "commit-tree", tree, *(["-p", parent] if parent else []), "-m", message],
+                              check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    descendant = commit_tree(merged, {"front-end/src/teams.tsx": "no team-sharing region\n"}, "descendant UI change")
+    unrelated = commit_tree(None, {"front-end/src/teams.tsx": "unrelated\n"}, "unrelated root")
+    ancestor = subprocess.run([*git, "rev-parse", f"{merged}^"], check=True, stdout=subprocess.PIPE,
+                              text=True).stdout.strip()
+    ours_descendant = row(500, future, descendant, other_head)
+
+    def serve_build(build_id: str, *sequence: str) -> None:
+        """Serve ``sequence`` on the first reads, then ``build_id``."""
+        version_body.write_text(json.dumps({"buildId": build_id}))
+        for stale in [fake / "version-requests.log", fake / "version-count", *fake.glob("version-[0-9]*.json")]:
+            stale.unlink(missing_ok=True)
+        for index, step in enumerate(sequence, start=1):
+            (fake / f"version-{index}.json").write_text(json.dumps({"buildId": step}))
+
+    def view_of(source: str, run_id: int) -> dict:
+        return {**view("completed", "success", 1, all_success), "displayTitle": f"Production semantic gate source_sha={source}",
+                "url": f"https://github.com/acme/rose/actions/runs/{run_id}"}
+
+    state16 = tmp / "semantic-state-16"
+    run_gate(state16)
+    serve_build(f"{descendant[:12]}-mwhfbf5c")
+    # The merge's own run title is listed too: it is never adopted for a descendant dispatch.
+    reset([[ours, ours_descendant, old_same]], [view_of(descendant, 500)])
+    ran = run_semantic(state16)
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines[0] == ("workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha=" + descendant +
+                        " -f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"), lines
+    assert [line for line in lines if line.startswith("run view")] and all(
+        line.startswith("run view 500 ") for line in lines if line.startswith("run view")), lines
+    requests = (fake / "version-requests.log").read_text().splitlines()
+    assert requests == ["/version.json no-cache"], requests
+    assert (f"PIPELINE_SEMANTIC binding=verified-by-descendant merged_sha={merged} live_frontend={descendant}"
+            in ran.stdout), ran.stdout
+    assert f"PIPELINE_SEMANTIC status=passed exit=0 run=500 attempt=1 source_sha={descendant} " in ran.stdout, ran.stdout
+    entry = receipt_of(state16)["semantic"]
+    assert entry["merged_sha"] == merged and entry["source_sha"] == descendant and entry["run_id"] == "500", entry
+    assert entry["dispatch"]["inputs"]["source_sha"] == descendant, entry["dispatch"]
+    binding = entry["binding"]
+    assert binding["kind"] == "verified-by-descendant" and binding["live_frontend_commit"] == descendant, binding
+    assert binding["build_id"] == f"{descendant[:12]}-mwhfbf5c" and binding["version_url"] == sem_env[
+        "DEPLOY_SEMANTIC_VERSION_URL"] and binding["observed_at"], binding
+    assert receipt_of(state16)["status"] == "passed", "the Fly gate decision must not be rewritten"
+    # A confirmed descendant dispatch whose run was never adopted resumes by its own source title.
+    state16p = tmp / "semantic-state-16p"
+    run_gate(state16p)
+    reset([[ours_descendant]], [view_of(descendant, 500)])
+    (fake / "list-fail").touch()
+    assert run_semantic(state16p).returncode == 1
+    (fake / "list-fail").unlink()
+    serve_build(f"{merged[:12]}-later")  # the resumed lookup never re-binds
+    reset([[ours, ours_descendant]], [view_of(descendant, 500)])
+    ran = run_semantic(state16p)
+    assert ran.returncode == 0 and "SEMANTIC_RUN_ID=500" in ran.stdout, ran.stdout
+    assert not any(line.startswith("workflow run") for line in call_lines()), call_lines()
+    assert not (fake / "version-requests.log").exists(), "a resumed dispatch keeps its recorded binding"
+    assert receipt_of(state16p)["semantic"]["binding"]["kind"] == "verified-by-descendant", receipt_of(state16p)["semantic"]
+
+    # Negative control: the merge's own build is the exact binding, as before.
+    state16e = tmp / "semantic-state-16e"
+    run_gate(state16e)
+    serve_build(f"{merged[:12]}-mwexact")
+    reset([[ours_descendant, ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state16e)
+    assert ran.returncode == 0 and call_lines()[0].startswith(f"workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha={merged} "), (ran.stdout, call_lines())
+    entry = receipt_of(state16e)["semantic"]
+    assert entry["source_sha"] == merged and entry["run_id"] == "200" and entry["binding"]["kind"] == "exact", entry
+    assert entry["binding"]["live_frontend_commit"] == merged, entry["binding"]
+
+    # The merge's build is not promoted yet: the live ancestor has the same
+    # front-end/, so the merge's specs describe the live UI (source-equivalent).
+    state16a = tmp / "semantic-state-16a"
+    run_gate(state16a)
+    serve_build(f"{ancestor[:12]}-mwparent")
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state16a)
+    assert ran.returncode == 0 and call_lines()[0].startswith(f"workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha={merged} "), (ran.stdout, call_lines())
+    assert f"PIPELINE_SEMANTIC binding=source-equivalent merged_sha={merged} live_frontend={ancestor}" in ran.stdout, ran.stdout
+    entry = receipt_of(state16a)["semantic"]
+    assert entry["source_sha"] == merged and entry["binding"]["kind"] == "source-equivalent", entry
+    assert entry["binding"]["live_frontend_commit"] == ancestor and entry["binding"]["frontend_paths"] == ["front-end/"], entry
+
+    # A merge whose parent changed front-end/ while that parent's build is not
+    # live yet: the ancestor build is re-read until the merge goes live (exact),
+    # and refused when it never does within --live-timeout.
+    frontend_parent = commit_tree(merged, {"front-end/src/teams.tsx": "new team UI\n"}, "frontend change")
+    frontend_merge = commit_tree(frontend_parent, {"front-end/src/teams.tsx": "new team UI\n", "scripts/x.sh": "y\n"},
+                                 "scripts-only merge after a frontend change")
+    ours_frontend_merge = row(600, future, frontend_merge, other_head)
+
+    def run_frontend_merge(state: Path, *extra: str) -> subprocess.CompletedProcess:
+        write_gate(state, frontend_merge, "passed")
+        return subprocess.run(
+            [sys.executable, str(driver), "production-semantic", "--merged-sha", frontend_merge, "--state-dir",
+             str(state), "--poll-seconds", "0.05", "--start-timeout", "0.5", *extra],
+            env=sem_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    serve_build(f"{frontend_merge[:12]}-mwlive", f"{merged[:12]}-mwold", f"{merged[:12]}-mwold")
+    reset([[ours, ours_frontend_merge]], [view_of(frontend_merge, 600)])
+    ran = run_frontend_merge(tmp / "semantic-state-16w")
+    assert ran.returncode == 0 and ran.stdout.count(f"PIPELINE_SEMANTIC waiting live_frontend={merged[:12]}") == 2, ran.stdout
+    assert call_lines()[0].startswith(f"workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha={frontend_merge} "), call_lines()
+    entry = receipt_of(tmp / "semantic-state-16w")["semantic"]
+    assert entry["binding"]["kind"] == "exact" and entry["binding"]["polls"] == 3 and entry["run_id"] == "600", entry
+    serve_build(f"{merged[:12]}-mwold")
+    reset([[ours, ours_frontend_merge]], [view_of(frontend_merge, 600)])
+    ran = run_frontend_merge(tmp / "semantic-state-16t", "--live-timeout", "0.2")
+    assert ran.returncode == 1 and f"live frontend {merged[:12]} is not {frontend_merge[:12]} or a strict descendant of it: it is an ancestor" in ran.stdout, ran.stdout
+    assert "front-end/ differs in 1 path(s)" in ran.stdout and call_lines() == [], (ran.stdout, call_lines())
+    assert receipt_of(tmp / "semantic-state-16t")["semantic"]["dispatch"]["at"] is None
+
+    # Refusals: an unrelated build fails closed without dispatching; an
+    # unreadable /version.json or a build id with no commit is a tooling error
+    # (exit 2), never a guess.
+    for label, build_id, code, text in (
+            ("unrelated", f"{unrelated[:12]}-mwx", 1, f"live frontend {unrelated[:12]} is not {merged[:12]} or a strict descendant of it"),
+            ("local", "local-mwdev", 2, "names no commit"),
+            ("unknown", f"{'e' * 12}-mwgone", 2, f"cannot resolve the live frontend commit {'e' * 12}"),
+            ("outage", None, 2, "HTTP 503")):
+        state_r = tmp / f"semantic-state-16-{label}"
+        run_gate(state_r)
+        reset([[ours, ours_descendant]], [view("completed", "success", 1, all_success)])
+        if build_id is None:
+            (fake / "version-fail").touch()
+        else:
+            serve_build(build_id)
+        ran = run_semantic(state_r)
+        (fake / "version-fail").unlink(missing_ok=True)
+        assert ran.returncode == code and text in ran.stdout, (label, ran.stdout)
+        assert call_lines() == [], (label, call_lines())
+        entry = receipt_of(state_r)["semantic"]
+        assert entry["run_id"] is None and entry["dispatch"]["at"] is None and entry["outcome"] in ("failed", "error"), (label, entry)
+    serve_build(f"{merged[:12]}-mwfixture")
 
     # Selection rule in-process: newest matching only, by createdAt then id.
     pipeline = load_module("pipeline_semantic_select", DRIVER)

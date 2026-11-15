@@ -8,17 +8,29 @@ import { AgentNotFoundError, MissingAgentIdError } from './errors';
 import { buildAgentNetworkMatch, buildDocumentMatch, buildTransactionMatch } from './format';
 import * as grepRepo from './grepRepo';
 import * as repo from './repo';
+import {
+  documentAccess,
+  documentAccessPredicate,
+  documentOwnership,
+  OUTSIDE_SCOPE_NOTICE,
+  transactionAccess,
+  transactionAccessPredicate,
+  transactionOwnership,
+  type TableAccess,
+} from './tableAccessRepo';
+import type { SharedGrant } from './teamAccessRepo';
 import type { GrepMatch, GrepResult, ValidatedGrepInput } from './types';
 
 interface SourceSearchResult {
   total: number;
   matches: GrepMatch[];
+  notice?: string;
 }
 
-function transactionQuery(userId: string, input: ValidatedGrepInput) {
+function transactionQuery(access: TableAccess, input: ValidatedGrepInput) {
   const filters = input.filters.transactions;
   return {
-    userId,
+    access,
     pattern: input.dbPattern,
     caseInsensitive: input.caseInsensitive,
     since: filters?.since,
@@ -32,11 +44,15 @@ function transactionQuery(userId: string, input: ValidatedGrepInput) {
 
 export async function searchTransactionSource(
   userId: string,
-  input: ValidatedGrepInput
+  input: ValidatedGrepInput,
+  grants: SharedGrant[]
 ): Promise<SourceSearchResult> {
+  const access = transactionAccess(userId, input.teamScope, grants);
+  const notice = access.notice ?? OUTSIDE_SCOPE_NOTICE('transactions');
+  if (transactionAccessPredicate(access) === null) return { total: 0, matches: [], notice };
   const filters = input.filters.transactions;
   const query = {
-    ...transactionQuery(userId, input),
+    ...transactionQuery(access, input),
     pathInstitution: filters?.pathInstitution,
     pathAccount: filters?.pathAccount,
     pathTransactionId: filters?.pathTransactionId,
@@ -45,22 +61,36 @@ export async function searchTransactionSource(
     grepRepo.countTransactionGrepRows(query),
     grepRepo.searchTransactionGrepRows({ ...query, limit: input.headLimit, offset: input.offset }),
   ]);
-  return { total, matches: rows.map((row) => buildTransactionMatch(row, input)) };
+  return {
+    total,
+    matches: rows.map((row) => ({
+      ...buildTransactionMatch(row, input),
+      ownership: transactionOwnership(access, row),
+    })),
+    ...(access.notice === undefined ? {} : { notice: access.notice }),
+  };
 }
 
-/** Currency totals for a transactions grep, over every matching row. */
+/**
+ * Currency totals for a transactions grep, over every matching row. Totals never mix
+ * owners: each row is one owner's total in one currency. Undefined when nothing is readable.
+ */
 export async function transactionSummaries(
   userId: string,
-  input: ValidatedGrepInput
+  input: ValidatedGrepInput,
+  grants: SharedGrant[]
 ): Promise<NonNullable<GrepResult['summaries']>['transactions']> {
+  const access = transactionAccess(userId, input.teamScope, grants);
+  if (transactionAccessPredicate(access) === null) return undefined;
   const filters = input.filters.transactions;
   const aggregateRows = await grepRepo.aggregateTransactionGrepRows({
-    ...transactionQuery(userId, input),
+    ...transactionQuery(access, input),
     includePendingInTotals: filters?.includePendingInTotals,
   });
   return {
     totals_include_pending: filters?.includePendingInTotals === true,
     currencies: aggregateRows.map((row) => ({
+      owner_user_id: row.userId,
       currency: row.currency,
       outflow: row.outflow?.toString() ?? '0',
       inflow: row.inflow?.toString() ?? '0',
@@ -72,11 +102,15 @@ export async function transactionSummaries(
 
 export async function searchDocumentSource(
   userId: string,
-  input: ValidatedGrepInput
+  input: ValidatedGrepInput,
+  grants: SharedGrant[]
 ): Promise<SourceSearchResult> {
+  const access = documentAccess(userId, input.teamScope, grants);
+  if (documentAccessPredicate(access) === null)
+    return { total: 0, matches: [], notice: OUTSIDE_SCOPE_NOTICE('documents') };
   const filters = input.filters.documents;
   const query = {
-    userId,
+    access,
     pattern: input.dbPattern,
     caseInsensitive: input.caseInsensitive,
     documentSource: filters?.documentSource,
@@ -91,7 +125,13 @@ export async function searchDocumentSource(
     grepRepo.countDocumentGrepRows(query),
     grepRepo.searchDocumentGrepRows({ ...query, limit: input.headLimit, offset: input.offset }),
   ]);
-  return { total, matches: rows.map((row) => buildDocumentMatch(row, input)) };
+  return {
+    total,
+    matches: rows.map((row) => ({
+      ...buildDocumentMatch(row, input),
+      ownership: documentOwnership(access, row),
+    })),
+  };
 }
 
 async function agentTreeIdsForGrep(userId: string, agentId: string | undefined): Promise<string[]> {

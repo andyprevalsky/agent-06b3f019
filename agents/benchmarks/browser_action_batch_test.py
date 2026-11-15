@@ -456,6 +456,7 @@ def test_phone_continuation_refuses_changed_lease_cursor_or_attention(change):
                                   native('phone',{'mode':'setup','action':'verify','evidenceOperationIds':['op-1'],'verificationTarget':'portrait_lock'},'fill')])
 def test_phone_setup_credential_and_message_calls_still_require_their_own_turn(first):
     from providers.rose.errors import BrowserModelOutputValidationError
+    assert_guidance_names_single_call_phone_families()
     with pytest.raises(BrowserModelOutputValidationError):
         asyncio.run(phone_response([first,op('screen.text',{},'read')]))
     with pytest.raises(BrowserModelOutputValidationError):
@@ -584,6 +585,30 @@ def test_actual_activity_runs_phone_batch_without_extra_model_turn():
     asyncio.run(full_activity_phone_batch())
 
 
+def assert_guidance_names_single_call_phone_families():
+    """The guide must state every phone call family the runtime refuses to batch.
+
+    An unstated refusal reads as "act, then verify in the same response": the live
+    model batched credentials.fill_saved + screen.text and the whole turn was
+    rejected (FLAKY bdc52b970d77433dab652f0fbe5f5c1b).
+    """
+    from browser_tools.schemas import phone_call_batchable
+    from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
+    refused = [{'mode':'operation','operation':'credentials.fill_saved','args':{}},
+               {'mode':'operation','operation':'credentials.fill_device_passcode','args':{}},
+               {'mode':'operation','operation':'messages.send_approved','args':{'queueId':'q'}},
+               {'mode':'setup','action':'verify'},{'mode':'release'}]
+    assert not any(phone_call_batchable(params) for params in refused)
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+    stated = ' '.join(PHONE_GUIDANCE.split())
+    assert 'A credentials.*, messages.*, setup or release call must be the only tool call in its response; observe its result on the next turn.' in stated
+    # The phone tool description invites the same batching, so it states the same rule.
+    assert 'a credentials.*, messages.*, setup or release call must be the only tool call in its response' in BROWSER_USE_TOOLS['phone']['description']
+    # Negative control: the batching invitation for navigation stays intact.
+    assert phone_call_batchable({'mode':'operation','operation':'input.tap','args':{'x':1,'y':2}})
+    assert 'put screen.text as the next call in the same response' in stated
+
+
 async def phone_batch_contract():
     """Deploy-path aggregate of the phone batch regressions (blackbox runner is already in a loop)."""
     from providers.rose.errors import BrowserModelOutputValidationError
@@ -601,6 +626,7 @@ async def phone_batch_contract():
         raise AssertionError('credential fill shared a model turn')
     except BrowserModelOutputValidationError:
         pass
+    assert_guidance_names_single_call_phone_families()
     single=await portrait_route_journal(False);batched=await portrait_route_journal(True)
     assert (single[0],batched[0])==(4,2) and single[1]==batched[1]
     await full_activity_phone_batch()

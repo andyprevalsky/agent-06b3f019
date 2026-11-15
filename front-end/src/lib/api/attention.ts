@@ -239,3 +239,20 @@ export async function submitPhoneAuthCompletion(
   );
   return response.status;
 }
+
+/** One-tap owner action: the agent resends the code on the phone, then asks again. */
+export async function submitPhoneAuthResendCode(
+  requestId: string,
+  signal: AbortSignal,
+): Promise<number> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/auth-assistance/${encodeURIComponent(requestId)}/complete`,
+    {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'resend_code' }),
+      signal,
+    },
+  );
+  return response.status;
+}

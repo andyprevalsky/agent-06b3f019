@@ -104,6 +104,13 @@ def _validate_required_turn_tool(result: Any, required_tool: Optional[str]) -> N
 # Check credits every N iterations
 CREDIT_CHECK_INTERVAL = 5
 
+# Serialized-context byte budget that also triggers compaction. The context
+# rides every continue_as_new (generation handoff, pause, overflow) and the
+# compactor activity input, both capped by Temporal's 2 MiB payload limit. A
+# JSON-heavy context can cross that far below the token trigger (prod 8789a5df:
+# ~191k tokens, 2,124,477 bytes), wedging its handoff and the cutover drain.
+CONTEXT_PAYLOAD_COMPACTION_BYTES = 1_200_000
+
 # Buffer-based compaction trigger (mirrors Claude Code's autoCompact.ts).
 # Reserve room for output + a safety buffer before the model's hard limit, so
 # the next LLM call still fits inside the window even after the trigger fires.
@@ -224,6 +231,11 @@ async def run_agent(
     # The workflow's DAG interrupt hook: a user / agent message cancels a running
     # attempt_completion verifier (None: verify to the end).
     verifier_interrupts: Optional[Any] = None,
+    # Execute-loop completion hooks: started(context) when an attempt_completion
+    # verifier begins, settled(passed) once its verdict is known. The root
+    # workflow overlaps its completion summary with the verifier through them.
+    on_verification_started: Optional[Callable[[List[Dict]], Awaitable[None]]] = None,
+    on_verification_settled: Optional[Callable[[bool], Awaitable[None]]] = None,
     # Environment context (helpers/environment_context.py). Before each turn's
     # poll: append the persisted <environment> row when it differs from the last
     # one in ``context`` (the poll then loads it). Per LLM call: the seed for the
@@ -992,8 +1004,12 @@ async def run_agent(
             agent_type="explore" if cache_call_site == "explore_agent" else None,
         ):
             context_tokens = _estimate_tokens(context)
+            context_bytes = _context_payload_bytes(context)
+        over_compaction_trigger = (
+            context_tokens >= compaction_trigger or context_bytes >= CONTEXT_PAYLOAD_COMPACTION_BYTES
+        )
 
-        if context_tokens >= compaction_trigger and compactor_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+        if over_compaction_trigger and compactor_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             # Breaker open while the context is still over the trigger. Falling
             # through would send an over-window context to the model on every
             # remaining iteration and fail with a provider-side length error
@@ -1001,11 +1017,13 @@ async def run_agent(
             message = (
                 "Context compression unavailable: compactor failed "
                 f"{compactor_failures} consecutive times and the context estimate "
-                f"{context_tokens} tokens still exceeds trigger {compaction_trigger}."
+                f"{context_tokens} tokens ({context_bytes} bytes) still exceeds trigger "
+                f"{compaction_trigger} tokens / {CONTEXT_PAYLOAD_COMPACTION_BYTES} bytes."
             )
             logger.error(
                 "Compactor circuit breaker open with context still over trigger",
                 context_tokens=context_tokens,
+                context_bytes=context_bytes,
                 trigger=compaction_trigger,
                 compactor_failures=compactor_failures,
             )
@@ -1021,10 +1039,12 @@ async def run_agent(
                 "message": message,
             }
 
-        if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+        if over_compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
                 "Context overflow",
                 context_tokens=context_tokens,
+                context_bytes=context_bytes,
+                byte_trigger=CONTEXT_PAYLOAD_COMPACTION_BYTES,
                 trigger=compaction_trigger,
                 effective_window=effective_window,
             )
@@ -1055,24 +1075,36 @@ async def run_agent(
 
             if success:
                 compressed_tokens = _estimate_tokens(compressed)
+                compressed_bytes = _context_payload_bytes(compressed)
                 # Signed on purpose: a compaction that GREW the context must not
                 # be indistinguishable from one that saved nothing. The old
                 # max(0.0, ...) clamp reported 0.0 for the -0.4% growth in prod
                 # agent e14d5abb. Negative values are still < the minimum, so
                 # the MIN_AUTOCOMPACT_SAVINGS_RATIO check below is unchanged in
                 # direction — it just now sees the real number.
-                saved_ratio = compaction_saved_ratio(context_tokens, compressed_tokens)
+                # Measure savings in the unit that fired: a byte-only trigger saves
+                # bytes held in metadata the token estimate ignores
+                # (codex_reasoning_items); token-triggered runs keep token savings.
+                byte_only_trigger = context_tokens < compaction_trigger
+                saved_ratio = (
+                    compaction_saved_ratio(context_bytes, compressed_bytes)
+                    if byte_only_trigger
+                    else compaction_saved_ratio(context_tokens, compressed_tokens)
+                )
 
-                if compressed_tokens >= compaction_trigger:
+                if compressed_tokens >= compaction_trigger or compressed_bytes >= CONTEXT_PAYLOAD_COMPACTION_BYTES:
                     message = (
                         "Context compression ineffective: compressed context estimate "
-                        f"{compressed_tokens} tokens still exceeds trigger {compaction_trigger} "
+                        f"{compressed_tokens} tokens ({compressed_bytes} bytes) still exceeds trigger "
+                        f"{compaction_trigger} tokens / {CONTEXT_PAYLOAD_COMPACTION_BYTES} bytes "
                         f"(original estimate {context_tokens})."
                     )
                     logger.error(
                         "Compaction did not get below overflow trigger",
                         context_tokens=context_tokens,
                         compressed_tokens=compressed_tokens,
+                        context_bytes=context_bytes,
+                        compressed_bytes=compressed_bytes,
                         trigger=compaction_trigger,
                         saved_ratio=saved_ratio,
                     )
@@ -1092,8 +1124,13 @@ async def run_agent(
                     ineffective_compactions += 1
                     message = (
                         "Context compression ineffective: compressed context saved only "
-                        f"{saved_ratio:.1%} of estimated tokens "
-                        f"(original {context_tokens}, compressed {compressed_tokens})."
+                        + (
+                            f"{saved_ratio:.1%} of serialized bytes "
+                            f"(original {context_bytes}, compressed {compressed_bytes})."
+                            if byte_only_trigger
+                            else f"{saved_ratio:.1%} of estimated tokens "
+                            f"(original {context_tokens}, compressed {compressed_tokens})."
+                        )
                     )
                     logger.warning(
                         "Compaction saved too little",
@@ -2386,6 +2423,25 @@ async def run_agent(
                 verifier_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
 
                 verifier_error = None
+                speculate_completion = not is_plan_loop and on_verification_started is not None
+                if speculate_completion:
+                    authored = tool_args.get("result") if isinstance(tool_args, dict) else None
+                    try:
+                        # The summary sees what the verifier sees, including the
+                        # attempt's own authored result.
+                        await on_verification_started(_with_authored_result(context, authored, tool_call_id or ""))
+                    except Exception as hook_error:
+                        if any(
+                            error_chain_has_type(hook_error, kind)
+                            for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested")
+                        ):
+                            raise
+                        # Optional speedup only: verification and the serial summary proceed.
+                        logger.warning(
+                            "[run_agent] Speculative completion summary did not start",
+                            agent_id=agent_id,
+                            error=extract_error_message(hook_error),
+                        )
                 try:
                     verifier_result = await _run_verifier(
                         execute_activity=execute_activity,
@@ -2470,6 +2526,9 @@ async def run_agent(
                     v_reasoning = verifier_result.get("reasoning", "")
                     structured_response = verifier_result.get("structured_response")
 
+                if speculate_completion and verifier_error is not None and on_verification_settled is not None:
+                    await on_verification_settled(False)
+
                 # Track raised verifier errors and existing "Progress check failed" results.
                 if verifier_error is not None or v_reasoning.startswith("Progress check failed"):
                     verifier_failure_reason = (
@@ -2540,8 +2599,13 @@ async def run_agent(
                     context,
                     get_requirement_revision() if get_requirement_revision else None,
                 ):
+                    if speculate_completion and on_verification_settled is not None:
+                        await on_verification_settled(False)
                     recent_verifier_scores.pop()
                     continue
+
+                if speculate_completion and on_verification_settled is not None:
+                    await on_verification_settled(score >= 1.0)
 
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
@@ -2821,6 +2885,11 @@ def _estimate_tokens(context: List[Dict]) -> int:
     reported as <80k); ESTIMATE_SAFETY_MULTIPLIER pads for that.
     """
     return estimate_context_tokens(context)
+
+
+def _context_payload_bytes(context: List[Dict]) -> int:
+    """Serialized size of ``context``, the largest continue_as_new argument (same json.dumps encoding the workflow's payload check uses)."""
+    return len(json.dumps(context, default=str))
 
 
 async def _compress_context(

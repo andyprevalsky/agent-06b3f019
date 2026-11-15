@@ -33,6 +33,7 @@ import browserWorldRouter from './domains/browser-world/routes';
 import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
 import { createCliIntegrationRoutes } from './domains/integrations/routes.cli';
+import { createMcpIntegrationRoutes } from './domains/integrations/routes.mcp';
 import { createAgent as createCliSetupAgent } from './domains/agents/agentLifecycleService';
 import { createAgentSchema as cliSetupAgentSchema } from './domains/agents/types';
 import authRouter from './domains/auth/routes';
@@ -65,6 +66,7 @@ import {
   createSupervisorFixtureTestRouter,
 } from './providers/smsSupervisor/testRoutes';
 import vcardRouter from './domains/vcard/routes';
+import agentPreviewRouter from './domains/agent-preview/routes';
 import uploadRouter from './domains/upload/routes';
 import feedbackRouter from './domains/feedback/routes';
 import adminHealthRouter from './domains/admin-health/routes';
@@ -424,6 +426,7 @@ app.use('/api/tools', toolsRouter); // Tools list is public read
 app.use('/api/benchmarks', benchmarksRouter); // Benchmark tasks are public
 app.use('/api/webhooks/slack/auto-rca', slackAutoRcaRouter);
 app.use('/api/vcard', vcardRouter); // vCard for contact card (public for Twilio MMS)
+app.use('/api/agent-preview', agentPreviewRouter); // public link-preview facts (title/state)
 
 // x402 Payment Routes Setup
 const x402ReceivingWallet = process.env.X402_RECEIVING_WALLET;
@@ -545,6 +548,7 @@ app.use(
     );
   })
 );
+app.use('/api/integrations/mcp', createMcpIntegrationRoutes());
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/compute-accounts', computeGrantsRouter);
 app.use('/api/billing', billingRouter);

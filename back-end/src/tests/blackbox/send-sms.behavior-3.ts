@@ -25,12 +25,12 @@ export async function testBoundary_notifyAgentStartedKeepsLongGoalInsideAgent() 
   const goal = `${privateInstruction}\n${'Account setup instructions. '.repeat(70)}`.slice(0, 1670);
   assert(goal.length === 1670, 'Expected the captured incident goal length');
   const agent = await createNotifyAgent(goal);
-  const agentLink = `https://roselabs.ai/?agent-id=${agent.id}`;
+  const agentLink = `https://roselabs.ai/a/${agent.id}`;
   const corrected = `I'm on it: Set up the requested accounts.\nFollow along: ${agentLink}`;
   try {
     await setNotificationFixture(agent.id, [
       {
-        expected_tool_result_substrings: ['1762', 'should be at most 1600 character(s)'],
+        expected_tool_result_substrings: ['1754', 'should be at most 1600 character(s)'],
         message: 'x'.repeat(1601),
       },
       {
@@ -80,7 +80,7 @@ export async function testBoundary_notificationSummarizesInternalGoalLinks(): Pr
   const goal = `Review the full task using these internal sources:\n${internalLinks.map((link) => `(${link})`).join('\n')}`;
   assert(goal.length > 1600, 'Expected internal source links to exceed the SMS body limit');
   const agent = await createNotifyAgent(goal);
-  const corrected = `I'm on it: Review the requested task.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`;
+  const corrected = `I'm on it: Review the requested task.\nFollow along: https://roselabs.ai/a/${agent.id}`;
   try {
     await setNotificationFixture(agent.id, {
       expected_tool_result_substrings: ['should be at most 1600 character(s)'],
@@ -119,7 +119,7 @@ export async function testBoundary_notificationRequiresCanonicalActionLink(): Pr
   const token = captureToken('notify-missing-action-link');
   const goal = 'Internal planning details. '.repeat(80);
   const agent = await createNotifyAgent(goal);
-  const corrected = `I'm on it: Review the requested task.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`;
+  const corrected = `I'm on it: Review the requested task.\nFollow along: https://roselabs.ai/a/${agent.id}`;
   try {
     await setNotificationFixture(agent.id, [
       { message: "I'm on it: Review the requested task." },
@@ -176,7 +176,7 @@ export async function testBoundary_notificationDoesNotRewriteNonContentRejection
     const { agent, userId } = await createSmsOnlyNotifyFixture(goal);
     try {
       await setNotificationFixture(agent.id, {
-        message: `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`,
+        message: `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/a/${agent.id}`,
       });
       const response = await request(`${BASE_URL}/api/send-sms/notify`, {
         method: 'POST',
@@ -213,7 +213,7 @@ export async function testBoundary_notificationRepairsHttp400BodyRejection(): Pr
   const token = captureToken('notify-content-400');
   const goal = 'Set up the requested account. __BLACKBOX_SURGE_400__';
   const agent = await createNotifyAgent(goal);
-  const corrected = `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`;
+  const corrected = `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/a/${agent.id}`;
   try {
     await setNotificationFixture(agent.id, {
       expected_tool_result_substrings: ['Surge API error: 400', 'body rejected by provider'],
@@ -250,7 +250,7 @@ export async function testBoundary_notificationRepairsProviderRejection(): Promi
   const token = captureToken('notify-provider-rejection');
   const goal = 'Set up the requested account. __BLACKBOX_SURGE_422__';
   const agent = await createNotifyAgent(goal);
-  const corrected = `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`;
+  const corrected = `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/a/${agent.id}`;
   try {
     await setNotificationFixture(agent.id, {
       expected_tool_result_substrings: ['Surge API error: 422', 'body rejected by provider'],
