@@ -78,36 +78,9 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794721838030-c11s0b.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-      "cwd": "/home/boxes/rose",
-      "pid": 2138622
-    },
-    {
-      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v FACTORY_EVENT",
-      "cwd": "/home/boxes/rose",
-      "pid": 2138624
-    },
-    {
-      "argv": "tail -8",
-      "cwd": "/home/boxes/rose",
-      "pid": 2138626
-    },
-    {
-      "argv": "cut -c1-250",
-      "cwd": "/home/boxes/rose",
-      "pid": 2138627
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-2208-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2208-closeout/closeout-manifest.json, docs/handoffs/pr-2208-closeout/private-archive-receipt.json",
-    "live process 2138622 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794721838030-c11s0b.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-    "live process 2138624 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v FACTORY_EVENT",
-    "live process 2138626 in this checkout: tail -8",
-    "live process 2138627 in this checkout: cut -c1-250"
-  ],
+  "open_items": [],
   "pr": 2208,
   "preserved_refs": {
     "branch:backup/cerebras-chat-quota-prepush-20261002": {
@@ -130,7 +103,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr-2208-closeout",
@@ -139,8 +112,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [
-        "docs/handoffs/pr-2208-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2208-closeout/private-archive-receipt.json"
+        "docs/handoffs/pr-2208-closeout/deletion-readiness.json"
       ],
       "unpushed_commits": 0
     }
