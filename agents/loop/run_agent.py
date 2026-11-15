@@ -2967,6 +2967,10 @@ def _real_user_requirement_keys(context: List[Dict]) -> set:
         # addressed to one browser task) are not this agent's requirements.
         if is_agent_authored_user_metadata(metadata) or is_excluded_from_model(message):
             continue
+        # The compactor's USER-role summary digests rows already admitted; as a
+        # requirement it re-queued ~40 KB of feedback per compaction (agent 8789a5df).
+        if metadata.get("compactionSummary") is True:
+            continue
         request_id = metadata.get("attentionRequestId")
         if metadata.get("source") == "attention_response" and isinstance(request_id, str) and request_id:
             keys.add(("attention_response", request_id))

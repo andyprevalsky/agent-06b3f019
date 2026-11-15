@@ -833,6 +833,27 @@ OVERFLOW_DEFER_MAX_HISTORY_BYTES = 30 * 1024 * 1024
 # failed workflow task forever, so a continuation that big can never hand off. Warn well
 # before the limit so a growing context is visible instead of wedging a cutover.
 CONTINUATION_PAYLOAD_WARN_BYTES = 1_500_000
+# Serialized form of an id-less ("legacy", timestamp, text) requirement key whose text
+# is already response_schema_feedback[index]: the text crosses continue_as_new once.
+_FEEDBACK_TEXT_KEY = "legacy_feedback_text"
+
+
+def _serialized_requirement_key(key: Tuple[str, ...], feedback_index: Dict[str, int]) -> List[Any]:
+    if len(key) == 3 and key[0] == "legacy" and key[2] in feedback_index:
+        return [_FEEDBACK_TEXT_KEY, key[1], feedback_index[key[2]]]
+    return list(key)
+
+
+def _restored_requirement_key(value: Any, feedback: List[Any]) -> Optional[Tuple[str, ...]]:
+    if not isinstance(value, list) or not value:
+        return None
+    if value[0] == _FEEDBACK_TEXT_KEY:
+        if len(value) != 3 or not isinstance(value[1], str) or type(value[2]) is not int:
+            return None
+        index = value[2]
+        text = feedback[index] if 0 <= index < len(feedback) else None
+        return ("legacy", value[1], text) if isinstance(text, str) else None
+    return tuple(value) if all(isinstance(part, str) for part in value) else None
 
 
 class CompletionSupersededError(RuntimeError):
@@ -1192,20 +1213,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if isinstance(runtime.get("signal_responses"), dict):
             self._signal_responses = dict(runtime["signal_responses"])
         self._pending_approval_resume = _canonical_pending_approval_resume(runtime.get("pending_approval_resume"))
-        if isinstance(runtime.get("response_schema_feedback"), list):
+        feedback_rows = runtime.get("response_schema_feedback")
+        serialized_feedback = feedback_rows if isinstance(feedback_rows, list) else []
+        if isinstance(feedback_rows, list):
             source_rows = runtime.get("response_schema_feedback_sources")
             self._response_schema_feedback = []
             self._response_schema_feedback_sources = []
-            for index, value in enumerate(runtime["response_schema_feedback"]):
+            for index, value in enumerate(feedback_rows):
                 if not isinstance(value, str):
                     continue
                 source = source_rows[index] if isinstance(source_rows, list) and index < len(source_rows) else None
                 self._response_schema_feedback.append(value)
-                self._response_schema_feedback_sources.append(
-                    tuple(source)
-                    if isinstance(source, list) and source and all(isinstance(part, str) for part in source)
-                    else None
-                )
+                self._response_schema_feedback_sources.append(_restored_requirement_key(source, feedback_rows))
         self._response_schema_revision = int(runtime.get("response_schema_revision", 0))
         self._response_schema_applied_revision = int(runtime.get("response_schema_applied_revision", 0))
         self._response_schema_initialized = runtime.get("response_schema_initialized") is True
@@ -1237,19 +1256,19 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             failure_reason if isinstance(failure_reason, str) else self._response_schema_refresh_error
         )
         if isinstance(runtime.get("response_schema_feedback_rows"), list):
-            self._response_schema_feedback_rows = {
-                tuple(value)
+            restored_rows = (
+                _restored_requirement_key(value, serialized_feedback)
                 for value in runtime["response_schema_feedback_rows"]
-                if isinstance(value, list) and all(isinstance(part, str) for part in value)
-            }
+            )
+            self._response_schema_feedback_rows = {key for key in restored_rows if key is not None}
         if isinstance(runtime.get("response_schema_task_base"), str):
             self._response_schema_task_base = runtime["response_schema_task_base"]
         if isinstance(runtime.get("response_schema_task_baseline_rows"), list):
-            self._response_schema_task_baseline_rows = {
-                tuple(value)
+            baseline_rows = (
+                _restored_requirement_key(value, serialized_feedback)
                 for value in runtime["response_schema_task_baseline_rows"]
-                if isinstance(value, list) and all(isinstance(part, str) for part in value)
-            }
+            )
+            self._response_schema_task_baseline_rows = {key for key in baseline_rows if key is not None}
         if isinstance(runtime.get("response_schema_attention_events"), dict):
             self._response_schema_attention_events = {
                 key: value
@@ -1468,6 +1487,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             prior_status = "PAUSED"
         else:
             prior_status = "ACTIVE"
+        feedback_index: Dict[str, int] = {}
+        for index, text in enumerate(self._response_schema_feedback):
+            feedback_index.setdefault(text, index)
 
         return {
             "version": 1,
@@ -1511,16 +1533,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "pending_approval_resume": _canonical_pending_approval_resume(self._pending_approval_resume),
                 "response_schema_feedback": list(self._response_schema_feedback),
                 "response_schema_feedback_sources": [
-                    list(self._response_schema_feedback_sources[index])
+                    _serialized_requirement_key(self._response_schema_feedback_sources[index], feedback_index)
                     if index < len(self._response_schema_feedback_sources)
                     and self._response_schema_feedback_sources[index] is not None
                     else None
                     for index in range(len(self._response_schema_feedback))
                 ],
-                "response_schema_feedback_rows": [list(key) for key in sorted(self._response_schema_feedback_rows)],
+                "response_schema_feedback_rows": [
+                    _serialized_requirement_key(key, feedback_index)
+                    for key in sorted(self._response_schema_feedback_rows)
+                ],
                 "response_schema_task_base": self._response_schema_task_base,
                 "response_schema_task_baseline_rows": [
-                    list(key) for key in sorted(self._response_schema_task_baseline_rows)
+                    _serialized_requirement_key(key, feedback_index)
+                    for key in sorted(self._response_schema_task_baseline_rows)
                 ],
                 "response_schema_attention_events": dict(self._response_schema_attention_events),
                 "response_schema_pending_signals": dict(self._response_schema_pending_signals),
