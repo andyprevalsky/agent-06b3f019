@@ -73,9 +73,7 @@
   },
   "live_processes": [],
   "manifest": "docs/handoffs/pr-2084-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2084-closeout/closeout-manifest.json, docs/handoffs/pr-2084-closeout/stale-machine-receipts-additional.json"
-  ],
+  "open_items": [],
   "pr": 2084,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -732,18 +730,15 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr-2084-closeout",
+      "branch": "detached",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-2084-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2084-closeout/stale-machine-receipts-additional.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
