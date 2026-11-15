@@ -241,21 +241,6 @@ export function gateOverridden(gate: string): boolean {
     .includes(gate);
 }
 
-// FLAKY, NOT_INTRODUCED (PR #1975): the Steel residential tunnel refused example.com.
-const liveUnit = 'browser-provider';
-const steelAuthPersist = quarantine(
-  {
-    since: '2026-11-12',
-    repair: 'https://boxes.dev/thread/thr_825d565448b04195abc146b228ecdba5',
-    error:
-      'FAIL live Kernel/Steel auth persist: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/',
-    evidence:
-      'PR #1975 live-probes round 1 on 910dd40a14: browser-provider FLAKY (rerun passed); the PR changes no browser/provider code; same signature on PR #1658 (2026-10-31) reproduced standalone as Kernel residential proxy egress',
-  },
-  () => runLiveKernelSteelAuthPersist('steel'),
-  { unit: liveUnit }
-);
-
 // FLAKY, NOT_INTRODUCED (PR #1990, PR #2023): the live-probes gate uses the prod AgentPhone
 // key, and the prod AgentPhone account is at its 50 of 50 number cap. Tilion provider parity
 // /init then saw an uncertain agent creation and could not reconcile it within the 10000-agent
@@ -274,6 +259,27 @@ const tilionProviderParity = quarantine(
   },
   runLiveTilionProviderParity,
   { unit: tilionParityUnit }
+);
+
+// Keep this comment free of quote characters. The deploy quarantine report names each TypeScript
+// marker after the last string literal in the 500 characters before its quarantine call, so each
+// marker here is preceded by its own unit constant, and this spacer keeps the Steel marker below
+// from reading quote pairs out of the Tilion marker above. Both markers bind to the same domain
+// unit; the Tilion one comes first because attribution validates the first matching marker.
+
+// FLAKY, NOT_INTRODUCED (PR #1975): the Steel residential tunnel refused example.com.
+const liveUnit = 'browser-provider';
+const steelAuthPersist = quarantine(
+  {
+    since: '2026-11-12',
+    repair: 'https://boxes.dev/thread/thr_825d565448b04195abc146b228ecdba5',
+    error:
+      'FAIL live Kernel/Steel auth persist: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/',
+    evidence:
+      'PR #1975 live-probes round 1 on 910dd40a14: browser-provider FLAKY (rerun passed); the PR changes no browser/provider code; same signature on PR #1658 (2026-10-31) reproduced standalone as Kernel residential proxy egress',
+  },
+  () => runLiveKernelSteelAuthPersist('steel'),
+  { unit: liveUnit }
 );
 
 /**
