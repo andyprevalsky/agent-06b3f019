@@ -9,7 +9,9 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import agentPage from '../../../api/og/agent';
+import agentPage, { IMAGE_VERSION } from '../../../api/og/agent';
+import * as agentImage from '../../../api/og/agent-image';
+import * as researchImage from '../../../api/og/image';
 import { titleSize } from '../../../api/og/agent-image';
 import { statusLine } from '../../../api/og/_agentPreview';
 
@@ -44,7 +46,7 @@ describe('agent link preview page', () => {
     expect(meta(html, 'og:title')).toBe('California King Bed Transport');
     expect(meta(html, 'og:description')).toBe('Done');
     expect(meta(html, 'og:image')).toBe(
-      `https://roselabs.ai/api/og/agent-image?agent-id=${ID}&state=done`,
+      `https://roselabs.ai/api/og/agent-image?agent-id=${ID}&state=done&v=${IMAGE_VERSION}`,
     );
     expect(meta(html, 'twitter:image')).toBe(meta(html, 'og:image'));
     expect(meta(html, 'og:url')).toBe(`https://roselabs.ai/a/${ID}`);
@@ -76,6 +78,17 @@ describe('agent link preview page', () => {
     const html = await (await page('not-a-uuid%27%3Cscript%3E')).text();
     expect(calls.every((url) => url.endsWith('/index.html'))).toBe(true);
     expect(html).not.toContain('replaceState');
+  });
+});
+
+describe('link preview image runtime', () => {
+  // Production regression (2026-11-15): Vercel's edge runtime blocks @vercel/og's
+  // WebAssembly compile, so edge image functions returned empty PNGs.
+  it('renders preview images on the Node runtime with a web GET handler', () => {
+    for (const mod of [agentImage, researchImage] as Array<Record<string, unknown>>) {
+      expect((mod.config as { runtime?: string } | undefined)?.runtime).not.toBe('edge');
+      expect(typeof mod.GET).toBe('function');
+    }
   });
 });
 
