@@ -240,6 +240,15 @@ have not been checked: `benchmarks/run_benchmark.py`,
 and the `__main__` blocks of individual blackbox files. They are outside this
 repair's scope and are not deploy gates.
 
+Shipped in PR #2133, merged as 5156d47533 on 2026-11-15. Its gates all passed
+(17 of 17), including `agents-coverage-blackbox` and `new-test-stability`,
+where the new regression passed 5 of 5 runs under 8 busy-loop workers. The
+Fly cutover and workflow-migration production lanes passed. On the merged
+checkout, the original command,
+`BLACKBOX_CASE_FUNCTIONS=test_workflow_check_cost_limit_skips_non_root python scripts/run_blackbox_tests.py workflow`,
+then passed 8 consecutive runs under 8 busy-loop workers on an 8-vCPU devbox.
+Every run exited 0 with `Results: 1 passed, 0 failed`.
+
 ## Human feedback
 
 Keep the normal 120-minute backstop and use five minutes temporarily for this
