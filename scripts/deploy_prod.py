@@ -422,7 +422,9 @@ def resume_argv(job_id: str) -> list[str]:
 MIGRATION_ARGV = ['npx', 'tsx', 'scripts/validate-prod-workflow-migration.ts', '--execute']
 SMOKE_ARGV = ['npx', 'tsx', 'scripts/prod-endpoint-smoke.ts']
 AGENTCARD_ARGV = ['scripts/run-bench', AGENTCARD_TASK]
-WMH_ARGV = ['scripts/run-bench', 'raise-5m-rose-labs-brex', '--sim-on', 'raise-5m-rose-labs-brex']
+# --wait: a fleet run detaches by default and its launcher exits 0 at launch; the lane must return the
+# detached controller's own exit status (task FAIL/CHILDFAIL is non-zero), never the launch receipt.
+WMH_ARGV = ['scripts/run-bench', 'raise-5m-rose-labs-brex', '--sim-on', 'raise-5m-rose-labs-brex', '--wait']
 WMH_BUILD_ARGV = (['bash', 'scripts/run-bench-cloud', '--build-wmh'], ['bash', 'scripts/run-bench-cloud', '--refresh-wmh'])
 
 
@@ -607,9 +609,15 @@ def lane_fly(ctx: Ctx) -> Result:
             return False, f'Fly lane blocked (production exit {code}): {receipt.get("error") or "see [fly] output"}', code
         resume = show(resume_argv(job), cwd=ctx.root / 'back-end', root=ctx.root, env_file='back-end')
         if not ctx.resume_fly:
-            return False, (f'durable job {job} is {stage}, not SUCCEEDED; resume the SAME job: `{resume}` '
-                           '(or rerun with --resume-fly)'), code
-        resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end')
+            return False, (f'durable job {job} is {stage}, not SUCCEEDED; resume the SAME job: `{resume}` with '
+                           'FLY_API_TOKEN from agents/.env exported (or rerun with --resume-fly)'), code
+        # The cutover child needs FLY_API_TOKEN, which only agents/.env holds; the environment wins.
+        token = {} if ctx.environ.get('FLY_API_TOKEN') else {
+            key: value for key, value in ctx.dotenv('agents').items() if key == 'FLY_API_TOKEN' and value}
+        if not (ctx.environ.get('FLY_API_TOKEN') or token):
+            return False, (f'durable job {job} is {stage}; resuming it needs FLY_API_TOKEN: export it or add it to '
+                           'agents/.env, then rerun with --resume-fly'), 2
+        resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end', hidden=token)
         if resumed != 0:
             return False, f'resume of durable job {job} exited {resumed}', resumed
         code = ctx.sh('fly', production_argv(ctx.sha, ctx.state_dir))
@@ -791,9 +799,19 @@ def lane_semantic(ctx: Ctx) -> Result:
         if code != 0:
             return False, f'Fly-lane gate (production) exited {code}; semantics not dispatched', code
     code = ctx.sh('semantic', semantic_argv(ctx.sha, ctx.state_dir))
-    run = (ctx.production_receipt().get('semantic') or {}).get('run_id')
-    return (code == 0), (f'chat-lifecycle-ratchet run {run} success' if code == 0
-                         else f'production-semantic exited {code} (run {run})'), code
+    semantic = ctx.production_receipt().get('semantic') or {}
+    run = semantic.get('run_id')
+    if code != 0:
+        return False, f'production-semantic exited {code} (run {run})', code
+    binding = semantic.get('binding') or {}
+    if binding.get('kind') == 'verified-by-descendant':  # the specs of the live frontend's descendant of the merge ran
+        live = str(binding.get('live_frontend_commit') or '')
+        if not live or semantic.get('source_sha') != live:
+            return False, (f'production-semantic recorded a descendant binding to {live[:12] or "no commit"} but run '
+                           f'{run} tested {str(semantic.get("source_sha"))[:12]}; the binding is unverified'), 1
+        return True, Descendant(f'verified by descendant {live}: chat-lifecycle-ratchet run {run} success with the '
+                                f'specs of live frontend {live[:12]} (a descendant of {ctx.sha[:12]})'), 0
+    return True, f'chat-lifecycle-ratchet run {run} success', 0
 
 
 def release_stalled(lifecycle: object, *, livemode: bool) -> bool:

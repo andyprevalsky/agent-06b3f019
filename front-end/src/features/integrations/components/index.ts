@@ -4,3 +4,4 @@ export { default as GranolaCallback } from './GranolaCallback';
 export { default as PlaidSection } from './PlaidSection';
 
 export { default as FirefliesCallback } from './FirefliesCallback';
+export { default as McpCallback } from './McpCallback';

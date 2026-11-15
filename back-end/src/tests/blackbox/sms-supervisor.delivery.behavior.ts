@@ -321,8 +321,14 @@ export async function testLifecycleSms_landsOnSupervisorTranscript(prisma: Prism
   const userId = await provisionUserWithPhone(prisma, phone);
 
   try {
+    // Only messaging-touched agents send a kickoff; this one was started over SMS.
     const agent = await prisma.agent.create({
-      data: { userId, goal: 'Order Lok Lak to-go from the Ferry Building', status: 'ACTIVE' },
+      data: {
+        userId,
+        goal: 'Order Lok Lak to-go from the Ferry Building',
+        status: 'ACTIVE',
+        source: 'SMS',
+      },
     });
     const response = await request(`${BASE_URL}/api/send-sms/notify`, {
       method: 'POST',

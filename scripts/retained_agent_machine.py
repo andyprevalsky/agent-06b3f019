@@ -18,7 +18,9 @@ import os
 import re
 import sys
 from contextlib import contextmanager
-from urllib.error import HTTPError
+from http.client import HTTPException
+from time import monotonic, sleep
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -191,31 +193,80 @@ def initial_spare(machine, app, live_hash):
     )
 
 
-# Fly answers 408 while the exact version is still replacing; a new-image
-# update on a stopped worker can take longer than one wait. Bound the total
-# well inside the 500s lease and below the 30s HTTP timeout per request.
+# Transient Machines API failures (408/429/5xx, reset, read timeout) killed
+# production cutovers on single reads (2026-10-20, 2026-10-26). Only requests
+# that cannot change native state are replayed; a write's outcome after one
+# of these failures is unknown, so writes are sent exactly once.
+TRANSIENT_ATTEMPTS = 3
+
+
+def transient(exc):
+    if isinstance(exc, HTTPError):
+        return exc.code in (408, 429) or 500 <= exc.code < 600
+    return isinstance(exc, (URLError, ConnectionError, TimeoutError, HTTPException))
+
+
+def backoff(attempt):
+    return min(2**attempt, 8)
+
+
+def replay_transient(call, attempts=TRANSIENT_ATTEMPTS):
+    for attempt in range(attempts):
+        try:
+            return call()
+        except Exception as exc:
+            if attempt == attempts - 1 or not transient(exc):
+                raise
+        sleep(backoff(attempt))
+
+
+# Fly answers /wait with 408 while the exact version is still replacing. A
+# new-image update on a stopped worker took 489s on 2026-11-15 (run
+# 43666358952), past the old 9 x 20s budget. Wait until a deadline instead,
+# refreshing our own lease long before its TTL can lapse.
 STOPPED_WAIT_SECONDS = 20
-STOPPED_WAIT_ATTEMPTS = 9
+STOPPED_WAIT_DEADLINE_SECONDS = 900
+LEASE_TTL_SECONDS = 500  # the TTL lease() acquires
+LEASE_REFRESH_AFTER_SECONDS = 240
 
 
 def wait_stopped(fly, version):
-    for attempt in range(STOPPED_WAIT_ATTEMPTS):
+    """408 means still replacing and waits to the deadline; other transient failures stay bounded."""
+    deadline = monotonic() + STOPPED_WAIT_DEADLINE_SECONDS
+    failures = 0
+    while True:
+        fly.keep_lease()
         try:
-            return fly.request(
+            completed = fly.request(
                 "GET",
                 f"/wait?state=stopped&instance_id={quote(version, safe='')}&timeout={STOPPED_WAIT_SECONDS}",
+                replay=False,
             )
-        except HTTPError as exc:
-            if exc.code != 408 or attempt == STOPPED_WAIT_ATTEMPTS - 1:
+        except Exception as exc:
+            if not transient(exc) or monotonic() >= deadline:
                 raise
+            if isinstance(exc, HTTPError) and exc.code == 408:
+                failures = 0
+                sleep(1)
+                continue
+            failures += 1
+            if failures >= TRANSIENT_ATTEMPTS:
+                raise
+            sleep(backoff(failures - 1))
+            continue
+        # Post-wait verification and custody writes start with a full lease TTL.
+        fly.keep_lease(refresh_after=0)
+        return completed
 
 
 class Fly:
     def __init__(self, app, machine_id):
         self.path = f"/apps/{quote(app, safe='')}/machines/{quote(machine_id, safe='')}"
         self.nonce = None
+        self.leased_at = None
 
-    def request(self, method, suffix="", data=None, *, timeout=30):
+    def request(self, method, suffix="", data=None, *, timeout=30, replay=None):
+        """GETs replay transient failures; a write replays only when its caller proves it idempotent."""
         headers = {
             "Authorization": f"Bearer {os.environ['FLY_API_TOKEN']}",
             "Content-Type": "application/json",
@@ -223,18 +274,44 @@ class Fly:
         if self.nonce:
             headers["fly-machine-lease-nonce"] = self.nonce
         body = None if data is None else json.dumps(data).encode()
-        with urlopen(
-            Request(API + self.path + suffix, data=body, headers=headers, method=method),
-            timeout=timeout,
-        ) as response:
-            raw = response.read()
-            return json.loads(raw) if raw else None
+
+        def once():
+            with urlopen(
+                Request(API + self.path + suffix, data=body, headers=headers, method=method),
+                timeout=timeout,
+            ) as response:
+                raw = response.read()
+                return json.loads(raw) if raw else None
+
+        return replay_transient(once, TRANSIENT_ATTEMPTS if (method == "GET" if replay is None else replay) else 1)
+
+    def keep_lease(self, refresh_after=LEASE_REFRESH_AFTER_SECONDS):
+        """Extend our own lease during a long native wait (fly-go RefreshLease).
+
+        Verified against the Machines API on 2026-11-15: POST /lease?ttl= with
+        the holder's nonce answers 201 with the same nonce and a later expiry,
+        and a replay answers the same; acquiring without the nonce answers 409.
+
+        The refresh is bound to our nonce and only re-extends our own lease, so
+        replaying it after a transient failure is idempotent; a lost lease is
+        refused natively or answered with another holder and fails closed.
+        """
+        if not self.nonce or monotonic() - self.leased_at < refresh_after:
+            return
+        granted = self.request("POST", f"/lease?ttl={LEASE_TTL_SECONDS}", replay=True)
+        nonce = (granted.get("data") or {}).get("nonce") if isinstance(granted, dict) else None
+        if nonce != self.nonce:
+            if isinstance(nonce, str) and nonce:
+                self.nonce = nonce  # ours lapsed and Fly granted a new lease: release that one too
+            raise ValueError("Native lease refresh did not extend this owner's lease")
+        self.leased_at = monotonic()
 
     @contextmanager
     def lease(self):
         self.nonce = self.request("POST", "/lease", {"ttl": 500, "description": "cooperative-worker-pool"})["data"][
             "nonce"
         ]
+        self.leased_at = monotonic()
         try:
             yield
         finally:
