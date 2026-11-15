@@ -41344,6 +41344,8 @@ async def run_all_tests():
     await r.record_async("native_phone_auth_actual_activity_before_browser_recovery", test_native_phone_auth_actual_activity_before_browser_recovery)
     await r.record_async("native_phone_auth_manager_rejection_preserves_target", test_native_phone_auth_manager_rejection_preserves_target)
     await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
+    await r.record_async("native_phone_auth_resend_code_resumes_with_typed_intent", test_native_phone_auth_resend_code_resumes_with_typed_intent)
+    r.record("native_phone_auth_resend_code_answers_pending_tool_call", test_native_phone_auth_resend_code_answers_pending_tool_call)
     await r.record_async("native_phone_auth_cancellation_preserves_exact_pending_request", test_native_phone_auth_cancellation_preserves_exact_pending_request)
     await r.record_async("phone_supervisor_preserves_unknown_and_cancellation", test_phone_supervisor_preserves_unknown_and_cancellation)
     await r.record_async("phone_setup_window_rejection_feedback_and_latest_observation", test_phone_setup_window_rejection_feedback_and_latest_observation)
