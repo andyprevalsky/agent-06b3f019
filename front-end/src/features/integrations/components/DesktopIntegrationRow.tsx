@@ -99,6 +99,8 @@ export interface DesktopIntegrationView {
   extra?: ReactNode;
   /** multiAccount add button text; default "+ Add account". */
   addLabel?: string;
+  /** Not-connected action text; default "Connect". */
+  connectLabel?: string;
 }
 
 /** Shared row look (the iPhone row reuses these so every integration row matches). */
@@ -113,7 +115,7 @@ const ERROR_LINE_CLASSES = 'text-xs text-destructive dark:text-red-300';
 
 export function DesktopSectionHeader({ children }: { children: ReactNode }) {
   return (
-    <h3 className="mb-1.5 mt-5 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground first:mt-1">
+    <h3 className="mb-1.5 mt-6 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
       {children}
     </h3>
   );
@@ -185,9 +187,13 @@ function RowAction({ view }: { view: DesktopIntegrationView }) {
       className={ACTION_CLASSES}
       onClick={view.onConnect}
       disabled={view.connecting}
-      aria-label={`Connect ${view.name}`}
+      aria-label={`${view.connectLabel ?? 'Connect'} ${view.name}`}
     >
-      {view.connecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Connect'}
+      {view.connecting ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        (view.connectLabel ?? 'Connect')
+      )}
     </button>
   );
 }

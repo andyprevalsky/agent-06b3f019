@@ -142,6 +142,20 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
           )
         );
       }
+      if (verificationTarget === 'imessage' || verificationTarget === 'receive_address')
+        assert.ok(settingsPurpose(verificationTarget).includes('Caller ID'));
+      if (verificationTarget === 'receive_address')
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'inside the You Can Receive iMessages to and Reply From list'
+          )
+        );
+      if (verificationTarget === 'imessage')
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'on that Send and Receive screen clearly naming a different identity is disabled'
+          )
+        );
       if (verificationTarget === 'imessage')
         assert.ok(
           settingsPurpose(verificationTarget).includes(

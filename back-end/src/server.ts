@@ -34,6 +34,7 @@ import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
 import { createCliIntegrationRoutes } from './domains/integrations/routes.cli';
 import { createMcpIntegrationRoutes } from './domains/integrations/routes.mcp';
+import { createIntegrationRequestRoutes } from './domains/integrations/routes.requests';
 import { createAgent as createCliSetupAgent } from './domains/agents/agentLifecycleService';
 import { createAgentSchema as cliSetupAgentSchema } from './domains/agents/types';
 import authRouter from './domains/auth/routes';
@@ -549,6 +550,7 @@ app.use(
   })
 );
 app.use('/api/integrations/mcp', createMcpIntegrationRoutes());
+app.use('/api/integrations/requests', createIntegrationRequestRoutes());
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/compute-accounts', computeGrantsRouter);
 app.use('/api/billing', billingRouter);

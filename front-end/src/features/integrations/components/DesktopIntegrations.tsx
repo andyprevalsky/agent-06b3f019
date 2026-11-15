@@ -6,7 +6,8 @@
  *     · Socials · File System · GitHub Repos · CLIs · MCP servers (signed in; the
  *     GitHub Repos card; CLIs and MCP servers are ordinary rows with account chips:
  *     DesktopToolSections)
- *     · Meeting note taker (Granola, Fireflies) · Other (Pebble Index 01, whose Connect opens its setup modal)
+ *     · Meeting note taker (Granola, Fireflies) · Wearables (Pebble Index 01, whose Connect opens its setup modal)
+ *     · Other (signed in: "An integration not listed here?" → texts the team; IntegrationRequestSection)
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -55,6 +56,7 @@ import DesktopIntegrationRow, {
 } from './DesktopIntegrationRow';
 import RemoveAccountDialog from './RemoveAccountDialog';
 import DesktopToolSections from './DesktopToolSections';
+import IntegrationRequestSection from './IntegrationRequestSection';
 
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
@@ -106,7 +108,8 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
 
   return (
     <SyncProgressContext.Provider value={{ integrations }}>
-      <div data-testid="rose-desktop-integrations">
+      {/* Every category header gets the same gap above it; only the first stays tight. */}
+      <div data-testid="rose-desktop-integrations" className="[&>section:first-of-type>h3]:mt-1">
         {removal.error !== null && (
           <p role="alert" className="mb-2 text-xs text-destructive">
             {removal.error}
@@ -153,6 +156,7 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
             </Section>
           </Fragment>
         ))}
+        {props.isFullySignedIn && <IntegrationRequestSection search={props.search} />}
       </div>
       <RemoveAccountDialog
         pending={removal.pending}
