@@ -1075,15 +1075,23 @@ async def run_agent(
 
             if success:
                 compressed_tokens = _estimate_tokens(compressed)
+                compressed_bytes = _context_payload_bytes(compressed)
                 # Signed on purpose: a compaction that GREW the context must not
                 # be indistinguishable from one that saved nothing. The old
                 # max(0.0, ...) clamp reported 0.0 for the -0.4% growth in prod
                 # agent e14d5abb. Negative values are still < the minimum, so
                 # the MIN_AUTOCOMPACT_SAVINGS_RATIO check below is unchanged in
                 # direction — it just now sees the real number.
-                saved_ratio = compaction_saved_ratio(context_tokens, compressed_tokens)
+                # Measure savings in the unit that fired: a byte-only trigger saves
+                # bytes held in metadata the token estimate ignores
+                # (codex_reasoning_items); token-triggered runs keep token savings.
+                byte_only_trigger = context_tokens < compaction_trigger
+                saved_ratio = (
+                    compaction_saved_ratio(context_bytes, compressed_bytes)
+                    if byte_only_trigger
+                    else compaction_saved_ratio(context_tokens, compressed_tokens)
+                )
 
-                compressed_bytes = _context_payload_bytes(compressed)
                 if compressed_tokens >= compaction_trigger or compressed_bytes >= CONTEXT_PAYLOAD_COMPACTION_BYTES:
                     message = (
                         "Context compression ineffective: compressed context estimate "
@@ -1095,6 +1103,8 @@ async def run_agent(
                         "Compaction did not get below overflow trigger",
                         context_tokens=context_tokens,
                         compressed_tokens=compressed_tokens,
+                        context_bytes=context_bytes,
+                        compressed_bytes=compressed_bytes,
                         trigger=compaction_trigger,
                         saved_ratio=saved_ratio,
                     )
@@ -1114,8 +1124,13 @@ async def run_agent(
                     ineffective_compactions += 1
                     message = (
                         "Context compression ineffective: compressed context saved only "
-                        f"{saved_ratio:.1%} of estimated tokens "
-                        f"(original {context_tokens}, compressed {compressed_tokens})."
+                        + (
+                            f"{saved_ratio:.1%} of serialized bytes "
+                            f"(original {context_bytes}, compressed {compressed_bytes})."
+                            if byte_only_trigger
+                            else f"{saved_ratio:.1%} of estimated tokens "
+                            f"(original {context_tokens}, compressed {compressed_tokens})."
+                        )
                     )
                     logger.warning(
                         "Compaction saved too little",
@@ -2873,7 +2888,7 @@ def _estimate_tokens(context: List[Dict]) -> int:
 
 
 def _context_payload_bytes(context: List[Dict]) -> int:
-    """Serialized size of ``context`` as continue_as_new carries it (same encoding as the workflow's check)."""
+    """Serialized size of ``context``, the largest continue_as_new argument (same json.dumps encoding the workflow's payload check uses)."""
     return len(json.dumps(context, default=str))
 
 

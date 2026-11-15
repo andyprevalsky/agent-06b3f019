@@ -3261,7 +3261,8 @@ async def test_run_agent_compacts_context_over_continuation_payload_budget():
     Its generation-handoff continue_as_new exceeded Temporal's 2 MiB payload
     limit (TMPRL1103), every workflow task retry failed, the old queue never
     retired and every agents/ cutover drain wedged. Compaction must keep the
-    serialized context under CONTEXT_PAYLOAD_COMPACTION_BYTES.
+    serialized context under CONTEXT_PAYLOAD_COMPACTION_BYTES, and that budget
+    must leave room for the rest of the continuation under the 2 MiB limit.
     """
     import loop.run_agent as run_mod
 
@@ -3288,10 +3289,22 @@ async def test_run_agent_compacts_context_over_continuation_payload_budget():
     async def fail_llm(**kwargs):
         raise AssertionError("LLM must not be called with a context over the payload budget")
 
-    initial_context = [{"role": "TOOL", "text": "r" * 3_000, "timestamp": "2024-01-01T00:00:00Z"}]
+    # Prod-shaped: ASSISTANT turns whose bytes sit in codex_reasoning_items
+    # metadata the token estimate does not weigh (8789a5df: 668 KB of them).
+    reasoning = [{"type": "reasoning", "encrypted_content": "e" * 20_000}]
+    initial_context = [{"role": "USER", "text": "goal", "timestamp": "2024-01-01T00:00:00Z"}]
+    initial_context.extend(
+        {
+            "role": "ASSISTANT",
+            "text": "step",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "metadata": {"codex_reasoning_items": reasoning},
+        }
+        for _ in range(70)
+    )
+    assert run_mod._context_payload_bytes(initial_context) > run_mod.CONTEXT_PAYLOAD_COMPACTION_BYTES
     compressor = AsyncMock(side_effect=fake_compress_context)
     with (
-        patch.object(run_mod, "CONTEXT_PAYLOAD_COMPACTION_BYTES", 2_000),
         patch.object(run_mod, "_compress_context", new=compressor),
         patch.object(run_mod, "call_llm_structured_streaming", new=AsyncMock(side_effect=fail_llm)),
     ):
@@ -3320,6 +3333,8 @@ async def test_run_agent_compacts_context_over_continuation_payload_budget():
 
     compressor.assert_awaited_once()
     assert overflowed == [compressed]
+    # Budget + one turn of capped tool results + resume state stays under 2 MiB.
+    assert run_mod.CONTEXT_PAYLOAD_COMPACTION_BYTES + 600_000 < 2 * 1024 * 1024
 
 
 async def test_run_agent_errors_when_compactor_breaker_open_over_trigger():
