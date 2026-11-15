@@ -1,4 +1,8 @@
-/** STATE MACHINE: signed-in or installed app -> hidden; public website guest -> links. */
+/**
+ * STATE MACHINE: signed-in or installed app -> hidden; public website guest -> links.
+ * "About" is not a page: it reveals the Rose description (tooltip on desktop,
+ * popover on mobile) next to the Privacy and Terms links.
+ */
 import { usePublicSiteLinks } from '@/hooks/usePublicSiteLinks';
 import { Link } from 'react-router-dom';
 
@@ -17,12 +21,12 @@ export function TerminalLegalFooter() {
       <span className="hidden md:inline">
         <Tooltip>
           <TooltipTrigger asChild>
-            <Link
-              to="/about"
+            <button
+              type="button"
               className="text-foreground/75 underline underline-offset-2 hover:text-foreground"
             >
               About
-            </Link>
+            </button>
           </TooltipTrigger>
           <TooltipContent
             side="top"
@@ -49,9 +53,6 @@ export function TerminalLegalFooter() {
             className="!animate-none z-[100] w-[min(20rem,calc(100vw-2rem))] bg-background p-3 text-left text-xs leading-relaxed text-foreground shadow-lg dark:bg-navi-black"
           >
             <p>{ROSE_APP_DESCRIPTION}</p>
-            <Link to="/about" className="mt-2 inline-block underline underline-offset-2">
-              Full About page
-            </Link>
           </PopoverContent>
         </Popover>
       </span>{' '}

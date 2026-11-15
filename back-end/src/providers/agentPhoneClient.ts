@@ -26,6 +26,13 @@ export function baseUrl() {
   return (process.env.AGENTPHONE_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '');
 }
 
+/** Isolated test stacks may reach the live API only with the dedicated test account. */
+export function isTestStackUsingNonTestAccount() {
+  if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND !== '1') return false;
+  if (baseUrl() !== DEFAULT_BASE_URL) return false;
+  return apiKey() !== (process.env.AGENTPHONE_TEST_API_KEY?.trim() || '');
+}
+
 export function isAgentPhoneConfigured() {
   return apiKey() !== '';
 }

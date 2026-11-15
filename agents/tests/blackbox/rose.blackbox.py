@@ -4058,7 +4058,7 @@ def test_build_codex_responses_body_contract():
         effort="max",
         request_id="max-effort",
     )
-    assert max_effort_body["reasoning"]["effort"] == "xhigh"
+    assert max_effort_body["reasoning"]["effort"] == "medium"
 
     # Exercise the actual root-system producer, including its final boundary.
     from utils.prompts import build_system_prompt, MAIN_SYSTEM_PROMPT
@@ -5055,7 +5055,7 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         max_tokens=128,
         effort="max",
     )
-    assert anthropic_max["output_config"]["effort"] == "xhigh"
+    assert anthropic_max["output_config"]["effort"] == "high"
 
     anthropic_med = build_anthropic_body(
         pool_spec=pool,
@@ -5092,7 +5092,7 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         effort="max",
         request_id="effort-max",
     )
-    assert codex_max["reasoning"]["effort"] == "xhigh"
+    assert codex_max["reasoning"]["effort"] == "medium"
 
     openrouter = build_openrouter_body(
         model="openai/gpt-5.6-sol",
@@ -5131,6 +5131,25 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         effort="minimal",
     )
     assert openrouter_minimal["reasoning"]["effort"] == "low"
+
+    # The planner is the only "max" caller and its rose.complete deadline is a
+    # fixed 220s. At xhigh, gpt-6.1-sol streamed only reasoning and Opus 5.5
+    # nothing at all until that deadline on the raise-5m planner request
+    # (agents c93b6bf2 / fab58637: set_plan RoseDeadlineError, CHILDFAIL), so
+    # the sentinel resolves to a deadline-fit tier on every ultra route.
+    for model in get_pool("rose-1-ultra").waterfall:
+        ultra_max = build_openrouter_body(
+            model=model,
+            messages=msgs,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            temperature=None,
+            max_tokens=None,
+            seed=None,
+            effort="max",
+        )
+        assert ultra_max["reasoning"]["effort"] == "medium", f"bad max effort on {model}"
 
     # Every model in the browser-use pool must produce a well-formed body when
     # the waterfall walks it — effort present on each step.

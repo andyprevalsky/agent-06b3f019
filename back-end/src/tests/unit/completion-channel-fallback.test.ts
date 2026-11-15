@@ -48,7 +48,6 @@ const stubs: Record<string, unknown> = {
   './writeLockBody': {},
   '../smsDeliveryContract': { SMS_MAX_BODY_CHARACTERS },
   './emoji': { isEmojiOnlyMessage },
-  '../messagingAgentInteraction': { recordMessagingAgentInteraction: async () => {} },
   // An accepted final answer is immutable: the concise compose step must never run.
   './notificationLlm': {
     composeLifecycleNotification: async () => {

@@ -198,6 +198,18 @@ Open, not fixed:
 - Codex's `/wham/usage` endpoint is unused
   (`codex-rs/backend-client/src/client.rs:385-396`).
 
+Shipped and verified 2026-11-15:
+
+- PR #2059 merged as `20a9430bd9`. Render is live through descendant `2af91a1`, and Vercel `version.json` shows buildId `20a9430bd988`.
+- The deploy's sleep ratchet caught that the repro synchronized with a fixed 300 ms sleep. `46da772ac0` replaced it: the cases that change the row wait for their reconcile, and the no-change cases await `refreshCodexUsage` and assert its outcome.
+- Prod read-back after the normal `GET /api/compute-accounts?provider=codex` (03:49:21Z):
+  - `de79f8a2`: 2026-11-15T19:47:04Z
+  - `86ae2dc2`: 2026-11-17T00:44:44Z
+  - Both are `usage_window_7d`, authoritative, with the 7d window at 100%. Both match the 11-14 probes.
+- `6a703dd4` serves again: usage observed from a served response at 03:48:59Z, and `gpt-6.1-sol-gpt` ×39 between 02:30 and 02:54Z. Claude subscription calls continue (`claude-opus-5-5-claude` ×140 between 02:50 and 03:45Z).
+
+Also open: `de25c911` has no `ComputeAccountConnection` row, so the account list never refreshes it. Only a cooldown report does. Its stored 11-18T02:52:32Z already equals its real reset.
+
 ## Human feedback
 
 The parent thread relayed Andy's rules: do not mint, rotate or revoke

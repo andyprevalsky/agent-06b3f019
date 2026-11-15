@@ -21,10 +21,17 @@ export type AgentPhoneProvisioningClaim =
       recoveryRequired: boolean;
       existingAgentId: string | null;
       existingNumberId: string | null;
+      /** Lower bound on when an agent create from this lease chain may have landed. */
+      uncertainSince: number;
     }
   | { kind: 'wait'; marker: string };
 
-type ParsedMarker = { kind: 'active' | 'recovery'; startedAt: number };
+type ParsedMarker = {
+  kind: 'active' | 'recovery';
+  startedAt: number;
+  uncertainSince: number | null;
+};
+const SINCE_FIELD = ':since:';
 
 function parseMarker(value: string | null): ParsedMarker | null {
   if (value === null) return null;
@@ -36,11 +43,16 @@ function parseMarker(value: string | null): ParsedMarker | null {
   if (kind === null) return null;
   const prefix = kind === 'active' ? ACTIVE_PREFIX : RECOVERY_PREFIX;
   const startedAt = Number(value.slice(prefix.length).split(':', 1)[0]);
-  return Number.isFinite(startedAt) ? { kind, startedAt } : null;
+  if (!Number.isFinite(startedAt)) return null;
+  const sinceIndex = value.lastIndexOf(SINCE_FIELD);
+  const since = sinceIndex < 0 ? Number.NaN : Number(value.slice(sinceIndex + SINCE_FIELD.length));
+  return { kind, startedAt, uncertainSince: Number.isFinite(since) ? since : null };
 }
 
-function newMarker(prefix = ACTIVE_PREFIX): string {
-  return `${prefix}${Date.now()}:${randomUUID()}`;
+// `<prefix><lease start>:<uuid>:since:<uncertainSince>`. Every marker in a lease
+// chain carries the chain's lower bound, so a crashed or failed recovery keeps it.
+function newMarker(prefix: string, startedAt: number, uncertainSince: number): string {
+  return `${prefix}${startedAt}:${randomUUID()}${SINCE_FIELD}${uncertainSince}`;
 }
 
 function persistedNumber(identity: {
@@ -85,7 +97,14 @@ export async function claimAgentPhoneProvisioning(
       return { kind: 'wait', marker: identity.phoneProvider as string };
     }
 
-    const marker = newMarker();
+    const startedAt = Date.now();
+    const recoveryRequired = parsed !== null || identity.phoneProviderAgentId !== null;
+    // A legacy or unknown chain is bounded by the identity row: no agent carrying
+    // this user's provisioning marker can predate the lease row it was created for.
+    const uncertainSince = !recoveryRequired
+      ? startedAt
+      : (parsed?.uncertainSince ?? identity.createdAt.getTime());
+    const marker = newMarker(ACTIVE_PREFIX, startedAt, uncertainSince);
     await transaction.agentIdentity.update({
       where: { userId },
       data: { phoneProvider: marker },
@@ -93,9 +112,10 @@ export async function claimAgentPhoneProvisioning(
     return {
       kind: 'owner',
       marker,
-      recoveryRequired: parsed !== null || identity.phoneProviderAgentId !== null,
+      recoveryRequired,
       existingAgentId: identity.phoneProviderAgentId,
       existingNumberId: identity.phoneProviderNumberId,
+      uncertainSince,
     };
   });
 }
@@ -172,13 +192,18 @@ export async function completeAgentPhoneProvisioning(
 export async function releaseAgentPhoneProvisioning(
   userId: string,
   marker: string,
-  recoveryRequired: boolean
+  recoveryRequired: boolean,
+  uncertainSince: number
 ): Promise<void> {
   await runTransactionWithRetry(async (transaction) => {
     await lockUser(transaction, userId);
     await transaction.agentIdentity.updateMany({
       where: { userId, phoneProvider: marker },
-      data: { phoneProvider: recoveryRequired ? newMarker(RECOVERY_PREFIX) : null },
+      data: {
+        phoneProvider: recoveryRequired
+          ? newMarker(RECOVERY_PREFIX, Date.now(), uncertainSince)
+          : null,
+      },
     });
   });
 }

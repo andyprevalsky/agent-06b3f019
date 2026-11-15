@@ -4,13 +4,17 @@ import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 import ConnectIntegration from '@/pages/ConnectIntegration';
 import Terminal from '@/features/terminal';
 import { AgentContext, type AgentContextValue } from '@/features/agent-context';
-import { FirefliesCallback, GranolaCallback, PlaidOAuthRedirect } from '@/features/integrations';
+import {
+  FirefliesCallback,
+  GranolaCallback,
+  McpCallback,
+  PlaidOAuthRedirect,
+} from '@/features/integrations';
 
 const Index = lazy(() => import('@/features/index'));
 const Privacy = lazy(() => import('@/features/privacy'));
 const Terms = lazy(() => import('@/features/terms'));
 const NotFound = lazy(() => import('@/features/not-found'));
-const About = lazy(() => import('@/features/about'));
 const ResearchBlog = lazy(() => import('@/features/research-blog'));
 const ResearchBlogPost = lazy(() => import('@/features/research-blog-post'));
 const Careers = lazy(() => import('@/features/careers'));
@@ -52,7 +56,6 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/', component: Terminal },
   { path: '/privacy', component: Privacy },
   { path: '/terms', component: Terms },
-  { path: '/about', component: About },
   { path: '/terminal', component: Index },
   { path: '/research', component: ResearchBlog },
   { path: '/research/:slug', component: ResearchBlogPost },
@@ -67,6 +70,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/connect/:provider', component: ConnectIntegration },
   { path: '/integrations/granola/callback', component: GranolaCallback },
   { path: '/integrations/fireflies/callback', component: FirefliesCallback },
+  { path: '/integrations/mcp/callback', component: McpCallback },
   ...DEV_ROUTES,
   { path: '*', component: NotFound, isCatchAll: true },
 ];

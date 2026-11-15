@@ -27,6 +27,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 ## Communication
 
 - Be concise with the user; they will ask for more.
+- When the user mentions SMS, they mean the entire phone messaging surface: WhatsApp, Linq, and the SMS fallbacks.
 - Fold messages from other agents into the current conversation; surface only material progress, blockers or requested results.
 - Approval and review requests show the key user- and model-visible strings that change, well formatted, plus a plain list of schema or API fields; never code diffs or file pointers.
 - Golden-reference review precedes every approval request: a fresh adversarial sub-agent checks grounding per `.claude/shared/approval-format.md`. It reviews only the hunks inside the mandatory user-approval scope (deploy-guard-flagged prompt, agent-behavior and trajectory hunks, Zod schemas, /RCA harness-fix packets); GROUNDED clears those manual gates, and approvals are snapshot-scoped (rules 26, 26a).
@@ -44,6 +45,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Never delete lockfiles or change dependency ranges to make an install work, and never reinstall dependencies into a `node_modules` or venv linked from another checkout.
 - Never give a foreground Bash command a timeout above 5 minutes; run anything longer in the background and watch it (rule 12).
 - Never treat a user pause as a bug's cause; users pause after noticing a problem (rule 11).
+- Never fix flaky tests through serialization, and deploys must never serialize on each other; if you find such serialization, make sure an agent is working to undo it.
 - Never `git stash`: the stash ref is shared across all worktrees, so popping can pull another workspace's in-flight work; use `git diff HEAD > .git-wip.patch && git checkout -- .`, then `git apply .git-wip.patch && rm .git-wip.patch` (rule 21).
 - Never `pkill` by a pattern that could match a process you did not launch in this session (benchmark controllers and test runners may belong to other workspaces); to stop your own run, TERM exactly its controller PID and let its cleanup run, and surface a stuck run you don't own to the user (rule 27).
 

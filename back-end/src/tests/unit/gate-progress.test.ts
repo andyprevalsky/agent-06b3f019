@@ -15,6 +15,8 @@
  *    TEST_FLAKY line, exit 0), fail-twice is FAIL (exit 1), and no domain ever runs a third time.
  *    Without a progress file (local dev) nothing is rerun. A quarantined failing case leaves its
  *    domain green and writes its own `domain::case` QUARANTINED_FAIL row.
+ * 6. Every failed domain attempt ends with the runner's exit line (code, signal, duration, and
+ *    "with no output" when the process printed nothing, as a native SIGSEGV does).
  *
  * No database: the fake domains never connect and DATABASE_URL is not passed to the runner.
  * Run: npx tsx src/tests/unit/gate-progress.test.ts (via scripts/run-unit-tests.ts)
@@ -405,6 +407,11 @@ ${body}
       "if (run === 1) { process.stderr.write('Error: first attempt lost the race\\n'); process.exitCode = 1; }"
     )
   );
+  // A native crash prints nothing: the first attempt dies by signal, the rerun passes.
+  writeFileSync(
+    join(blackbox, 'silent.blackbox.ts'),
+    counted("if (run === 1) process.kill(process.pid, 'SIGKILL');")
+  );
   writeFileSync(
     join(blackbox, 'broken.blackbox.ts'),
     counted('process.stderr.write(`AssertionError: broken run ${run}\\n`);\nprocess.exitCode = 1;')
@@ -548,6 +555,23 @@ void (async () => {
   assert.equal(off.code, 1, off.output);
   assert.equal(runs('wobbly'), 1);
   assert.equal(run('wobbly', { BLACKBOX_TEST_RERUN_FAILED: 'yes' }).code, 1);
+
+  // Every failed attempt names its exit: code and signal, plus "with no output" when silent.
+  reset();
+  const silentProgress = join(tree, 'silent.jsonl');
+  const crashed = run('silent', { DEPLOY_GATE_PROGRESS: silentProgress });
+  assert.equal(crashed.code, 0, crashed.output);
+  assert.equal(runs('silent'), 2);
+  const [silentRow] = lines(silentProgress).filter((row) => row.unit === 'silent');
+  assert.equal(silentRow.status, 'FLAKY');
+  assert.match(
+    String(silentRow.detail),
+    /^\n\[runner\] domain process exited code=null signal=SIGKILL after \d+ms with no output$/
+  );
+  assert.match(
+    String(wobbly.detail),
+    /first attempt lost the race\n+\[runner\] domain process exited code=1 signal=none after \d+ms$/
+  );
 }
 
 async function main(): Promise<void> {
