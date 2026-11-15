@@ -63,8 +63,11 @@ reach fixture metadata boundary`; on the fix it passes.
 `retired()` also treats a task whose stat flags carry `PF_EXITING` (0x4) as
 retired. The flag is set at `do_exit()` entry and never cleared, an exiting
 task never runs user code again, and the caller's held flock proves the task
-released the lock. The birth comparison is unchanged, and so is the macOS `ps`
-path. The regression's negative control rewrites the lease to a live process
+released the lock. The final birth comparison, repeated after the state read, now treats a
+changed or missing birth as retired (the winner was reaped in between). Only
+the same process is judged by its state (CodeRabbit finding on PR #2258;
+regression `test_winner_reaped_after_the_state_read_is_retired`, which fails on
+the first fix). The macOS `ps` path is unchanged. The regression's negative control rewrites the lease to a live process
 with no terminal receipt and asserts the successor is still refused with
 `live reconciliation winner lost lock`, without rescanning. 10k agents: one
 extra integer parse per takeover.

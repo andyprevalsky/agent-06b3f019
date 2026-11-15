@@ -31,9 +31,11 @@ def retired(T,pid,expected):
         state=subprocess.check_output(['ps','-p',str(pid),'-o','stat='],text=True).strip()
     # A zombie cannot execute or hold inherited descriptors; an exiting task can
     # never execute again, and the caller's held flock proves it released the
-    # lock. Keep unknown or live states conservative; repeat the exact birth
-    # comparison after read.
-    return (state.startswith('Z') or exiting) and T.birth(pid)==expected
+    # lock. Repeat the exact birth comparison after the read: a changed or
+    # missing birth means the winner was reaped meanwhile (retired); only the
+    # same process is judged by its state, and a live one stays conservative.
+    if T.birth(pid)!=expected:return True
+    return state.startswith('Z') or exiting
 
 def main():
     p=argparse.ArgumentParser()

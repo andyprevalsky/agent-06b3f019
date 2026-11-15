@@ -409,6 +409,20 @@ class CohortReconciliation(unittest.TestCase):
         self.assertEqual(len(f.metadata()),13,'refused successor rescanned historical registries')
         f.assert_records_preserved()
 
+    def test_winner_reaped_after_the_state_read_is_retired(self):
+        # The final birth check runs after the stat read; a winner reaped in
+        # between has no birth (or a reused PID's other birth) and is gone.
+        loader=importlib.machinery.SourceFileLoader('cohort_reconcile_helper',str(MODULE))
+        helper=importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name,loader));loader.exec_module(helper)
+        expected=tickets.birth(os.getpid())
+        def births(*values):
+            seen=iter(values)
+            return type('T',(),{'birth':staticmethod(lambda pid:next(seen))})
+        self.assertTrue(helper.retired(births(expected,''),os.getpid(),expected))
+        self.assertTrue(helper.retired(births(expected,'reused'),os.getpid(),expected))
+        # Negative control: the same live (running, not exiting) process is not retired.
+        self.assertFalse(helper.retired(births(expected,expected),os.getpid(),expected))
+
     def test_completed_failure_is_not_cached_as_success_or_rescanned(self):
         f=ReconciliationFixture(self,kind='failure')
         first=f.spawn(0);code,out,err=f.join(first);self.assertNotEqual(code,0,out+err)
