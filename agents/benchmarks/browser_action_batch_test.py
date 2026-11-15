@@ -377,8 +377,7 @@ def phone_view(cursor,lease='lease-1',**extra):
 
 
 class FakePhone:
-    """Server-shaped lease journal: mutations advance the cursor, reads do not, CAS on expectedCursor."""
-    READS={'screen.text','screen.bounds','apps.list'}
+    """Server-shaped lease journal: every agent call advances the cursor (repo.commandJournal), CAS on expectedCursor."""
     def __init__(self,fail=()):
         self.cursor=4;self.journal=[];self.fail=set(fail)
     def observe(self):
@@ -387,8 +386,7 @@ class FakePhone:
         if expected!=self.cursor:
             return {'success':False,'_httpStatus':409}
         status='FAILED' if operation in self.fail else 'SUCCEEDED'
-        if status=='SUCCEEDED' and operation not in self.READS:
-            self.cursor+=1
+        self.cursor+=1
         self.journal.append((operation,expected,self.cursor,operation_id,status))
         return {'success':status=='SUCCEEDED','operation':{'id':operation_id,'cursor':self.cursor,'operation':operation,'status':status}}
 
@@ -532,8 +530,8 @@ def test_portrait_route_journal_is_identical_when_batched():
     batch_turns,batched,batch_ids=asyncio.run(portrait_route_journal(True))
     assert (single_turns,batch_turns)==(4,2)
     # Same operations, same expected/resulting cursors, same order; one receipt per native call.
-    assert batched==single==[('apps.launch',4,5,'SUCCEEDED'),('screen.text',5,5,'SUCCEEDED'),
-                             ('input.tap',5,6,'SUCCEEDED'),('screen.text',6,6,'SUCCEEDED')]
+    assert batched==single==[('apps.launch',4,5,'SUCCEEDED'),('screen.text',5,6,'SUCCEEDED'),
+                             ('input.tap',6,7,'SUCCEEDED'),('screen.text',7,8,'SUCCEEDED')]
     assert len(set(batch_ids))==4 and len(set(single_ids))==4
 
 

@@ -496,8 +496,8 @@ class AttemptCompletionBrowserTool(BaseModel):
 
 
 # Phone wire operations that may share one model response with other calls.
-# Reads leave the lease cursor unchanged; navigation changes the screen, so
-# only reads may follow it. Setup, release, credential, message and unlisted
+# Every agent call advances the lease cursor; batch fences use the receipt
+# cursor. Navigation changes the screen, so only reads may follow it. Setup, release, credential, message and unlisted
 # operations always require their own model turn.
 PHONE_READ_OPERATIONS = frozenset({"screen.text", "screen.bounds", "apps.list"})
 PHONE_NAVIGATION_OPERATIONS = frozenset({
