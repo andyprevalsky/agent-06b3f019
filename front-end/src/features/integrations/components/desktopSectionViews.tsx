@@ -451,7 +451,7 @@ function pebbleIndexRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
 }
 
 /** Sections in the stock order; Compute and Banks need a fully signed-in account.
- * Meeting note taker groups providers; "Other" is last with Pebble Index 01. */
+ * Meeting note taker groups providers; "Wearables" is last with Pebble Index 01. */
 export function desktopSectionViews(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
