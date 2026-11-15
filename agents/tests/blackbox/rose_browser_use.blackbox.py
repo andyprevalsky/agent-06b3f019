@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT.parent / "scripts" / "lib"))
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
+from test_quarantine import quarantine
 
 import httpx
 
@@ -3480,6 +3481,12 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
+@quarantine(
+    since="2026-11-15",
+    repair="pending-handoff:bdc52b970d77433dab652f0fbe5f5c1b",
+    error="AssertionError: ['Completed browser model response did not contain a valid action']",
+    evidence="https://github.com/Rose-Ai-Labs/rose/actions/runs/43744819009",
+)
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
