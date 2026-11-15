@@ -20,6 +20,8 @@
  *   [CONNECTED, layout=rows] (compute subscriptions): one line per account instead
  *     of chips — label, the account's trailing usage meter, and a ⋯ menu holding
  *     its reconnect / remove actions (DesktopAccountRows)
+ *   [CONNECTED, an account has `share`] (Gmail / iMessage with a team to share with):
+ *     one account per line — its chip, then its team-sharing caption (AccountTeamShare)
  *
  * There is no Manage state and no details panel: everything is on the row.
  * Pure presentation; DesktopIntegrations owns data and actions.
@@ -58,6 +60,8 @@ export interface DesktopAccountView {
   errorText?: string;
   /** Row layout only: right-aligned content beside the label (compute usage meter). */
   trailing?: ReactNode;
+  /** Chip layout: the account's team-sharing caption, shown right after its chip. */
+  share?: ReactNode;
 }
 
 /** Sync of a multi-account row whose backend reports one account for the whole row. */
@@ -211,16 +215,27 @@ function SyncBars({ view }: { view: DesktopIntegrationView }) {
 
 function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
   const many = view.accounts.length > 1;
+  const shared = view.accounts.some((account) => account.share !== undefined);
   const rowError = view.rowSync?.errorText;
   return (
     <div className="ml-[46px] mt-2 flex flex-col gap-2">
       {view.layout === 'rows' ? (
         <DesktopAccountRows accounts={view.accounts} testId={`accounts-${view.key}`} />
       ) : (
-        <div className="flex flex-wrap gap-1.5" data-testid={`accounts-${view.key}`}>
-          {view.accounts.map((account) => (
-            <DesktopAccountChip key={accountKey(account)} account={account} />
-          ))}
+        <div
+          className={shared ? 'flex flex-col gap-1.5' : 'flex flex-wrap gap-1.5'}
+          data-testid={`accounts-${view.key}`}
+        >
+          {view.accounts.map((account) =>
+            shared ? (
+              <div key={accountKey(account)} className="flex min-w-0 items-center gap-2.5">
+                <DesktopAccountChip account={account} />
+                {account.share}
+              </div>
+            ) : (
+              <DesktopAccountChip key={accountKey(account)} account={account} />
+            ),
+          )}
         </div>
       )}
       {view.accounts
