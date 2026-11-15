@@ -33,6 +33,7 @@ import {
 } from './types';
 import { REQUEST_WAIT_MAX_SECONDS } from './config';
 import { mountCliToolRoutes } from './routes.cli';
+import { mountMcpToolRoutes } from './routes.mcp';
 
 const log = createLogger('AgentToolsRoutes');
 const router = Router();
@@ -128,6 +129,7 @@ function invalidBody(res: Response, issues: { path: (string | number)[]; message
 }
 
 mountCliToolRoutes(router, agentToolsAuth, callerFor, sendError);
+mountMcpToolRoutes(router, agentToolsAuth, callerFor, sendError);
 
 router.post(
   '/:agentId/display',

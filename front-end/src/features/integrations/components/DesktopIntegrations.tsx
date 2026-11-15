@@ -3,9 +3,9 @@
  *
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
- *     · Socials · File System · GitHub Repos (signed in; GithubReposSection: connect
- *     with an optional folder, disconnect) · Meeting note taker (Granola, Fireflies)
- *     · Other (Pebble Index 01, whose Connect opens its setup modal) · CLIs
+ *     · Socials · File System · GitHub Repos · CLIs · MCP servers (signed in; the
+ *     same cards as the stock page: GithubReposSection, ToolIntegrationSections)
+ *     · Meeting note taker (Granola, Fireflies) · Other (Pebble Index 01, whose Connect opens its setup modal)
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -46,7 +46,7 @@ import DesktopIntegrationRow, {
   type DesktopIntegrationView,
 } from './DesktopIntegrationRow';
 import RemoveAccountDialog from './RemoveAccountDialog';
-import CliIntegrationsSection from './CliIntegrationsSection';
+import ToolIntegrationSections from './ToolIntegrationSections';
 
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
@@ -105,11 +105,14 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
         {sections.map(({ catalogKey, title, description, rows }) => (
           <Fragment key={title}>
             {catalogKey === 'meetingNotes' && props.isFullySignedIn && (
-              <SearchGroup catalogKey="githubRepos" search={props.search}>
-                <div className="my-3">
-                  <GithubReposSection github={props.github} />
-                </div>
-              </SearchGroup>
+              <>
+                <SearchGroup catalogKey="githubRepos" search={props.search}>
+                  <div className="my-3">
+                    <GithubReposSection github={props.github} />
+                  </div>
+                </SearchGroup>
+                <ToolIntegrationSections search={props.search} desktop />
+              </>
             )}
             <Section
               title={title}
@@ -140,7 +143,6 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
             </Section>
           </Fragment>
         ))}
-        {props.isFullySignedIn && <CliIntegrationsSection desktop />}
       </div>
       <RemoveAccountDialog
         pending={removal.pending}
