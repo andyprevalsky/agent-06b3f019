@@ -4,7 +4,7 @@
 // keeps resolving the shared alias until a deploy switches the code default to the
 // new name, so the template and the code that needs it change together.
 //
-//   node e2b-templates/build-template-version.mjs --source codex-code --name codex-code-v0159
+//   node e2b-templates/build-template-version.mjs --source codex-code --name codex-code-v0169
 //        [--cpu 2] [--memory-mb 1024] [--execute]
 //
 // Without --execute it prints the plan. Builds with E2B_API_KEY (no CLI login), refuses

@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -876,6 +877,35 @@ ps() {
 
     def test_failed_summary_log_cannot_abandon_owned_cleanup(self):
         self.run_case(log_fault="summary")
+
+    def test_repeated_waiter_cancellation_keeps_exact_cleanup(self):
+        # The supervisor re-forwards cancellation to the published waiter every
+        # 0.1s. Bash 5.2 can run that trap inside a $(...) or <(...) parse in the
+        # waiter, failing the substitution and abandoning recovery. Deliver the
+        # same TERM densely for the waiter's whole life so any such parse is hit.
+        stop = threading.Event()
+        delivered = []
+
+        def forward_repeatedly():
+            # Pace delivery; the event ends the storm as soon as the case returns.
+            while not stop.wait(0.0005):
+                for path in (self.root / "proofs").glob("*/active-waiter.owner"):
+                    try:
+                        fields = dict(line.split("=", 1) for line in path.read_text().splitlines())
+                        os.kill(int(fields["pid"]), signal.SIGTERM)
+                        delivered.append(1)
+                    except (OSError, KeyError, ValueError):
+                        pass
+
+        storm = threading.Thread(target=forward_repeatedly, daemon=True)
+        storm.start()
+        try:
+            self.run_case(cancel=True)
+        finally:
+            stop.set()
+            storm.join(timeout=10)
+        self.assertGreater(len(delivered), 100, "waiter was never exposed to repeated cancellation")
+        self.assertNotIn("unexpected EOF", (self.root / "output.log").read_text())
 
     def test_cancellation_does_not_depend_on_body_pid_probe(self):
         self.run_case(cancel=True, unknown_body_probe=True)

@@ -27,3 +27,9 @@
  * Provisioned once by `back-end/scripts/setup-benchmark-payment.ts --live`.
  */
 export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '00000000-0000-4000-8000-000000000107';
+
+/**
+ * Owner account the live production lifecycle probe runs as (2026-11-14). Its benchmark agents bill
+ * a dedicated live Stripe customer (providers/ownerLifecycleBilling.ts), never its Subscription.
+ */
+export const BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';

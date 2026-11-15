@@ -12,6 +12,7 @@
  *            attempt blocked, nothing checkpointed back, sandbox killed exactly once
  *            (success, CLI failure, restore failure), foreign sessions 404, C15 fall-over
  *   running backend ──HTTP──► route wiring: 400 / 404 / 409 before any sandbox exists
+ *   trace archive of every attempt: code-session-inspect-archive.cases.ts
  *
  * Hermetic: local checkpoint storage, fake keys, no E2B, GitHub or provider calls.
  */
@@ -47,6 +48,11 @@ import {
   setCodeInspectSandboxFactoryForTests,
 } from '../../providers/codeSessions/inspect';
 import { fakeInspectCli } from './code-session-inspect.fake-cli';
+import { git, seedInspectWorkspace } from './code-session-inspect.workspace';
+import {
+  archivedInspection,
+  registerInspectArchiveCases,
+} from './code-session-inspect-archive.cases';
 import { beginIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 import {
   assertInspectionSubscriptionIsolation,
@@ -102,32 +108,7 @@ let finishSubscriptionIsolation: (() => void) | null = null;
 
 const FAKE_CLI = fakeInspectCli({ cliLog, modeFile, realGit });
 
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
-}
-
-/** A bare origin with main pushed; `<home>/workspace` on a local branch with a local commit and edits. */
-function seedWorkspace(home: string): { origin: string } {
-  const origin = join(fixtureDir, `origin-${randomUUID()}.git`);
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
-  const workspace = join(home, 'workspace');
-  mkdirSync(home, { recursive: true });
-  execFileSync('git', ['clone', '-q', origin, workspace], { stdio: 'ignore' });
-  git(workspace, 'config', 'user.name', 'Test');
-  git(workspace, 'config', 'user.email', 'test@example.com');
-  git(workspace, 'checkout', '-q', '-b', 'main');
-  writeFileSync(join(workspace, 'README.md'), 'line one\n');
-  git(workspace, 'add', '-A');
-  git(workspace, 'commit', '-q', '-m', 'initial');
-  git(workspace, 'push', '-q', 'origin', 'main');
-  git(workspace, 'checkout', '-q', '-b', 'rose/feature-1');
-  writeFileSync(join(workspace, 'feature.txt'), 'committed locally\n');
-  git(workspace, 'add', 'feature.txt');
-  git(workspace, 'commit', '-q', '-m', 'local commit');
-  writeFileSync(join(workspace, 'README.md'), 'line one\nuncommitted edit\n');
-  writeFileSync(join(home, 'CLAUDE.md'), '# template scaffolding: commit and message the user\n');
-  return { origin };
-}
+const seedWorkspace = (home: string): { origin: string } => seedInspectWorkspace(fixtureDir, home);
 
 /** A live, leased code session of userA with one checkpoint of `home`. */
 async function liveSession(home: string) {
@@ -166,10 +147,15 @@ interface FakeSandbox {
 }
 
 const sandboxes: FakeSandbox[] = [];
+/** A provider whose sandbox fails to start (E2B down for that template). */
+let failingSandboxProvider: string | null = null;
 
 /** Each inspection gets a fresh HOME; `kill` records and deletes it (E2B kill). */
 function installFakeFactory(): void {
   setCodeInspectSandboxFactoryForTests(async (provider) => {
+    if (provider === failingSandboxProvider) {
+      throw new Error(`fake E2B: the ${provider} inspection sandbox failed to start`);
+    }
     const home = mkdtempSync(join(fixtureDir, 'inspect-home-'));
     const base = localSandboxFs(home);
     const fs: CodeSessionFs = {
@@ -594,6 +580,9 @@ test('C15: a Claude usage limit backs that credential off and the inspection ans
     assert.equal(result.status, 'answered', JSON.stringify(result));
     assert.equal(result.provider, 'codex');
     assert.match(result.answer ?? '', /committed locally/);
+    const { manifest } = await archivedInspection(agentA, live.id);
+    const archived = manifest.attempts.map((attempt) => attempt.provider);
+    assert.deepEqual(archived, ['claude', 'codex'], 'both attempts are archived');
     assert.equal(
       await isAnthropicApiKeyOnCooldown(),
       true,
@@ -658,4 +647,16 @@ test('C15 keeps its Codex fallback while a sibling holds the funded cooldown', (
   assert.equal(child.signal, null, 'the original C15 child completed');
   assert.equal(child.status, 0, 'the unchanged C15 assertions pass with a competing cooldown');
   assert.match(child.stdout, /ok \d+ - C15: a Claude usage limit/);
+});
+
+registerInspectArchiveCases({
+  fixtureDir,
+  userA,
+  agentA,
+  setMode,
+  seedWorkspace,
+  liveSession,
+  failSandboxFor: (provider) => {
+    failingSandboxProvider = provider;
+  },
 });

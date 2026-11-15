@@ -6015,6 +6015,12 @@
   },
   {
     "name": "browser-auth-guest-purchase",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:896710fd9bdc4326914365053da347e2",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 2} | Agent status: ACTIVE (expected COMPLETED) | Browser agent aeb2dafa-36c8-5945-ab58-a24fa46f2518 recorded 0 trajectory step(s); expected at least 5 per browser agent",
+      "evidence": "PR #1992 smoke gate on e7af654e05 FLAKY 896710fd9bdc4326914365053da347e2 (first attempt FAILED run 20261113-015501-1857759, same-ref rerun PASSED); passed natively on 1b85b08dd with this PR's bytes unchanged"
+    },
     "title": "Hosted Purchase: Buy Without An Account",
     "description": "No saved credentials and the shop lets shoppers buy without an account; the browser agent buys as a guest instead of creating an account.",
     "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
@@ -8589,12 +8595,6 @@
   },
   {
     "name": "agent-payment-setup-resume",
-    "quarantine": {
-      "since": "2026-11-13",
-      "repair": "https://boxes.dev/thread/ph701cd5nwt9pn2tjrzcjv5pch8j46n5",
-      "error": "Timeout after 901s (task timeout=900s)",
-      "evidence": "PR #1972 deploy f93b9ad17f smoke: first attempt timed out with the agent still ACTIVE, same-source rerun PASSED (FLAKY 9a4a72a7); NOT_INTRODUCED, #1972 changes only back-end/src/providers/phonePortrait{Proof,Route}.ts and portrait tests"
-    },
     "title": "Agent Payment Setup And Auto Resume",
     "group": "pre-deploy",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
@@ -8727,7 +8727,7 @@
     "name": "agent-payment-idempotent-abandonment",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:a9d11683c4174469ac2c7d5eca89d2d5",
+      "repair": "https://boxes.dev/thread/thr_717118a13d76431a95869b1abba1577b",
       "error": "Timeout after 905s (task timeout=900s)",
       "evidence": "PR #2014 deploy b6ed04d2d smoke: first attempt (root 464ba8f6) timed out after its browser never started on Tilion dead east worker sess_993d7086* (DELETE /v1/session 503; 'Browser session init failed after 5 transient-proxy retries'), same-source rerun PASSED (FLAKY a9d11683); NOT_INTRODUCED, #2014 changes only deploy custody/renewal scripts; fix PR #2010 on main"
     },
@@ -9152,12 +9152,6 @@
   },
   {
     "name": "browser-biometrics-webdecoy",
-    "quarantine": {
-      "since": "2026-11-13",
-      "repair": "pending-handoff:2e42c9c8d6d442fc92fa0b6735969b7e",
-      "error": "Timeout after 425s (task timeout=420s)",
-      "evidence": "PR #2014 deploy 16f0be6d3 smoke: first attempt (root 332cd6e6) timed out after browser 7c73d66a recorded 0 steps on Tilion dead east worker sess_993d70* (create 201, validation/DELETE 503; 'Browser initialization failed before readiness'), same-source rerun PASSED (FLAKY 2e42c9c8); NOT_INTRODUCED, #2014 changes only deploy custody/renewal scripts; fix PR #2010 on main"
-    },
     "title": "Browser Biometrics WebDecoy",
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
     "timeout_seconds": 420,

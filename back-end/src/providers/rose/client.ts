@@ -50,6 +50,7 @@ import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './type
 import { withNativeToolContract } from './transforms';
 import { waterfallComplete } from './waterfall';
 import { startLlmCapture, finishLlmCapture, type LlmCapture } from '../llmDump';
+import { archiveAttempts } from './archiveAttempts';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import { exclusiveCerebrasCompletion, POOL_CEREBRAS_IDLE_TIMEOUT_MS } from './cerebrasRoute';
@@ -57,7 +58,12 @@ import {
   runCerebrasChatWithWaterfallFallback,
   selectExclusiveCerebrasChatRoute,
 } from './exclusiveCerebrasChatRoute';
-import { createStreamAccumulator, dumpDisplayModel, emitRoseChunk } from './completionChunks';
+import {
+  archiveOutputFromAccumulator,
+  createStreamAccumulator,
+  dumpDisplayModel,
+  emitRoseChunk,
+} from './completionChunks';
 import {
   chatFoundryLastResort,
   foundryComplete,
@@ -158,9 +164,14 @@ interface WrapOptions {
 async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const poolSpec = getPool(opts.pool);
   const startedAt = Date.now();
-  const acc = createStreamAccumulator();
+  const acc = createStreamAccumulator(startedAt);
   let dumpCapture: LlmCapture | null = null;
 
+  if (opts.options.dump_context) {
+    dumpCapture = startCapture(opts);
+    // Losing hedge legs report here so the archive keeps their tokens.
+    opts.options = { ...opts.options, archive_attempts: dumpCapture.attempts };
+  }
   // OpenAI-dialect legs receive a tool-envelope response_model as native tools.
   // Anthropic legs extract the same tools from response_format themselves.
   const toolOptions = withNativeToolContract(opts.options);
@@ -169,46 +180,6 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     tools: toolOptions.tools,
     toolChoice: toolOptions.tool_choice,
   };
-
-  if (opts.options.dump_context) {
-    dumpCapture = startLlmCapture({
-      call_site: opts.options.dump_context.call_site,
-      agent_id: opts.options.dump_context.agent_id,
-      root_agent_id: opts.options.dump_context.root_agent_id,
-      model: opts.options.model,
-      message_count: opts.options.messages.length,
-      messages: opts.options.messages,
-      response_format: toolOptions.response_format,
-      tools: toolOptions.tools,
-      config: {
-        pool: opts.pool,
-        call_site: opts.callSite,
-        model: opts.options.model,
-        temperature: opts.options.temperature,
-        max_tokens: opts.options.max_tokens,
-        reasoning_effort: opts.options.effort,
-        response_format: toolOptions.response_format,
-        tools: toolOptions.tools,
-        tool_choice: toolOptions.tool_choice,
-        direct_auth: {
-          claude_token: Boolean(opts.options.claude_token),
-          gpt_token: Boolean(opts.options.gpt_token),
-          gpt_account_id: Boolean(opts.options.gpt_account_id),
-        },
-        requested_params: {
-          temperature: opts.options.temperature,
-          max_tokens: opts.options.max_tokens,
-          reasoning_effort: opts.options.effort,
-          response_format: opts.options.response_format,
-          tool_choice: opts.options.tool_choice,
-          speed: opts.options.speed,
-          provider_route: opts.options.provider_route,
-        },
-        ...(opts.options.dump_context.config ?? {}),
-      },
-      extra: opts.options.dump_context.extra,
-    });
-  }
 
   const emitChunk = (chunk: RoseStreamChunk): CompletionChunk | null =>
     emitRoseChunk({
@@ -223,27 +194,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     if (!dumpCapture || dumpFinalized) return;
     dumpFinalized = true;
     const actualModelRaw = acc.metadata.actual_model || '';
-    const actualModel = actualModelRaw ? dumpDisplayModel(actualModelRaw) : null;
     finishLlmCapture(dumpCapture, {
-      model: actualModel ?? opts.options.model,
-      config: {
-        actual_model: actualModel,
-        actual_model_raw: actualModelRaw || null,
-        pool_name: acc.metadata.pool_name || null,
-        finish_reason: acc.finishReason,
-      },
-      extra: {
-        consumer_closed: consumerClosed,
-        output: acc.outputParts.join(''),
-        reasoning: acc.reasoningParts.join(''),
-        tool_calls: acc.toolCalls,
-        error:
-          error instanceof Error
-            ? { name: error.name, message: error.message, stack: error.stack }
-            : error
-              ? String(error)
-              : null,
-      },
+      model: actualModelRaw ? dumpDisplayModel(actualModelRaw) : opts.options.model,
+      output: archiveOutputFromAccumulator(acc, error),
+      attempts: archiveAttempts,
+      extra: { consumer_closed: consumerClosed },
     });
   };
 
@@ -671,4 +626,49 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     // response before the caller can seal/archive the terminated chat stream.
     finalizeDump(undefined, true);
   }
+}
+
+/** Crash-safe start record: the full request as the providers will receive it. */
+function startCapture(opts: WrapOptions): LlmCapture {
+  const dumpContext = opts.options.dump_context!;
+  const toolOptions = withNativeToolContract(opts.options);
+  return startLlmCapture({
+    call_site: dumpContext.call_site,
+    agent_id: dumpContext.agent_id,
+    root_agent_id: dumpContext.root_agent_id,
+    archive_scope: dumpContext.archive_scope,
+    model: opts.options.model,
+    message_count: opts.options.messages.length,
+    messages: opts.options.messages,
+    response_format: toolOptions.response_format,
+    tools: toolOptions.tools,
+    config: {
+      pool: opts.pool,
+      call_site: opts.callSite,
+      request_id: opts.requestId,
+      model: opts.options.model,
+      temperature: opts.options.temperature,
+      max_tokens: opts.options.max_tokens,
+      reasoning_effort: opts.options.effort,
+      response_format: toolOptions.response_format,
+      tools: toolOptions.tools,
+      tool_choice: toolOptions.tool_choice,
+      direct_auth: {
+        claude_token: Boolean(opts.options.claude_token),
+        gpt_token: Boolean(opts.options.gpt_token),
+        gpt_account_id: Boolean(opts.options.gpt_account_id),
+      },
+      requested_params: {
+        temperature: opts.options.temperature,
+        max_tokens: opts.options.max_tokens,
+        reasoning_effort: opts.options.effort,
+        response_format: opts.options.response_format,
+        tool_choice: opts.options.tool_choice,
+        speed: opts.options.speed,
+        provider_route: opts.options.provider_route,
+      },
+      ...(dumpContext.config ?? {}),
+    },
+    extra: dumpContext.extra,
+  });
 }

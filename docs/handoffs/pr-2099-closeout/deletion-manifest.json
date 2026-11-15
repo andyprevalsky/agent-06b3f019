@@ -1,0 +1,396 @@
+{
+  ".cloud-env": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  ".context/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  ".devbox/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  ".env.npm": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  ".llm-dumps/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "agents/.env": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "agents/.env.benchmark-temporal": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "agents/.env.cloudbench-upsert.lock": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "agents/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/activities/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/benchmarks/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/benchmarks/code_agent_checks/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/benchmarks/runs/20261114_203336_84a4b3f6-5368-4885-a098-55927b7dc702_grep-agent-trajectories-code-tool-status.json": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "agents/browser_tools/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/agent_messaging/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/api_request/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/attempt_completion/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/call_phone_number/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/display/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/gate/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/github_repo_inventory/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/grep/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/inspect_code/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/knowledge_base/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/message_person/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/param_populator/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/read_message_history/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/reasoning/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/report_bug/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/request_payment_card/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/request_user_approval/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/request_user_signup/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/send_message_to_user/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/set_plan/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/spawn_agent/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/spawn_browser_agent_v3/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/spawn_claude_code_agent/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/spawn_sub_agents/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/user_tools/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/wait_for/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/domains/web_fetch/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/helpers/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/loop/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/navi-worker-log.txt": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "agents/providers/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/providers/demo_cache/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/providers/fast_cache/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "agents/providers/planner_memory/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/providers/rose/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/tests/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/tests/blackbox/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/tests/e2e/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/tools/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/tools/people_search/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/tools/prompts/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/tools/web_search/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/utils/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "agents/venv/": {
+    "disposition": "reproducible",
+    "evidence": "docs/setup-mac.md:11-17; scripts/cloud-init.sh:279-312; tracked requirements and workspace lockfiles; root ignored lock snapshot pending",
+    "exact_installed_bytes": "not promised"
+  },
+  "agents/workflows/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "back-end/.env": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "back-end/.env.cloudbench-upsert.lock": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "back-end/backend-logs.log": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "back-end/node_modules/": {
+    "disposition": "reproducible",
+    "evidence": "docs/setup-mac.md:11-17; scripts/cloud-init.sh:279-312; tracked requirements and workspace lockfiles; root ignored lock snapshot pending",
+    "exact_installed_bytes": "not promised"
+  },
+  "branch:backup/cerebras-chat-quota-prepush-20261002": {
+    "archive": "devbox-closeout-private/pr2099/git-preservation-20261114T210002Z-9a6f137d7553.tar.gz.aesgcm",
+    "disposition": "archived",
+    "evidence": "Authenticated historical bundles/ref maps; actual independent native Git import and strict fsck; see archive-index.json and verification-sidecars.json.",
+    "sha256": "80ea09b4e9fa390746cb92090429985ad4084ec343f8a25423117ecbacdd908a",
+    "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+  },
+  "codex/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "docs/handoffs/whm-b07d9037-preservation/__pycache__/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Enumerated in final finite namespace index; exact carry/selection hashes verified, or explicit compiler/installed-output reconstruction and committed safe sidecar."
+  },
+  "docs/rca/INDEX.md": {
+    "disposition": "reproducible",
+    "evidence": "python3 scripts/rca_archive.py reindex; source cases retained"
+  },
+  "front-end/.env": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "front-end/frontend-logs.log": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "front-end/node_modules/": {
+    "disposition": "reproducible",
+    "evidence": "docs/setup-mac.md:11-17; scripts/cloud-init.sh:279-312; tracked requirements and workspace lockfiles; root ignored lock snapshot pending",
+    "exact_installed_bytes": "not promised"
+  },
+  "hermes-agent/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "hub-poller-logs.log": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "kimi-code/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "mac-app/.env": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "node_modules/": {
+    "disposition": "reproducible",
+    "evidence": "docs/setup-mac.md:11-17; scripts/cloud-init.sh:279-312; tracked requirements and workspace lockfiles; root ignored lock snapshot pending",
+    "exact_installed_bytes": "not promised"
+  },
+  "openclaw/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "package-lock.json": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "prime-agent/": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "research/.env": {
+    "archive_index": "docs/handoffs/pr-2099-closeout/archive-index.json",
+    "coverage_summary_sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1",
+    "disposition": "archived-with-documented-reproducible-and-committed-sidecars",
+    "evidence": "Current finite capture union validated by SHA256+size against six actual independently restored carriers. Rebuilt dependencies/decoded copies/proof physical data excluded with recipes. Later public-safe records/proofs are committed here; duplicate private manifests regenerate from encrypted payloads. See coverage-summary.json and README.md for cutoffs and qualifications."
+  },
+  "scripts/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "scripts/lib/__pycache__/": {
+    "disposition": "reproducible",
+    "evidence": "Python bytecode regenerated from retained source; scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "archive": "devbox-closeout-private/pr2099/git-preservation-20261114T210002Z-9a6f137d7553.tar.gz.aesgcm",
+    "disposition": "archived",
+    "evidence": "Authenticated historical bundles/ref maps; actual independent native Git import and strict fsck; see archive-index.json and verification-sidecars.json.",
+    "sha256": "80ea09b4e9fa390746cb92090429985ad4084ec343f8a25423117ecbacdd908a",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+  }
+}

@@ -71,6 +71,8 @@ function harness(options: { hedgeOnPrimaryFailure?: boolean } = {}): {
   fireHedge: () => void;
   winners: string[];
   branchFailures: Array<[string, unknown]>;
+  losers: Array<[string, readonly Chunk[]]>;
+  drained: () => Promise<void>;
   collect: () => Promise<{ items: Chunk[]; error: unknown }>;
 } {
   const primary = makeBranch();
@@ -78,6 +80,8 @@ function harness(options: { hedgeOnPrimaryFailure?: boolean } = {}): {
   let fire: () => void = () => undefined;
   const winners: string[] = [];
   const branchFailures: Array<[string, unknown]> = [];
+  const losers: Array<[string, readonly Chunk[]]> = [];
+  let drainedPromise: Promise<void> | null = null;
   const stream = hedgeStreams<Chunk>({
     primary: { name: 'cerebras', produce: primary.produce },
     hedge: { name: 'waterfall', produce: hedge.produce },
@@ -89,6 +93,10 @@ function harness(options: { hedgeOnPrimaryFailure?: boolean } = {}): {
     onWinner: (name) => winners.push(name),
     onBranchFailure: (name, error) => branchFailures.push([name, error]),
     hedgeOnPrimaryFailure: options.hedgeOnPrimaryFailure,
+    onLoser: (name, items) => losers.push([name, items]),
+    onDrained: (drained) => {
+      drainedPromise = drained;
+    },
   });
   const collect = async (): Promise<{ items: Chunk[]; error: unknown }> => {
     const items: Chunk[] = [];
@@ -99,7 +107,20 @@ function harness(options: { hedgeOnPrimaryFailure?: boolean } = {}): {
       return { items, error };
     }
   };
-  return { primary, hedge, fireHedge: () => fire(), winners, branchFailures, collect };
+  const drained = async (): Promise<void> => {
+    assert(drainedPromise, 'the race reports its drain once it settles');
+    await drainedPromise;
+  };
+  return {
+    primary,
+    hedge,
+    fireHedge: () => fire(),
+    winners,
+    branchFailures,
+    losers,
+    drained,
+    collect,
+  };
 }
 
 async function main(): Promise<void> {
@@ -296,6 +317,45 @@ async function main(): Promise<void> {
     h.primary.fail(new Error('lost chat hedge race'));
     await tick();
     assert.deepEqual(h.branchFailures, [], 'a race-aborted loser is not a branch failure');
+  }
+
+  // 8. Branches that finished BEFORE the latch still reach onLoser (archive),
+  //    exactly once: a reasoning-only primary that ended cleanly, and a
+  //    reasoning-then-failed primary, both before the hedge produced content.
+  //    The hedge arms only once the primary is done (no delay fired), so the
+  //    primary always finishes before any latch.
+  for (const ending of ['end', 'fail'] as const) {
+    const h = harness({ hedgeOnPrimaryFailure: true });
+    const result = h.collect();
+    h.primary.push({ kind: 'reasoning', text: `primary thought (${ending})` });
+    if (ending === 'end') h.primary.end();
+    else h.primary.fail(new Error('cerebras died after reasoning'));
+    h.hedge.push({ kind: 'content', text: 'hedge wins' });
+    h.hedge.end();
+    const { items, error } = await result;
+    assert.equal(error, null);
+    assert.deepEqual(items, [{ kind: 'content', text: 'hedge wins' }]);
+    assert.deepEqual(h.winners, ['waterfall']);
+    await h.drained();
+    assert.deepEqual(
+      h.losers,
+      [['cerebras', [{ kind: 'reasoning', text: `primary thought (${ending})` }]]],
+      `a pre-latch ${ending} branch's buffered output is reported once`
+    );
+  }
+
+  // 9. No winner (every branch fails): nothing is reported as a lost race.
+  {
+    const h = harness();
+    const result = h.collect();
+    h.fireHedge();
+    h.primary.push({ kind: 'reasoning', text: 'primary thought' });
+    h.primary.fail(new Error('primary down'));
+    h.hedge.fail(new Error('hedge down'));
+    const { error } = await result;
+    assert(error instanceof Error);
+    await h.drained();
+    assert.deepEqual(h.losers, [], 'an all-fail race has no winner and no lost-race reports');
   }
 }
 

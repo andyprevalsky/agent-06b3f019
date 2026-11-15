@@ -8,7 +8,10 @@ import {
 // providers/benchmarkPaymentIdentity owns the production identity. Importing it
 // from purchases/config resolved to `undefined`, so `--live` would have resolved
 // its seed identity to undefined and the sandbox/live guard never fired.
-import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
+import {
+  BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID,
+  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
+} from '../src/providers/benchmarkPaymentIdentity';
 import { applyResolvedBenchmarkAgentCardIds } from '../src/domains/test-payment/config';
 import { loadDotenvWithCallerOverrides } from '../src/providers/loadDotenvWithCallerOverrides';
 import { isAdminUser } from '../src/utils/adminAccess';
@@ -418,6 +421,45 @@ async function provisionLiveFixture(
   );
 }
 
+/**
+ * The owner's live production lifecycle probe bills a dedicated live Stripe customer, never the
+ * owner's Subscription (providers/ownerLifecycleBilling.ts). Creates or reuses that customer and
+ * requires a saved card (hosted Checkout link on first run). No database or AgentCard writes; the
+ * printed id is set as BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID on the backend.
+ */
+async function provisionOwnerLifecycleBilling(selectedCustomerId?: string): Promise<void> {
+  const stripe = new Stripe(requireStripeLiveKey(), { apiVersion: STRIPE_API_VERSION });
+  const owner = BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID;
+  let customerId = selectedCustomerId ?? process.env.BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID;
+  if (customerId !== undefined && customerId.trim() !== '') {
+    const existing = await stripe.customers.retrieve(customerId.trim());
+    if (existing.deleted === true || existing.metadata?.fixture !== OWNER_BILLING_FIXTURE) {
+      throw new Error(`${customerId} is not the owner lifecycle-probe billing customer`);
+    }
+    customerId = existing.id;
+  } else {
+    const found = await stripe.customers.search({
+      query: `metadata['fixture']:'${OWNER_BILLING_FIXTURE}'`,
+    });
+    const reuse = found.data.find((customer) => customer.metadata?.userId === owner);
+    customerId =
+      reuse?.id ??
+      (
+        await stripe.customers.create({
+          name: 'Rose Labs Owner Lifecycle Probe',
+          metadata: { userId: owner, fixture: OWNER_BILLING_FIXTURE },
+        })
+      ).id;
+  }
+  const paymentMethodId = await ensureLiveDefaultPaymentMethod(stripe, customerId);
+  console.log(
+    `Owner lifecycle-probe billing ready: live customer ${customerId} (default payment method ` +
+      `${paymentMethodId}). Set BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID=${customerId} on the backend.`
+  );
+}
+
+const OWNER_BILLING_FIXTURE = 'agent-payment-production-lifecycle-owner';
+
 export { configureLiveFixtureEnvironment } from './setup-benchmark-payment-guards';
 
 async function main(): Promise<void> {
@@ -441,7 +483,15 @@ KYC to verify connection scope, then binds it exclusively in the local database.
 It sends no OTP and never treats BENCHMARK_AGENTCARD_CARDHOLDER_ID as a v2 user.
 --live rejects BENCHMARK_AGENTCARD_V2_USER_ID; connect live users through Rose.
 A legacy cardholder is never a substitute for the current-client v2 connection.
+--owner-billing creates or reuses the dedicated live Stripe customer the owner's
+production lifecycle probe bills (never the owner's Subscription) and requires a saved
+card; it writes no database rows. Set the printed id as
+BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID on the backend.
 --help performs no database or provider calls.\n`);
+    return;
+  }
+  if (process.argv.includes('--owner-billing')) {
+    await provisionOwnerLifecycleBilling(argValue('--stripe-customer-id'));
     return;
   }
   const mode: FixtureMode = process.argv.includes('--live') ? 'live' : 'sandbox';
