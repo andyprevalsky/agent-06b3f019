@@ -3875,6 +3875,37 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertEqual((result.returncode, ops, fleets), (2, [], []))
             self.assertIn('fit one controller', result.stderr)
 
+    def test_sharded_and_rolling_campaign_routes_discover_the_user_fly_cli(self):
+        # boxes.dev installs flyctl only at ~/.fly/bin. The rolling campaign's shared relay resolves it
+        # with shutil.which('flyctl'); without the wrapper's discovery it refused "selected Fly client
+        # missing", so app metadata was unavailable and every job was cancelled before allocation.
+        with self.checkout() as fx:
+            home = fx.root.parent/'home'
+            (home/'.fly/bin').mkdir(parents=True)
+            fly = home/'.fly/bin/flyctl'
+            fly.write_text('#!/bin/sh\nexit 99\n')
+            fly.chmod(0o700)
+            path = os.pathsep.join(entry for entry in fx.env.get('PATH', os.defpath).split(os.pathsep)
+                                   if entry and not os.access(os.path.join(entry, 'flyctl'), os.X_OK))
+            self.assertIsNone(shutil.which('flyctl', path=path))
+            seen = fx.root.parent/'flyctl-seen.jsonl'
+            fx.env.update(HOME=str(home), PATH=path, FLYCTL_SEEN=str(seen))
+
+            def recorder(route):
+                return ('import json,os,shutil,sys\nopen(os.environ["FLYCTL_SEEN"],"a").write('
+                        f'json.dumps([{route!r}, shutil.which("flyctl")])+"\\n")\n')
+            operator = Path(fx.env['RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST'])
+            operator.write_text(operator.read_text().replace('import json,os,sys\n', recorder('sharded'), 1))
+            result, ops, fleets = fx.run(*polar_names(40), '--check')
+            self.assertEqual((result.returncode, len(ops), fleets), (0, 1, []), result.stderr)
+            # The campaign route needs no clean checkout; its controller is replaced by a recorder.
+            (fx.root/'scripts/run-bench-campaign.py').write_text(recorder('campaign') + 'print("campaign recorded")\n')
+            result, ops, fleets = fx.run(*polar_names(2), '--concurrency', '2', '--timeout', '480')
+            self.assertEqual((result.returncode, ops, fleets), (0, [], []), result.stderr)
+            self.assertIn('campaign recorded', result.stdout)
+            observed = [json.loads(line) for line in seen.read_text().splitlines()]
+            self.assertEqual(observed, [['sharded', str(fly)], ['campaign', str(fly)]])
+
     def test_concurrency_below_the_copies_runs_one_batch_of_bounded_waves(self):
         # descend I3: 40 tasks x K3 at --concurrency 70 is one batch of task-aligned sharded
         # waves (23 + 17 tasks), each bound to the batch's 120 scheduled copies.
