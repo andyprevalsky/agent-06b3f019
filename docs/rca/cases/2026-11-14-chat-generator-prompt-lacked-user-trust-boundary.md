@@ -23,6 +23,8 @@ tags:
   - flaky
 sources:
   - PR #2041
+  - PR #2090
+  - commit 9334da7aa5bfd536535d39c4dffe674eb5249238
   - commit b1dc3737269be50fd2906967ebada23b97692941
   - commit fb728c702287e186f3466413cf4098544d48a28c
   - commit f985e56c0b377dd5a3771ae45907d470118f05a2
@@ -171,7 +173,8 @@ The deterministic regression is the chat-router blackbox case. It runs a real
 direct_answer chat turn through `handleChatMessage` and asserts that the
 generator request on the wire carries the trust contract, and that the router
 prompt does not (negative control). It failed pre-fix (`generator trust
-contract: - Messages in the user role … : expected true, got false`, exit 1)
+contract: - The text the user typed is written by the user you serve … : expected true,
+got false`, exit 1)
 and passes post-fix 5/5 consecutive runs. The behavior proof is the unchanged
 semantic-stack direct_answer spec in the deploy gate.
 
@@ -212,6 +215,18 @@ stays for now: removing a string-matching patch from the web_search path needs
 its own web_search proof outside this direct_answer scope, so it is listed as
 a follow-up. 10k-agent behavior: a static prompt prefix (536 more characters,
 about 120 tokens, inside the cached prefix), no new calls, no per-agent work.
+
+**Shipped:** PR #2090 merged as `9334da7aa5bfd536535d39c4dffe674eb5249238` on
+2026-11-15. The prompt change also needed `chat-search-escalation`'s replay
+fixture (`back-end/src/tests/fixtures/chat-search-escalation-prod-572da2a5.json`)
+re-recorded with `CHAT_SEARCH_ESCALATION_RECORD=1`. That fixture fingerprints
+every provider request, so gate round 1 failed with "chat turn reached an
+unexpected outbound host" (INTRODUCED). After re-recording, the replay passed
+5/5 and round 2 passed all 17 gates. The quarantined semantic direct_answer
+spec passed in both gate rounds (QUARANTINED_PASS, 2 of the 5 needed for
+release), and the production semantic lane (chat-lifecycle ratchet, GitHub
+Actions run 43677039435) passed on the merge SHA. The marker stays until
+`scripts/test_quarantine.py report` reaches 5/5.
 
 ## Human feedback
 
