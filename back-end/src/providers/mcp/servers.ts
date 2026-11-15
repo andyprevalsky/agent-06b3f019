@@ -17,7 +17,7 @@
  * Everything is per user and per row: no fan-in across users (10k agents read
  * one indexed row set per user).
  *
- * Team sharing (docs/plans/active/share-mcp-servers.md): agents also list and
+ * Team sharing (docs/plans/completed/share-mcp-servers.md): agents also list and
  * call servers a teammate currently shares (`resolveTeamDataAccess`, revalidated
  * on every list and call). The call runs with the OWNER's headers / OAuth token
  * server-side; the teammate never receives them.

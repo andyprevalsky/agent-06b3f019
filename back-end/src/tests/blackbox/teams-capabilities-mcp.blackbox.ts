@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * A teammate's code agent lists and calls the owner's team-shared MCP server (mcp grant,
- * docs/plans/active/share-mcp-servers.md). The call runs with the OWNER's API-key header
+ * docs/plans/completed/share-mcp-servers.md). The call runs with the OWNER's API-key header
  * server-side; the teammate never receives it. The shared server's tool names never
  * collide with the reader's own server, and the sandbox `rose mcp` tool list names the
  * owner and team of every shared tool. Unshare, the owner's server leaving CONNECTED,

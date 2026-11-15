@@ -1,6 +1,8 @@
 # Share MCP servers with teams
 
-This closes the gap left by the share-all-integrations goal (Andy, 2026-11-15): "make sure all are shareable except for iPhone, browser cookies, passwords, and Pebble Index 01". MCP servers (PR #2130) are a connectable Integrations row, but `SHAREABLE_PROVIDERS` did not list them. See [the completed plan](../completed/share-all-integrations.md).
+This closes the gap left by the share-all-integrations goal (Andy, 2026-11-15): "make sure all are shareable except for iPhone, browser cookies, passwords, and Pebble Index 01". MCP servers (PR #2130) are a connectable Integrations row, but `SHAREABLE_PROVIDERS` did not list them. See [the share-all-integrations plan](share-all-integrations.md).
+
+Shipped in PR #2259. `team-daily-shared-mcp` passed as a REAL run on the cloud fleet (run 20261115-225038-502015).
 
 ## System fit
 
