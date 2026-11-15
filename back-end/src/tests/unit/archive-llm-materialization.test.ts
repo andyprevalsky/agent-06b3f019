@@ -167,6 +167,24 @@ async function main(): Promise<void> {
   assert.equal('calls' in receipt, false);
   assert.equal(cli.stdout.includes('actual request'), false);
   count++;
+  {
+    // Equal clocks (a call that starts and finishes within one millisecond):
+    // the base record lists before its update.
+    const tie = fixture();
+    tie.objects.clear();
+    tie.add('llm/tie.json.gz.enc', base(root, 'tie'), 500);
+    tie.add(
+      'llm-updates/tie-500-final.json.gz.enc',
+      { ...base(root, 'tie'), messages: undefined, output: 'tied' },
+      500
+    );
+    const tied = await materializeArchiveLlmDumps(root, directory, tie.reader);
+    assert.deepEqual(
+      tied.sources.map((source) => source.path),
+      ['llm/tie.json.gz.enc', 'llm-updates/tie-500-final.json.gz.enc']
+    );
+    count++;
+  }
   process.stdout.write(
     `PASS archive materialization: ${count} controls, real AES-GCM and actual CLI/local archive`
   );

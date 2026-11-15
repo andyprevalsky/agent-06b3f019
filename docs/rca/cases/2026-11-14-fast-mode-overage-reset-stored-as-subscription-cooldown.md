@@ -151,6 +151,53 @@ Shipped and verified in prod (PR #2048, merge `e0c797307d`, 2026-11-14):
   `execute_loop` calls were served by `claude-opus-5-5-claude`. Summaries
   were served by `claude-haiku-4-5-claude`.
 
+### Follow-up 2026-11-14: Codex cooldowns were never re-checked
+
+Andy's order puts Codex subscriptions first. A live minimal Codex request per
+pooled `gpt_code` row (~09:20Z, prod body builder and transport, headers
+only) found:
+
+- `86ae2dc2`, `de79f8a2` and `de25c911` returned 429 `usage_limit_reached`
+  with the weekly window at 100%. Their real resets were about 11-17 00:44Z,
+  11-15 19:47Z and 11-18 02:52Z.
+- `6a703dd4` returned 401 `token_expired`.
+
+Three rows still held 11-17T21:28Z. That deadline had been copied from a
+sibling by a pre-#1981 unnamed report, so `de79` sat benched about 2 days
+past its real reset.
+
+Nothing re-asked Codex: the usage refresher and reconcile handled Claude
+only.
+
+Repro: the three cases in
+`compute-subscription-usage.codex-refresh.cases.ts` go through the real
+`listConnectedAccounts` trigger with Codex scripted. Before the fix all
+three failed with `Timed out ... waiting for the Codex quota check scheduled
+by the account list`. After the fix they pass 5/5.
+
+Fix (a follow-up PR):
+
+- `codexQuotaCheck` makes one minimal request at standard speed on the small
+  pool's Codex model.
+- `readCodexUsageCredential` reads the stored token read-only.
+- The refresher is provider-aware, reusing `analyzeSubscriptionUsage('gpt')`
+  and `reconcileRoseCooldown('gpt_code')`.
+- It is triggered by the compute-accounts list and by non-authoritative GPT
+  cooldown reports.
+- A 401/403 backs off and never expires the login.
+- From the GROUNDED review: only a 2xx or a recognized usage-limit rejection
+  may reconcile. A short-term 429 can still carry windows under 100%, and
+  before this guard it lifted the cooldown (regression observed failing, then
+  passing).
+
+Open, not fixed:
+
+- Only the default `codex` limit bucket is read. codex-rs reads each
+  `x-codex-<limit_id>-*` bucket and the active-limit header
+  (`codex-rs/codex-api/src/rate_limits.rs:28-46`).
+- Codex's `/wham/usage` endpoint is unused
+  (`codex-rs/backend-client/src/client.rs:385-396`).
+
 ## Human feedback
 
 The parent thread relayed Andy's rules: do not mint, rotate or revoke

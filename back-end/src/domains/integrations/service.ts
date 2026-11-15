@@ -55,7 +55,10 @@ import {
   isIntegrationAuthFailureReason,
 } from '../../providers/integrationConnectionSync';
 import * as repo from './repo';
-import { scheduleClaudeUsageRefresh } from '../../providers/computeUsageRefresh';
+import {
+  scheduleClaudeUsageRefresh,
+  scheduleCodexUsageRefresh,
+} from '../../providers/computeUsageRefresh';
 import {
   redactLanternIntegration,
   updateLanternIntegration,
@@ -879,7 +882,17 @@ export async function markComputeTokenRateLimited(
     return result;
   }
   if (type === 'gpt') {
-    return markGptTokenRateLimited(source, params);
+    const result = await markGptTokenRateLimited(source, params);
+    // Same as Claude: Rose's own backoff says nothing about the account's
+    // windows, so ask Codex for them in the background. Never awaited; never on
+    // an auth failure.
+    if (
+      params.rateLimitAuthoritative !== true &&
+      !isIntegrationAuthFailureReason(params.failureReason)
+    ) {
+      scheduleCodexUsageRefresh(source === 'pool' ? params.poolTokenId : params.integrationId);
+    }
+    return result;
   }
   if (type === 'anthropic') {
     // The shared ANTHROPIC_API_KEY funded default. Not a per-user/pool token —

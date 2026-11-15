@@ -67,6 +67,20 @@ function textParts(value: unknown, depth = 0): string[] {
   );
 }
 
+/**
+ * Assistant text of one archived call, for both record layouts:
+ *   v2 / Python  → output.content + output.tool_calls[].arguments
+ *   legacy TS    → extra.output + extra.tool_calls[].arguments
+ */
+function llmOutputText(dump: RecordValue): string {
+  const output = record(dump.output);
+  const extra = record(dump.extra);
+  const parts = output
+    ? [...textParts(output), ...textParts(output.tool_calls)]
+    : [...textParts(dump.output), ...textParts(extra?.output), ...textParts(extra?.tool_calls)];
+  return parts.join('\n').trim();
+}
+
 function archivedMessageRows(fixture: ScopedDbFixture): ArchivedTrajectoryRow[] {
   const rootAgentId = fixture.root_agent_id;
   const agents = new Map(
@@ -127,7 +141,7 @@ function llmRows(
     return [];
   const agent = (fixture.rows.Agent ?? []).map(record).find((row) => row?.id === agentId);
   const createdAt = date(
-    dump.ts_ms ?? dump.ingested_ms ?? dump.created_at,
+    dump.started_at_ms ?? dump.finished_at_ms ?? dump.ts_ms ?? dump.ingested_ms ?? dump.created_at,
     date(fixture.captured_at, new Date(0))
   );
   const candidates: Array<{ role: string; kind: string; text: string }> = [];
@@ -143,7 +157,7 @@ function llmRows(
     if (role === 'USER' && /^\[SYSTEM\]:/i.test(text)) continue;
     if (text) candidates.push({ role, kind: 'llm_context', text });
   }
-  const output = textParts(dump.output).join('\n').trim();
+  const output = llmOutputText(dump);
   if (output) candidates.push({ role: 'ASSISTANT', kind: 'llm_output', text: output });
   return candidates.flatMap((candidate) => {
     const digest = contentDigest(fixture.root_agent_id, agentId, candidate.role, candidate.text);
