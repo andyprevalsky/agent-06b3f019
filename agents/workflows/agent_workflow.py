@@ -193,6 +193,9 @@ _ORPHAN_TRANSIENT_FAILURE_LIMIT = 30
 # ACTIVE when the 900s harness cap hit. Coalesce to one emit/query per
 # interval so cost stays O(1) per agent per window, not O(messages).
 _TREE_STATE_EMIT_MIN_INTERVAL = timedelta(seconds=3)
+# Bounded wait for a discarded speculative completion summary to report its
+# usage before the workflow run ends (completion, failure, continue-as-new).
+SPECULATIVE_SUMMARY_SETTLE_SECONDS = 30
 _PARENT_STATE_QUERY_MIN_INTERVAL = timedelta(seconds=15)
 _QUERY_PARENT_STATE_TIMEOUT = timedelta(seconds=60)
 
@@ -1004,6 +1007,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._last_parent_state_query_at: Optional[datetime] = None
         self._last_parent_state: Dict = {}
         self._pending_message_handles: List[Any] = []
+        # Root completion summary started while the attempt_completion verifier
+        # judges; adopted by _mark_complete only after that verdict passes.
+        self._speculative_summary_handle: Optional[Any] = None
+        self._speculative_summary_verified = False
+        self._discarded_summary_accounting: List[asyncio.Task[Any]] = []
         self._cached_local_data_summary: Optional[str] = None
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
@@ -2327,6 +2335,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 handoff_queue = await self._wait_for_unpause_or_handoff()
                 await self._prepare_response_schema_continuation()
                 await self._flush_pending_messages()
+                await self._retire_speculative_summaries()
                 if handoff_queue:
                     workflow.continue_as_new(
                         args=self._continuation_args(context),
@@ -2810,6 +2819,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             ):
                 await self._prepare_response_schema_continuation()
                 await self._flush_pending_messages()
+                await self._retire_speculative_summaries()
                 workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="plan"))
                 return plan_result
 
@@ -3035,6 +3045,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
             goal_text=self.demo_cache_goal,
+            on_verification_started=self._start_speculative_completion_summary,
+            on_verification_settled=self._settle_speculative_completion_summary,
             **self._iteration_resume_kwargs(),
         )
 
@@ -3056,6 +3068,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 requirement_revision=self._response_schema_revision,
             ):
                 await self._flush_pending_messages()
+                await self._retire_speculative_summaries()
                 workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="execute_continued"))
                 return execute_result
             return await self._finish_verified_completion(
@@ -3741,6 +3754,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # credentials, and signal state so compaction cannot reset billing/limits.
         await self._drain_fast_mode_explores()
         await self._flush_pending_messages()
+        await self._retire_speculative_summaries()
         workflow.continue_as_new(args=self._continuation_args(compressed_context))
 
     def _in_flight_background_ids(self) -> List[str]:
@@ -5838,6 +5852,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
+            await self._retire_speculative_summaries()
             if handoff_queue:
                 workflow.continue_as_new(
                     args=self._continuation_args(result.get("context")),
@@ -5865,6 +5880,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             )
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
+            await self._retire_speculative_summaries()
             workflow.logger.info(f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)")
             workflow.continue_as_new(
                 args=self._continuation_args(
@@ -6135,6 +6151,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         4. Signal parent with failure context for learning (if sub-agent)
         """
         workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
+        await self._retire_speculative_summaries()
         # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST — see _mark_complete for the regression
@@ -6326,6 +6343,151 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             )
         return outputs
 
+    def _completion_summary_args(self, context: List[Dict], structured_response: Optional[Dict]) -> List[Any]:
+        return [
+            context,
+            # Persisted-row goal: the summary prompt labels this "ORIGINAL
+            # GOAL" and it doubles as the DEMO cache namespace.
+            self.demo_cache_goal,
+            self.model,
+            structured_response,
+            self.output_schema,
+            self.child_tool_counts,
+            self._active_claude_token(),
+            self._active_claude_source(),
+            self._active_claude_pool_id(),
+            self.user_id,
+            self._active_gpt_token(),
+            self._active_gpt_account_id(),
+            self._active_gpt_source(),
+            self._active_gpt_pool_id(),
+            self.user_id,
+            self.agent_id,
+            self.compute_token_lineage_key,
+            self.compute_token_demo_cache_affinity_key,
+            self.fast_mode_cache_enabled,
+            0,  # Fast Mode step — one completion summary per agent
+        ]
+
+    async def _track_completion_summary_usage(self, summary_result: Dict[str, Any]) -> None:
+        usage = summary_result.get("usage", {}) or {}
+        await self._track_llm_cost(
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
+            call_site="completion_summary",
+            actual_model=usage.get("actual_model"),
+            cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+            from_fast_cache=usage.get("from_fast_cache", False),
+        )
+        self.token_count += usage.get("total_tokens", 0)
+
+    # -------------------------------------------------------------------------
+    # Speculative completion summary
+    #
+    #   attempt_completion ─► verifier (LLM) ────────────────┐ pass
+    #                     └─► completion summary (LLM) ──────┴─► _mark_complete:
+    #                                                            final summary row
+    #                                                            ─► COMPLETED
+    #   reject / interrupt / error ─► summary discarded (usage still accounted)
+    #
+    # The summary is the same activity, model and prompt, started with the
+    # context the verifier judges. Only the root runs it: its summary sat
+    # serially after the verifier on every user-facing completion (12–16 s of
+    # a 180 s smoke budget, docs/rca/cases/
+    # 2026-11-10-background-message-completion-exceeded-deadline.md). The
+    # final summary is still observable before COMPLETED.
+    # -------------------------------------------------------------------------
+
+    async def _start_speculative_completion_summary(self, context: List[Dict]) -> None:
+        if self.parent_workflow_id or self._is_finished:
+            return
+        presentation = (self.output_schema or {}).get("presentation")
+        if isinstance(presentation, dict) and presentation.get("mode", "report") != "report":
+            # A typed final answer replaces the summary call in _mark_complete.
+            return
+        self._discard_speculative_completion_summary()
+        self._speculative_summary_handle = workflow.start_activity(
+            generate_completion_summary,
+            # The verifier's structured output does not exist yet; the summary
+            # prompt only uses it as awareness and must not list its values.
+            args=self._completion_summary_args(list(context), None),
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        self._speculative_summary_verified = False
+
+    async def _settle_speculative_completion_summary(self, passed: bool) -> None:
+        if passed:
+            self._speculative_summary_verified = self._speculative_summary_handle is not None
+        else:
+            self._discard_speculative_completion_summary()
+
+    def _discard_speculative_completion_summary(self) -> None:
+        handle = self._speculative_summary_handle
+        self._speculative_summary_handle = None
+        self._speculative_summary_verified = False
+        if handle is not None:
+            self._discarded_summary_accounting.append(asyncio.create_task(self._account_discarded_summary(handle)))
+
+    async def _account_discarded_summary(self, handle: Any) -> None:
+        try:
+            result = await handle
+        except Exception as exc:
+            workflow.logger.warning(f"discarded completion_summary failed: {exc}")
+            return
+        if isinstance(result, dict):
+            try:
+                await self._track_completion_summary_usage(result)
+            except Exception as exc:
+                workflow.logger.warning(f"discarded completion_summary usage not recorded: {exc}")
+
+    def _take_verified_speculative_summary(self) -> Optional[Any]:
+        handle = self._speculative_summary_handle if self._speculative_summary_verified else None
+        if handle is not None:
+            self._speculative_summary_handle = None
+            self._speculative_summary_verified = False
+        else:
+            self._discard_speculative_completion_summary()
+        return handle
+
+    async def _settle_discarded_summary_accounting(self, wait: bool) -> bool:
+        """Drop accounted discarded summaries; with ``wait``, give in-flight ones a bounded window.
+
+        Returns True when every discarded summary has been accounted.
+        """
+        tasks = self._discarded_summary_accounting
+        if wait and any(not task.done() for task in tasks):
+            try:
+                # cutover-class: bounded — SPECULATIVE_SUMMARY_SETTLE_SECONDS cap, then proceed regardless
+                await workflow.wait_condition(
+                    lambda: all(task.done() for task in tasks),
+                    timeout=timedelta(seconds=SPECULATIVE_SUMMARY_SETTLE_SECONDS),
+                )
+            except asyncio.TimeoutError:
+                workflow.logger.warning("discarded completion_summary still running; its cost is not yet accounted")
+        self._discarded_summary_accounting = [task for task in tasks if not task.done()]
+        return not self._discarded_summary_accounting
+
+    async def _retire_speculative_summaries(self) -> None:
+        """Before this run ends (failure or continue-as-new): stop adopting, account what finished."""
+        self._discard_speculative_completion_summary()
+        await self._settle_discarded_summary_accounting(wait=True)
+
+    async def _await_speculative_summary(self, handle: Optional[Any]) -> Optional[Dict[str, Any]]:
+        if handle is None:
+            return None
+        try:
+            result = await handle
+        except Exception as exc:
+            workflow.logger.warning(f"speculative completion_summary failed, regenerating: {exc}")
+            return None
+        if isinstance(result, dict) and not result.get("generation_failed") and str(result.get("summary") or "").strip():
+            return result
+        if isinstance(result, dict):
+            # Produced no usable text: still account its spend, then regenerate.
+            await self._track_completion_summary_usage(result)
+        return None
     async def _finish_verified_completion(self, context: List[Dict], structured_response: Optional[Dict]) -> Dict:
         """Route only completion validation failures through existing lifecycle owners."""
         try:
@@ -6423,6 +6585,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._world_clock_event("finish")
         require_current_final_presentation()
         await self._flush_pending_messages()
+        # Summaries of rejected attempts still cost money: account the finished
+        # ones before the terminal cost persist below. In-flight ones never hold
+        # COMPLETED; they are settled after it.
+        speculative_summary = self._take_verified_speculative_summary()
+        await self._settle_discarded_summary_accounting(wait=False)
         require_current_final_presentation()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
@@ -6467,35 +6634,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # docs/rca/cases/2026-07-11-completion-gated-behind-final-summary-message-post.md
             if final_answer is None:
                 try:
-                    summary_result = await workflow.execute_activity(
-                        generate_completion_summary,
-                        args=[
-                            context,
-                            # Persisted-row goal: the summary prompt labels this "ORIGINAL
-                            # GOAL" and it doubles as the DEMO cache namespace.
-                            self.demo_cache_goal,
-                            self.model,
-                            structured_response,
-                            self.output_schema,
-                            self.child_tool_counts,
-                            self._active_claude_token(),
-                            self._active_claude_source(),
-                            self._active_claude_pool_id(),
-                            self.user_id,
-                            self._active_gpt_token(),
-                            self._active_gpt_account_id(),
-                            self._active_gpt_source(),
-                            self._active_gpt_pool_id(),
-                            self.user_id,
-                            self.agent_id,
-                            self.compute_token_lineage_key,
-                            self.compute_token_demo_cache_affinity_key,
-                            self.fast_mode_cache_enabled,
-                            0,  # Fast Mode step — one completion summary per agent
-                        ],
-                        start_to_close_timeout=timedelta(seconds=60),
-                        retry_policy=RetryPolicy(maximum_attempts=3),
-                    )
+                    # A root's summary normally started while the verifier judged
+                    # (_start_speculative_completion_summary). Adopt it only when it
+                    # produced a summary; otherwise generate it here exactly as before.
+                    summary_result = await self._await_speculative_summary(speculative_summary)
+                    if summary_result is None:
+                        summary_result = await workflow.execute_activity(
+                            generate_completion_summary,
+                            args=self._completion_summary_args(context, structured_response),
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=RetryPolicy(maximum_attempts=3),
+                        )
                     summary_result = summary_result or {}
                 except Exception as summary_exc:
                     summary_error = str(summary_exc)
@@ -6503,6 +6652,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
             else:
                 summary_result = {"summary": final_answer}
+                if speculative_summary is not None:
+                    # The typed final answer replaces the summary; its spend is still accounted.
+                    self._discarded_summary_accounting.append(
+                        asyncio.create_task(self._account_discarded_summary(speculative_summary))
+                    )
 
             require_current_final_presentation()
             summary = strip_fast_mode_card_narration(summary_result.get("summary", ""))
@@ -6668,6 +6822,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # Broadcast COMPLETED status with structured output to tree
             # (output_schema is already cached from startup and included in all broadcasts)
             await self._update_tree_state(progress=1.0, status="COMPLETED", structured_output=structured_response)
+            if self._discarded_summary_accounting:
+                await self._settle_discarded_summary_accounting(wait=True)
+                self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
+                await self._persist_tree_cost()
 
             # Completion lifecycle SMS is root-only. Sub-agents report to their
             # parent; notifying per child would fan out at tree scale.
