@@ -1,0 +1,196 @@
+{
+  "record_status": "PRODUCTION_AND_SIX_CARRIER_RECOVERY_VERIFIED; NATIVE_READINESS_RECORDED_SEPARATELY",
+  "primary_pr": 2099,
+  "primary_merge_sha": "e158477bc23a0527df4500c3adf209b74ae1b7fd",
+  "validated_source": "c41b933b246b8c7f9ced14bfff97c38fcb6657f7",
+  "validation": "17 selected native gates PASS on validated source; 11 QUARANTINED_PASS, zero QUARANTINED_FAIL; one attributed earlier FLAKY retained. Current smoke 11/11 passed and all12 task/canary release lifecycles verified. Historical abandonment was omitted and grants no current test/financial credit.",
+  "runtime_identity": "Four primary runtime files and four owning regressions are byte-identical between validation and merge.20 concurrent main paths differ; whole-tree equality is not claimed.",
+  "production_lanes": {
+    "render": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "fly": {
+      "status": "PASS",
+      "reason": "deploy-agents run 43662238673 attempt 1 job 9d44ab1182a10998f8bdf12ab425723eb0c79935d45702821d7f7360d46465bf SUCCEEDED + monitor --verify",
+      "applicable": true,
+      "started_at": "2026-11-15T02:01:01Z",
+      "finished_at": "2026-11-15T02:01:11Z",
+      "exit_code": 0
+    },
+    "vercel": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no front-end/ change",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "mac-release": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #2099 without MAC-APP-RELEASE)",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "backend-probes": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end change",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "workflow-migration": {
+      "status": "PASS",
+      "reason": "every migration row PASS",
+      "applicable": true,
+      "started_at": "2026-11-15T02:01:11Z",
+      "finished_at": "2026-11-15T02:07:35Z",
+      "exit_code": 0
+    },
+    "agentcard": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no AgentCard payment path change (benchmark history ledgers excluded)",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "semantic": {
+      "status": "PASS",
+      "reason": "chat-lifecycle-ratchet run 43665767816 success",
+      "applicable": true,
+      "started_at": "2026-11-15T02:01:11Z",
+      "finished_at": "2026-11-15T02:09:09Z",
+      "exit_code": 0
+    }
+  },
+  "cutover": {
+    "job_id": "9d44ab1182a10998f8bdf12ab425723eb0c79935d45702821d7f7360d46465bf",
+    "job_stage": "SUCCEEDED",
+    "source_commit": "e158477bc23a0527df4500c3adf209b74ae1b7fd",
+    "attempt": "43662238673-1",
+    "expected_hash": "36c8f4ae94d7",
+    "monitor_verify_exit": 0
+  },
+  "original_workflow_result": "failure",
+  "semantic_run": {
+    "run_id": "43665767816",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43665767816",
+    "source_sha": "e158477bc23a0527df4500c3adf209b74ae1b7fd",
+    "status": "completed",
+    "outcome": "passed"
+  },
+  "delegated": [
+    {
+      "failure": "f48b6ecc19c2402cb3abc744c0abb18d",
+      "attribution": "NOT_INTRODUCED",
+      "owner": "https://boxes.dev/thread/thr_8cefa6e4ed4f4244ae0919c0d2b3c8b3",
+      "repair_pr": 2104,
+      "delivery": "complete post-merge /goal packet delivered; native cycle resolved; repair completion is separate"
+    }
+  ],
+  "not_delegated": "RECOVERED_KEY carry diagnostic is informational: independent admission review found no qualifying failed required gate caused by it. No duplicate repair goal was dispatched.",
+  "unresolved": [
+    "CodeRabbit spending cap on reviewed source: native quota skip, merged unreviewed",
+    "Anthropic credential-health credits-exhausted warning",
+    "Historical PR1699 sandbox4396 cents: current execution/financial state UNVERIFIED; no retry/mint/release/refund credit",
+    "Known native benchmark aggregate renderer reports queued/0 release despite exact direct lifecycle proofs; no new repair handoff manufactured"
+  ],
+  "archive_carriers": [
+    {
+      "name": "git",
+      "receipt": "archives/git.json",
+      "key": "devbox-closeout-private/pr2099/git-preservation-20261114T210002Z-9a6f137d7553.tar.gz.aesgcm",
+      "files": 28,
+      "logical_bytes": 177622354,
+      "encrypted_bytes": 164942743,
+      "ciphertext_sha256": "80ea09b4e9fa390746cb92090429985ad4084ec343f8a25423117ecbacdd908a",
+      "manifest_sha256": "03c8340c6c79a5ddb7c8e0bba87b8fd9d041822516662b40aa3fcce5b2555ba0",
+      "full_readback_verified": true,
+      "independent_member_restore_verified": true
+    },
+    {
+      "name": "baseline",
+      "receipt": "archives/baseline.json",
+      "key": "devbox-closeout-private/pr2099/baseline-private-20261114T211200Z-810e304e02a0.tar.gz.aesgcm",
+      "files": 87586,
+      "logical_bytes": 2046965344,
+      "encrypted_bytes": 876556485,
+      "ciphertext_sha256": "5bbfd851daead6ef0bdb7ea73d289ba01e4bcbfbf997d6c36b13f406a6712d4a",
+      "manifest_sha256": "12577f24ff3870ec83ad76c9431f0a92d24cd450a9b15b6b8d349bab98974137",
+      "full_readback_verified": true,
+      "independent_member_restore_verified": true
+    },
+    {
+      "name": "rca",
+      "receipt": "archives/rca.json",
+      "key": "devbox-closeout-private/pr2099/completed-rca-20261114T212400Z-44045bfca477.tar.gz.aesgcm",
+      "files": 1489,
+      "logical_bytes": 49061313,
+      "encrypted_bytes": 18035960,
+      "ciphertext_sha256": "26cb39f651e31080ede7a6eb0f6b59aee60bfb8c488f036642cfcc4dc0d8b408",
+      "manifest_sha256": "e2db4b859a192f4186668e61368fd2ff489f1324b06ea392c32c04f0a1063671",
+      "full_readback_verified": true,
+      "independent_member_restore_verified": true
+    },
+    {
+      "name": "validation",
+      "receipt": "archives/validation.json",
+      "key": "devbox-closeout-private/pr2099/validation-private-20261115T000036Z-60de2f8f3f14.tar.gz.aesgcm",
+      "files": 42816,
+      "logical_bytes": 2582624756,
+      "encrypted_bytes": 740808825,
+      "ciphertext_sha256": "a440fd82661cf50836dc5d3641721d929daab454e386849e9ab3735bed845378",
+      "manifest_sha256": "356d4b492fc4ce922355a46ad293469a75ae2d3546e829066e68dfbd5cbec7a2",
+      "full_readback_verified": true,
+      "independent_member_restore_verified": true
+    },
+    {
+      "name": "bulk",
+      "receipt": "archives/bulk.json",
+      "key": "devbox-closeout-private/pr2099/bulk-private-20261115T015309Z-ad55ee430649.tar.gz.aesgcm",
+      "files": 2486,
+      "logical_bytes": 1577762959,
+      "encrypted_bytes": 707454453,
+      "ciphertext_sha256": "d512741c77b5612585efef234d27fc765a39d52908e7b38d00e7b75a899abd71",
+      "manifest_sha256": "d1ad3ae9ab9bfb2a8f6398a04240db0cacd5f42031188d2913a7214fcdccbe25",
+      "full_readback_verified": true,
+      "independent_member_restore_verified": true
+    },
+    {
+      "name": "final",
+      "receipt": "archives/final.json",
+      "key": "devbox-closeout-private/pr2099/final-private-20261115T022544Z-f0fd54abc6c8.tar.gz.aesgcm",
+      "files": 255,
+      "logical_bytes": 48531209,
+      "encrypted_bytes": 17223014,
+      "ciphertext_sha256": "83a33bdaed23f72cbc580dee01462d5d09a97a69e29c8b7442d007badfa740b4",
+      "manifest_sha256": "fbfeebc02ef5060e31cb5df8180d8a1a793ef518b8ed313831f72af8b7d7917d",
+      "full_readback_verified": true,
+      "independent_member_restore_verified": true
+    }
+  ],
+  "known_recovery_limits": [
+    "Finite per-file HOME/log cutoffs; no atomic whole-HOME/browser image",
+    "Use41 coherent SQLite online backups; raw DB/WAL/SHM are audit representations",
+    "Fresh PG16 logical dump+globals restored,104 tables read/411 indexes/1RLS, owned proof database and cluster cleaned; physical WAL/historical row identity not claimed",
+    "Five already-pruned historical reflog objects and vanished ephemeral temporary bytes remain UNKNOWN",
+    "Independent authorized Render bootstrap access is a prerequisite; no total new-machine bootstrap from nothing claim",
+    "Freedom/protected instructions untouched; Linux capture does not assert remote Mac app/service capture"
+  ]
+}

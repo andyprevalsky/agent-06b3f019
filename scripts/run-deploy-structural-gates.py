@@ -485,6 +485,7 @@ GATES = (
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh"), expected_seconds=118),
     Gate("descend-handoff", ("python3", "scripts/tests/descend-handoff.test.py"), expected_seconds=5),
+    Gate("check-stale-versions", ("python3", "scripts/tests/check-stale-versions.test.py"), expected_seconds=4),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py"), expected_seconds=700, shards=6),
     Gate("jev-progress-core", ("python3", "scripts/tests/jev-progress-core.test.py")),
     Gate("select-affected-tests", ("python3", "scripts/tests/select-affected-tests.test.py")),

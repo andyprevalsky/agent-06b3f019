@@ -47,12 +47,14 @@ def find_dumps(agent_id: str) -> List[Path]:
 
 
 def parse_dump_filename(p: Path) -> Dict[str, str]:
-    # <ts_ms>-<span_id>-<call_site>.json
+    # <ts_ms>-<span_id>_<dump_id>-<call_site>.json (older dumps: <ts_ms>-<span_id>-<call_site>.json)
     stem = p.stem
     parts = stem.split("-", 2)
+    span, _, dump_id = (parts[1] if len(parts) > 1 else "").partition("_")
     return {
         "ts_ms": parts[0] if len(parts) > 0 else "",
-        "span_id": parts[1] if len(parts) > 1 else "",
+        "span_id": span,
+        "dump_id": dump_id,
         "call_site": parts[2] if len(parts) > 2 else "",
     }
 

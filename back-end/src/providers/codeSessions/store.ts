@@ -354,10 +354,17 @@ export async function markRetired(codeSessionId: string, now = new Date()): Prom
  * CODE_SESSION_TTL_DAYS a running task would otherwise be swept between two
  * keepalives. Its sandbox is retired once the lease lapses (spawn gone).
  */
+/** Position in the expired-session order (lastActiveAt, id): a sweep resumes after it. */
+export interface ExpiredSweepCursor {
+  lastActiveAt: Date;
+  id: string;
+}
+
 export async function findExpiredCodeSessions(
   userId: string | null,
   limit = 5,
-  now = new Date()
+  now = new Date(),
+  after: ExpiredSweepCursor | null = null
 ): Promise<CodeSessionRow[]> {
   return prisma.$queryRaw<CodeSessionRow[]>(Prisma.sql`
     SELECT session.* FROM "CodeSession" AS session
@@ -365,6 +372,12 @@ export async function findExpiredCodeSessions(
       ${userId === null ? Prisma.empty : Prisma.sql`AND session."userId" = ${userId}`}
       AND session."lastActiveAt" < ${new Date(now.getTime() - codeSessionTtlMs())}
       AND (session."leaseExpiresAt" IS NULL OR session."leaseExpiresAt" < ${now})
+      ${
+        after === null
+          ? Prisma.empty
+          : Prisma.sql`AND (session."lastActiveAt" > ${after.lastActiveAt}
+              OR (session."lastActiveAt" = ${after.lastActiveAt} AND session.id > ${after.id}))`
+      }
       AND NOT EXISTS (
         SELECT 1 FROM "Integration" AS integration
         WHERE integration."userId" = session."userId"
@@ -372,7 +385,7 @@ export async function findExpiredCodeSessions(
           AND integration.type = 'TOOL_SETUP'
           AND integration.config->>'code_session_id' = session.id
       )
-    ORDER BY session."lastActiveAt" ASC
+    ORDER BY session."lastActiveAt" ASC, session.id ASC
     LIMIT ${limit}
   `);
 }

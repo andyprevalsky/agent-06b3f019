@@ -35,7 +35,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ─── Config ──────────────────────────────────────────────
 const TEMPLATE_ID =
   process.env.E2B_CLAUDE_CODE_TEMPLATE_ID ||
-  "claude-code-v21305-node22234-c2-m4";
+  "claude-code-v21311-node22234-c2-m4";
 const E2B_API_KEY = process.env.E2B_API_KEY;
 const WS_PORT = 3000;
 const SANDBOX_TIMEOUT_MS = 120_000; // 2 minutes is plenty for this test

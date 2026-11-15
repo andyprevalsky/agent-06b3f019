@@ -22,7 +22,6 @@ import {
   retryBackendFetch,
 } from './browser-provider.helpers';
 import { LOCATION, tilionApi, withPage } from './browser-provider.tilion-live.support';
-import { quarantine } from '../helpers/quarantine';
 import { runQuarantinedLiveTilionProviderParity } from './browser-provider.tilion-parity.quarantine';
 
 const RECOVERY_URL = 'https://en.wikipedia.org/wiki/Web_browser';
@@ -237,21 +236,6 @@ export function gateOverridden(gate: string): boolean {
     .includes(gate);
 }
 
-// FLAKY, NOT_INTRODUCED (PR #1975): the Steel residential tunnel refused example.com.
-const liveUnit = 'browser-provider';
-const steelAuthPersist = quarantine(
-  {
-    since: '2026-11-12',
-    repair: 'https://boxes.dev/thread/thr_825d565448b04195abc146b228ecdba5',
-    error:
-      'FAIL live Kernel/Steel auth persist: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/',
-    evidence:
-      'PR #1975 live-probes round 1 on 910dd40a14: browser-provider FLAKY (rerun passed); the PR changes no browser/provider code; same signature on PR #1658 (2026-10-31) reproduced standalone as Kernel residential proxy egress',
-  },
-  () => runLiveKernelSteelAuthPersist('steel'),
-  { unit: liveUnit }
-);
-
 /**
  * The live auth-handoff and Tilion cases of the /deploy-run browser-provider
  * domain, in order. Returns the failure count so the runner keeps going.
@@ -266,7 +250,7 @@ export async function runLiveCrossProviderCases(): Promise<number> {
   const kernel = KERNEL_RESIDENTIAL_LIVE_OVERRIDE;
   const tilion = TILION_RESIDENTIAL_LIVE_OVERRIDE;
   const cases: Array<[string, () => Promise<void>, string | null]> = [
-    ['live Kernel/Steel auth persist', steelAuthPersist, kernel],
+    ['live Kernel/Steel auth persist', () => runLiveKernelSteelAuthPersist('steel'), kernel],
     ['live Tilion provider parity', runQuarantinedLiveTilionProviderParity, tilion],
     ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion'), tilion],
     ['live Tilion challenge recovery', runLiveTilionChallengeRecovery, tilion],

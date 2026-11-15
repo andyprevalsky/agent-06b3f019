@@ -9,6 +9,9 @@ import { savedBinding, prepareSavedPassword, resumeSavedPrivacy } from './repo.s
 import { billSetup } from './repo.setupFinish';
 import type { CommandClaim } from './types.operations';
 import { ensurePhoneSession } from './service.session';
+import { createLogger } from '../../providers/logger';
+
+const log = createLogger('IPhoneSavedCredential');
 export async function runSavedCredential(
   claim: CommandClaim,
   client: PhoneHarnessClient,
@@ -45,6 +48,14 @@ export async function runSavedCredential(
       throw new Error('phone_credential_binding_required');
     const password = await prepareSavedPassword(claim, binding, realm);
     started = true;
+    // The bound point is not secret; it is the only trace of which element the fill tapped.
+    log.info('saved credential bound', {
+      leaseId: claim.lease.id,
+      cursor: claim.command.cursor,
+      realm,
+      x,
+      y,
+    });
     await client.perform(session, 'input.tap', { x, y });
     await client.perform(session, 'input.text', { s: password, keystrokes: false });
     const result = await commands.finishCommand(claim, 'SUCCEEDED', {

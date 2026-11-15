@@ -77,6 +77,7 @@ async function detectWith(
       dump_context: {
         call_site: 'vapi_hold_human_detector',
         agent_id: input.agentId ?? undefined,
+        archive_scope: { agentId: input.agentId, userId: input.userId },
         config: { session_id: input.sessionId ?? null },
       },
     });

@@ -3302,12 +3302,8 @@ async def _run_verifier(
                 "result. Do NOT spawn additional sub-agents unless the deliverable "
                 "is actually missing."
             )
-        else:
-            guidance = (
-                "Take a NEW action that produces fresh tool evidence matching the goal, "
-                "then call attempt_completion again."
-            )
-        message_text = f"Verifier score: {score:.0%}\n\nReasoning: {message_text}\n\n{guidance}"
+            message_text = f"{message_text}\n\n{guidance}"
+        message_text = f"Verifier score: {score:.0%}\n\nReasoning: {message_text}"
 
     # Post FINISHED. The verifier feedback is the attempt_completion call's
     # tool result: both converters pair it with the declared tool_use.
