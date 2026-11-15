@@ -1004,6 +1004,18 @@ class CloudCampaign(unittest.TestCase):
             'finished_at':datetime.fromtimestamp(3,timezone.utc).isoformat()}
         self.seal_campaign(self.campaign)
 
+    def pilot_limits(self):
+        """The reviewed registry with Tilion at its original 20-browser pilot, so 17 checks cross a 16-wide cap.
+
+        The live account allows far more (scripts/cloudbench-provider-limits.json); this keeps
+        the cap-crossing boundary independent of the provider's current plan."""
+        value=json.loads((ROOT/'scripts/cloudbench-provider-limits.json').read_text())
+        row,=[row for row in value['enforced'] if row['id']=='tilion-browser-sessions']
+        row['limit']=20
+        path=self.root/'provider-limits-tilion-pilot.json'
+        path.write_text(json.dumps(value))
+        return str(path)
+
     def seal_campaign(self, directory):
         import runpy, hashlib
         cycle.write(directory/'summary.json',self.summary)
@@ -1151,7 +1163,7 @@ class CloudCampaign(unittest.TestCase):
             self.summary['campaign_id']=target_campaign.name
             self.seal_campaign(target_campaign)
             return 0,False,False,False
-        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}), \
+        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':self.pilot_limits()}), \
              patch.object(self.cloud,'source',return_value=self.request['source']), \
              patch.object(self.cloud,'run_command',side_effect=launch), \
              patch.object(self.cloud.time,'time',return_value=1):
@@ -1253,7 +1265,7 @@ class CloudCampaign(unittest.TestCase):
         self.assertFalse(self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)[2])
 
     def test_campaign_command_preserves_inventory_and_uses_registry_capacity(self):
-        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}), \
+        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':self.pilot_limits()}), \
              patch.object(self.cloud,'source',return_value=self.request['source']), \
              patch.object(self.cloud,'run_command',return_value=(0,False,False,False)) as launch, \
              patch.object(self.cloud,'collect_campaign',return_value=(dict.fromkeys(self.request['checks'],'PASS'),{},True,'campaign')):
