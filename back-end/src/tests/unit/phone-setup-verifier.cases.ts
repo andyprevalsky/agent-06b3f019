@@ -133,7 +133,26 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
           )
         );
         assert.ok(settingsPurpose(verificationTarget).includes('future Google sign-in challenge'));
+        assert.ok(
+          settingsPurpose(verificationTarget).includes('per-account Settings screen inside Gmail')
+        );
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'A Google Account page alone does not identify the Gmail app'
+          )
+        );
       }
+      if (verificationTarget === 'imessage')
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'unless any observation shows Waiting for activation'
+          )
+        );
+      assert.ok(
+        settingsPurpose(verificationTarget).includes(
+          'counts as explicit selection only for that row; switches have no text'
+        )
+      );
       if (verificationTarget === 'google_passcode_exception') {
         assert.ok(settingsPurpose(verificationTarget).includes('account menu alone'));
         assert.ok(settingsPurpose(verificationTarget).includes('blocking Device Policy Alert'));
