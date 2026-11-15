@@ -5629,6 +5629,16 @@ def test_filter_context_for_execute_verifier_uses_execute_boundary():
     assert "Beginning execute" not in text
     assert "late plan row" not in text
     assert "execute spawn result" in text
+    # set_plan can finish before more unphased planning work. Without an
+    # explicit execution transition, a later EXECUTE tag remains authoritative.
+    no_transition = context[:3] + [
+        {"role": "ASSISTANT", "text": "unphased planning draft", "timestamp": "2024-01-01T00:00:03Z",
+         "metadata": {"plannedToolName": "reasoning"}},
+        {**context[4], "metadata": {**context[4]["metadata"], "phase": "EXECUTE"}},
+    ]
+    scoped = _filter_context_for_execute_verifier(no_transition)
+    assert no_transition[3] not in scoped
+    assert no_transition[4] in scoped and context[0] in scoped
 
 
 async def test_check_progress_execute_filters_plan_context_before_llm():
@@ -5677,6 +5687,45 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert "original goal" in rendered
     assert "plan explore result" not in rendered
     assert "set_plan" not in rendered
+
+
+async def test_check_progress_keeps_completed_reasoning_before_completion_chip():
+    """A late EXECUTE status chip must not erase work after the phase transition."""
+    from helpers.llm import check_progress
+    from utils.prompts import build_verifier_prompt
+
+    captured = []
+
+    async def judge(messages, *_args, **_kwargs):
+        captured.extend(messages)
+        # Retain the captured rejection; this check proves request construction,
+        # not a model verdict. The paired live replay proves verdict behavior.
+        return {"task_completed": False, "score": 1.0, "reasoning": "missing reply"}, {}
+
+    context = [
+        {"role": "USER", "text": "Reply with the single word OK and finish. Do not use any tools.",
+         "timestamp": "2026-11-14T19:55:00Z"},
+        {"role": "TOOL", "text": "planning evidence", "timestamp": "2026-11-14T19:56:00Z",
+         "metadata": {"toolName": "set_plan", "toolStatus": "FINISHED", "phase": "PLAN"}},
+        {"role": "TOOL", "text": "", "timestamp": "2026-11-14T19:56:17Z",
+         "metadata": {"toolName": "attempt_completion", "title": "Beginning Execute Phase", "phase": "PLAN"}},
+        {"role": "ASSISTANT", "text": "OK", "timestamp": "2026-11-14T19:56:21Z",
+         "metadata": {"plannedToolName": "reasoning", "dagTaskIndex": 0}},
+        {"role": "TOOL", "text": "", "timestamp": "2026-11-14T19:56:22Z",
+         "metadata": {"toolName": "attempt_completion", "toolStatus": "IN_PROGRESS", "phase": "EXECUTE"}},
+        {"role": "TOOL", "text": "late planning evidence", "timestamp": "2026-11-14T19:56:23Z",
+         "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED", "phase": "PLAN"}},
+    ]
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", judge):
+        result = await check_progress(context, build_verifier_prompt(), call_site="verifier_execute")
+
+    assert result["score"] < 1.0, "Retaining evidence must not override an independent rejection"
+    evidence = "\n".join(m["content"] for m in captured if m["role"] != "system")
+    assert 'AUTHORED_RESULT {"source": "reasoning", "result": "OK"' in evidence, evidence
+    assert 'TOOL_RESULT {"tool_name": "reasoning"' not in evidence
+    assert "Do not use any tools" in evidence
+    assert "planning evidence" not in evidence
+    assert "Beginning Execute Phase" not in evidence
 
 
 async def test_check_progress_execute_verifier_keeps_original_goal():
@@ -7692,12 +7741,20 @@ def test_build_verifier_context_messages_includes_only_dag_reasoning_assistant_r
             },
             "timestamp": "2026-07-08T00:00:01Z",
         },
+        {
+            "role": "TOOL",
+            "text": "Bug report submitted",
+            "metadata": {"toolName": "report_bug", "toolStatus": "FINISHED", "toolCallId": "bug-1"},
+            "timestamp": "2026-07-08T00:00:02Z",
+        },
     ]
 
     msgs = build_verifier_context_messages(ctx, "system")
     content = msgs[-1]["content"]
 
-    assert '"tool_name": "reasoning"' in content
+    assert 'AUTHORED_RESULT {"source": "reasoning"' in content
+    assert 'TOOL_RESULT {"tool_name": "reasoning"' not in content
+    assert 'TOOL_RESULT {"tool_name": "report_bug", "tool_call_id": "bug-1", "result": "Bug report submitted"}' in content
     assert '"result": "thirty hook-tested openings"' in content
     assert '"dag_task_index": 4' in content
     assert "ordinary assistant narration should stay hidden" not in content
@@ -11671,6 +11728,9 @@ async def run_all_tests():
     )
     r.record(
         "filter_context_for_execute_verifier_boundary", test_filter_context_for_execute_verifier_uses_execute_boundary
+    )
+    await r.record_async(
+        "execute_verifier_keeps_completed_reasoning", test_check_progress_keeps_completed_reasoning_before_completion_chip
     )
     await r.record_async(
         "check_progress_execute_filters_plan_context",

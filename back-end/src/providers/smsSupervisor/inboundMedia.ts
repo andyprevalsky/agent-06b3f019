@@ -10,6 +10,10 @@
  * attachment must never crash the supervisor run.
  */
 
+import { archiveBytes } from '../traceArchive';
+import { finishLlmCapture, startLlmCapture } from '../llmDump';
+import { simpleArchiveOutput, userArchiveRoot } from '../llmArchiveRecord';
+import { createHash } from 'node:crypto';
 import { createLogger } from '../logger';
 import type { ContentBlock } from '../rose';
 import { processUploadedFile, type FilePointer } from '../storage';
@@ -89,7 +93,7 @@ export async function processInboundAttachments(
       }
 
       if (mimeType.startsWith('audio/')) {
-        const transcript = await transcribeVoiceNote(buffer, mimeType);
+        const transcript = await transcribeVoiceNote(buffer, mimeType, userId);
         noteLines.push(
           transcript
             ? `[Voice note transcript]: ${transcript}`
@@ -162,8 +166,16 @@ async function downloadAttachment(
   return { buffer: Buffer.from(arrayBuffer), mimeType };
 }
 
-/** Transcribe a voice note via ElevenLabs Scribe (dedicated STT). */
-async function transcribeVoiceNote(audio: Buffer, mimeType: string): Promise<string | null> {
+/**
+ * Transcribe a voice note via ElevenLabs Scribe (dedicated STT). The audio and
+ * the transcript are archived under the user's SMS root (`user-<userId>`):
+ *   media/stt/<sha256>.<ext>  +  llm/<dump_id> start / llm-updates final record
+ */
+async function transcribeVoiceNote(
+  audio: Buffer,
+  mimeType: string,
+  userId: string
+): Promise<string | null> {
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) {
     log.warn('ELEVENLABS_API_KEY not set — cannot transcribe voice note');
@@ -171,6 +183,67 @@ async function transcribeVoiceNote(audio: Buffer, mimeType: string): Promise<str
   }
 
   const start = Date.now();
+  const rootAgentId = userArchiveRoot(userId);
+  const audioPath = `media/stt/${createHash('sha256').update(audio).digest('hex')}.${
+    mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'audio'
+  }`;
+  // createOnly: a failed write throws; null means the content-addressed object
+  // already exists (or archiving is off, when no record is written either).
+  const audioArchiveError = await archiveBytes({
+    rootAgentId,
+    objectPath: audioPath,
+    body: audio,
+    contentType: mimeType,
+    compress: false,
+    createOnly: true,
+  }).then(
+    () => null,
+    (error: unknown) => (error instanceof Error ? error.message : String(error))
+  );
+  if (audioArchiveError !== null) {
+    log.warn('Voice note audio archive failed; audio kept inline in the start record', {
+      error: audioArchiveError,
+    });
+  }
+  const capture = startLlmCapture({
+    call_site: 'sms_voice_note_stt',
+    agent_id: `sms-supervisor-${userId}`,
+    root_agent_id: rootAgentId,
+    model: STT_MODEL,
+    message_count: 1,
+    messages: [
+      {
+        role: 'user',
+        // The start record (stored with its own retries) carries the audio
+        // itself when the separate media/stt object was not confirmed.
+        content: [
+          audioArchiveError === null
+            ? { type: 'input_audio', mime_type: mimeType, archive_path: audioPath }
+            : {
+                type: 'input_audio',
+                mime_type: mimeType,
+                data: audio.toString('base64'),
+                archive_error: audioArchiveError,
+              },
+        ],
+      },
+    ],
+    config: { provider: 'elevenlabs', model_id: STT_MODEL, audio_bytes: audio.length },
+  });
+  const finishFailed = (error: unknown, structured?: unknown): null => {
+    finishLlmCapture(capture, {
+      model: STT_MODEL,
+      output: simpleArchiveOutput({
+        content: '',
+        actualModel: STT_MODEL,
+        provider: 'elevenlabs',
+        startedAtMs: start,
+        ...(structured !== undefined ? { structured } : {}),
+        error,
+      }),
+    });
+    return null;
+  };
   const form = new FormData();
   form.append('model_id', STT_MODEL);
   form.append(
@@ -179,23 +252,55 @@ async function transcribeVoiceNote(audio: Buffer, mimeType: string): Promise<str
     `voice-note.${mimeType.split('/')[1] ?? 'audio'}`
   );
 
-  const response = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
-    method: 'POST',
-    headers: { 'xi-api-key': apiKey },
-    body: form,
-  });
+  let response: Response;
+  try {
+    response = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+      method: 'POST',
+      headers: { 'xi-api-key': apiKey },
+      body: form,
+    });
+  } catch (error) {
+    finishFailed(error);
+    throw error;
+  }
 
   if (!response.ok) {
-    const errorText = await response.text();
+    let errorText: string;
+    try {
+      errorText = await response.text();
+    } catch (error) {
+      // The body read failed: still close the record with what is known.
+      finishFailed(error, { status: response.status });
+      throw error;
+    }
     log.error('Voice note transcription failed', {
       status: response.status,
       error: errorText.substring(0, 300),
     });
-    return null;
+    return finishFailed(new Error(`HTTP ${response.status}`), {
+      status: response.status,
+      body: errorText,
+    });
   }
 
-  const result = (await response.json()) as { text?: string };
+  let result: { text?: string };
+  try {
+    result = (await response.json()) as { text?: string };
+  } catch (error) {
+    finishFailed(error, { status: response.status });
+    throw error;
+  }
   const transcript = result.text?.trim() ?? '';
+  finishLlmCapture(capture, {
+    model: STT_MODEL,
+    output: simpleArchiveOutput({
+      content: transcript,
+      actualModel: STT_MODEL,
+      provider: 'elevenlabs',
+      startedAtMs: start,
+      structured: result,
+    }),
+  });
 
   log.info('Voice note transcribed', {
     mimeType,

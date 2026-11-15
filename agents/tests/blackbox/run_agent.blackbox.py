@@ -3227,7 +3227,8 @@ async def test_run_verifier_posts_in_progress_and_finished():
     assert finished["metadata"]["verifierMessage"] is True
     assert finished["metadata"]["title"] == "⚖️ Verifier rejected (75%) — continue task"
     assert "Verifier score: 75%" in finished["text"]
-    assert "Take a NEW action" in finished["text"]
+    assert "Reasoning: good" in finished["text"]
+    assert "fresh tool evidence" not in finished["text"]
     # Structured output rendered as Extracted Output
     assert "Extracted Output" in finished["text"]
     assert "42" in finished["text"]

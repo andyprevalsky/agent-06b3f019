@@ -2,6 +2,7 @@ import { Router, type Response } from 'express';
 import { authenticate, authenticateInternal, type AuthRequest } from '../../providers/auth';
 import { callerCanAccessAgent } from '../../providers/agentAccess';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { isBoundArchiveId } from '../../providers/llmArchiveRecord';
 import * as service from './service';
 import type {
   AgentFinalizeRequest,
@@ -15,6 +16,11 @@ router.post(
   '/artifacts',
   authenticateInternal,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
+    const posted = (req.body as { rootAgentId?: unknown } | null)?.rootAgentId;
+    if (!isBoundArchiveId(posted)) {
+      res.status(400).json({ error: 'Archive rootAgentId must be a bound root id' });
+      return;
+    }
     try {
       res.json(await service.storeWorkerArtifacts(req.body));
     } catch (error) {
@@ -35,6 +41,10 @@ router.post(
     const body = req.body as StoreEncryptedArtifactRequest;
     if (typeof body.rootAgentId !== 'string' || typeof body.path !== 'string') {
       res.status(400).json({ error: 'rootAgentId and path are required' });
+      return;
+    }
+    if (!isBoundArchiveId(body.rootAgentId)) {
+      res.status(400).json({ error: 'Archive rootAgentId must be a bound root id' });
       return;
     }
     if (

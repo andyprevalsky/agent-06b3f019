@@ -56,6 +56,7 @@ export const STRANDED_MIN_AGE_MS = 30_000;
 const WORKFLOW_TASK_COMPLETED_EVENT = 7;
 const HISTORY_PAGE_SIZE = 20;
 import type { CodeCliSettingsOverride } from './codeAgentModels';
+import { resolveArchiveRoot } from './archiveRootResolver';
 
 export const CODE_AGENT_RESUME_WORKFLOW = 'CodeAgentResumeWorkflow';
 
@@ -72,6 +73,8 @@ export interface CodeAgentResumeRequest {
   attachments: Array<Record<string, unknown>>;
   /** The typed turn's model / effort / speed (the first resumed turn runs on them). */
   cli_settings?: CodeCliSettingsOverride;
+  /** Archive root of the agent tree (busId ?? id); stamped by startResumeRun. */
+  root_agent_id?: string;
 }
 
 /** Whether a turn's supervised resume run exists (any status). */
@@ -110,8 +113,15 @@ export class ResumeWorkersUpdatingError extends Error {
 async function startResumeRun(
   workflowType: string,
   workflowId: string,
-  request: CodeAgentResumeRequest | BrowserAgentResumeRequest
+  unboundRequest: CodeAgentResumeRequest | BrowserAgentResumeRequest
 ): Promise<void> {
+  // Every LLM record the resumed run archives must land in the tree's ROOT bundle;
+  // the worker stamps this root on each activity (no per-activity lookups).
+  const request = {
+    ...unboundRequest,
+    root_agent_id:
+      unboundRequest.root_agent_id ?? (await resolveArchiveRoot(unboundRequest.agent_id)),
+  };
   const client = await getTemporalClient();
   const taskQueue = await getCurrentAgentQueue();
   // A held deploy keeps the pointer on workers that predate this type: never strand it.
@@ -390,6 +400,8 @@ export interface BrowserAgentResumeRequest {
   /** The spawn's own output schema and files (pointers resolved from the owner's messages). */
   output_schema?: Record<string, unknown> | null;
   attachments?: Array<Record<string, unknown>>;
+  /** Archive root of the agent tree (busId ?? id); stamped by startResumeRun. */
+  root_agent_id?: string;
 }
 
 /**

@@ -511,6 +511,7 @@ export async function classifyChallengeWithLlm(
       dump_context: {
         call_site: 'challenge_llm_classifier',
         agent_id: billing.agentId,
+        archive_scope: { agentId: billing.agentId, userId: billing.userId },
         config: {
           user_id: billing.userId ?? null,
           url: context.url.slice(0, 200),

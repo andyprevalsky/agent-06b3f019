@@ -1213,13 +1213,13 @@ def build_verifier_context_messages(
         if role == "ASSISTANT":
             if metadata.get("plannedToolName") == "reasoning":
                 reasoning_payload = {
-                    "tool_name": "reasoning",
+                    "source": "reasoning",
                     "result": text,
                 }
                 dag_task_index = metadata.get("dagTaskIndex")
                 if isinstance(dag_task_index, int):
                     reasoning_payload["dag_task_index"] = dag_task_index
-                current_batch.append("TOOL_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str))
+                current_batch.append("AUTHORED_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str))
             _append_file_evidence(msg)
             continue
 
@@ -1706,14 +1706,21 @@ def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[
             first_execute_idx = idx
             break
 
-    if first_execute_idx is None:
-        boundary_idx: Optional[int] = None
-        for idx, msg in enumerate(sorted_context):
-            if _is_execute_boundary_message(msg):
-                boundary_idx = idx
-        if boundary_idx is None:
-            return context
+    boundary_idx: Optional[int] = None
+    transition_idx: Optional[int] = None
+    for idx, msg in enumerate(sorted_context):
+        if _is_execute_boundary_message(msg):
+            boundary_idx = idx
+            if (msg.get("metadata") or {}).get("toolName") == "attempt_completion":
+                transition_idx = idx
+    if transition_idx is not None:
+        # DAG reasoning can precede the first EXECUTE-tagged status chip.
+        # The explicit transition already establishes that work as execution.
+        first_execute_idx = min(first_execute_idx, transition_idx + 1) if first_execute_idx is not None else transition_idx + 1
+    elif first_execute_idx is None and boundary_idx is not None:
         first_execute_idx = boundary_idx + 1
+    if first_execute_idx is None:
+        return context
 
     execute_context: List[Dict[str, Any]] = []
     if goal_idx is not None and goal_idx < first_execute_idx:
@@ -3114,6 +3121,7 @@ async def call_llm_structured_streaming(
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
     reserved_tool_call_ids: frozenset[str] = frozenset(),  # Stored ids new tool calls must not reuse
+    include_reasoning_in_response: bool = True,  # Authored-output callers keep the provider's answer field exact
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
@@ -3772,6 +3780,7 @@ async def call_llm_structured_streaming(
                 tool_choice=tool_choice,
                 context_tools=context_tools,
                 reserved_tool_call_ids=reserved_tool_call_ids,
+                include_reasoning_in_response=include_reasoning_in_response,
                 _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
                 _parse_retry_attempt=_parse_retry_attempt,
@@ -3985,7 +3994,7 @@ async def call_llm_structured_streaming(
 
             combined_reasoning = "\n\n".join(part for part in combined_reasoning_parts if part)
 
-            if combined_reasoning and "response" in parsed_content:
+            if include_reasoning_in_response and combined_reasoning and "response" in parsed_content:
                 parsed_content["response"] = combined_reasoning + "\n\n" + parsed_content["response"]
 
             response = response_model.model_validate(parsed_content)
@@ -4070,6 +4079,7 @@ async def call_llm_structured_streaming(
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
                     reserved_tool_call_ids=reserved_tool_call_ids,
+                    include_reasoning_in_response=include_reasoning_in_response,
                     _exclude_anthropic_family=_exclude_anthropic_family,
                     _is_escalation=_is_escalation,
                     _parse_retry_attempt=_parse_retry_attempt + 1,
@@ -4233,6 +4243,19 @@ async def call_llm_structured_streaming(
     final_response = None
     chunk_count = 0
 
+    direct_dump = _archive_direct_openrouter_start(
+        call_site,
+        messages,
+        model=model,
+        agent_id=agent_id,
+        config={
+            "mode": "instructor_json_partial",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "response_model": response_model.__name__ if response_model else None,
+            **extra_args,
+        },
+    )
     # Use create_partial for streaming
     try:
         async for partial in client.chat.completions.create_partial(
@@ -4269,15 +4292,29 @@ async def call_llm_structured_streaming(
         if accumulated_text and accumulated_text != last_emitted_for_chunk:
             await on_chunk(accumulated_text, len(accumulated_text) // 4)
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancelled:
         logger.info("⏹️ OpenRouter streaming cancelled (asyncio.CancelledError)")
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(final_response, model, cancelled)
+        )
         raise
     except Exception as e:
         logger.error(f"Streaming LLM call failed: {str(e)}", model=model)
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(final_response, model, e)
+        )
         raise
 
     if final_response is None:
-        raise ValueError(f"Streaming LLM returned no response (model={model})")
+        empty = ValueError(f"Streaming LLM returned no response (model={model})")
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(None, model, empty)
+        )
+        raise empty
+
+    # The archive keeps the model's output exactly as received; deduplication
+    # below shapes only the response returned to the caller.
+    archived_response = _direct_openrouter_response_snapshot(final_response)
 
     # Deduplicate single-call-per-step tools (keep only first occurrence)
     # These tools should never be called more than once in the same response
@@ -4302,8 +4339,74 @@ async def call_llm_structured_streaming(
         "total_tokens": estimated_tokens,
         "cancelled": False,
     }
+    _archive_direct_openrouter_final(
+        direct_dump,
+        model=model,
+        output={
+            **archived_response,
+            "usage": {**usage, "estimated": True},
+            "actual_model": model,
+        },
+    )
 
     return final_response, usage, []  # No tool detection in OpenRouter path
+
+
+def _archive_direct_openrouter_start(
+    call_site: str,
+    messages: List[Dict[str, Any]],
+    *,
+    model: str,
+    agent_id: Optional[str],
+    config: Dict[str, Any],
+) -> Optional[str]:
+    """Start record for a non-Rose (direct OpenRouter SDK) call; never raises."""
+    try:
+        from helpers.observability import dump_llm_context
+
+        return dump_llm_context(
+            call_site,
+            messages,
+            agent_id=agent_id,
+            model=model,
+            config={"provider": "openrouter_direct", **config},
+        )
+    except Exception:
+        logger.debug("llm.direct_openrouter.dump_start_failed", call_site=call_site, exc_info=True)
+        return None
+
+
+def _direct_openrouter_response_snapshot(response: Any) -> Dict[str, Any]:
+    """Serialized view of an Instructor (partial) response at this moment."""
+    return {
+        "content": response.model_dump_json() if hasattr(response, "model_dump_json") else str(response),
+        "structured": response.model_dump() if hasattr(response, "model_dump") else None,
+    }
+
+
+def _direct_openrouter_terminal_output(partial: Any, model: str, error: BaseException) -> Dict[str, Any]:
+    """Final record for a direct call that failed, was cancelled or streamed nothing.
+
+    Runs inside the caller's except block, so it never raises over the original error.
+    """
+    output: Dict[str, Any] = {"content": "", "structured": None}
+    if partial is not None:
+        try:
+            output = _direct_openrouter_response_snapshot(partial)
+        except Exception:
+            logger.debug("llm.direct_openrouter.partial_snapshot_failed", exc_info=True)
+    return {**output, "actual_model": model, "error": {"type": type(error).__name__, "message": str(error)}}
+
+
+def _archive_direct_openrouter_final(handle: Optional[str], *, model: Optional[str], output: Dict[str, Any]) -> None:
+    if not handle:
+        return
+    try:
+        from helpers.observability import update_llm_dump
+
+        update_llm_dump(handle, model=model, output={"provider": "openrouter_direct", **output})
+    except Exception:
+        logger.debug("llm.direct_openrouter.dump_final_failed", exc_info=True)
 
 
 def _extract_completed_tool_calls(accumulated_json: str) -> List[Dict[str, Any]]:
@@ -4728,13 +4831,51 @@ async def call_llm(
         # Use OpenRouter for all other models
         client = AsyncOpenAI(api_key=config.openrouter.api_key, base_url=config.openrouter.base_url)
 
-        # Call OpenRouter
-        response = await client.chat.completions.create(
+        direct_dump = _archive_direct_openrouter_start(
+            call_site,
+            messages,
             model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=effective_response_format,
+            agent_id=agent_id,
+            config={
+                "mode": "chat_completions",
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": effective_response_format,
+            },
+        )
+        # Call OpenRouter
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=effective_response_format,
+            )
+        except (Exception, asyncio.CancelledError) as direct_error:
+            _archive_direct_openrouter_final(
+                direct_dump, model=model, output=_direct_openrouter_terminal_output(None, model, direct_error)
+            )
+            raise
+        direct_message = response.choices[0].message.model_dump() if response.choices else {}
+        _archive_direct_openrouter_final(
+            direct_dump,
+            model=response.model,
+            output={
+                "content": direct_message.get("content") or "",
+                "reasoning": direct_message.get("reasoning") or "",
+                "reasoning_blocks": [
+                    {"type": "openrouter_reasoning_detail", "raw": detail}
+                    for detail in direct_message.get("reasoning_details") or []
+                ],
+                "tool_calls": direct_message.get("tool_calls") or [],
+                "message": direct_message,
+                "usage": {
+                    **(response.usage.model_dump() if response.usage else {}),
+                    "finish_reason": response.choices[0].finish_reason if response.choices else None,
+                },
+                "actual_model": response.model,
+            },
         )
 
         # Log full response to debug

@@ -166,6 +166,51 @@ def decode(raw: dict, snapshot: dict, prompt_version: str) -> dict:
     return estimate
 
 
+TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+
+
+def _archive_jev_request(snapshot: dict, body: dict, prompt_version: str) -> str | None:
+    """Archive the exact TypeSafe request as a v2 start record in the root bundle.
+
+    Kept out of the ClickHouse log copy: request bodies never enter logs.
+    """
+    from helpers.observability import dump_llm_context
+
+    return dump_llm_context(
+        "jev_progress",
+        [],
+        agent_id=snapshot["agentId"],
+        model=MODEL,
+        config={
+            "provider": "typesafe",
+            "endpoint": TYPESAFE_URL,
+            "prompt_version": prompt_version,
+            "request_body": body,
+            "task_id": snapshot.get("taskId"),
+            "sequence": snapshot.get("sequence"),
+        },
+        log_copy=False,
+    )
+
+
+def _archive_jev_result(dump: str | None, raw: Any, estimate: dict | None, error: BaseException | None) -> None:
+    if not dump:
+        return
+    from helpers.observability import update_llm_dump
+
+    output: dict = {
+        "content": json.dumps(raw, ensure_ascii=False, default=str) if raw is not None else "",
+        "structured": raw,
+        "estimate": estimate,
+        "usage": (raw or {}).get("usage") if isinstance(raw, dict) else None,
+        "actual_model": (raw or {}).get("model") if isinstance(raw, dict) else None,
+        "provider": "typesafe",
+    }
+    if error is not None:
+        output["error"] = {"type": type(error).__name__, "message": str(error)[:500]}
+    update_llm_dump(dump, model=MODEL, output=output)
+
+
 def _prepare(snapshot: dict) -> tuple[dict, str]:
     """Pinned prompt plus the clipped request body: file, JSON and tokenizer work."""
     raw_prompt = (Path(__file__).resolve().parents[1] / "config/jev_progress_prompt.json").read_bytes()
@@ -199,13 +244,22 @@ async def _predict_jev_progress_impl(snapshot: dict) -> dict | None:
                 # Clipping a long prefix re-serializes and re-tokenizes it several
                 # times; on the loop thread that stalled the agent's own loop.
                 body, version = await asyncio.to_thread(_prepare, snapshot)
+                dump = _archive_jev_request(snapshot, body, version)
                 stage = "predict"
                 client = get_http_client()
-                response = await client.post("https://api.typesafe.ai/v1/systemone", json=body,
-                                             headers={"Authorization": f"Bearer {key}"}, timeout=20)
-                response.raise_for_status()
-                stage = "decode"
-                estimate = decode(response.json(), snapshot, version)
+                # A received response stays in the archive even when decoding rejects it.
+                raw: Any = None
+                try:
+                    response = await client.post(TYPESAFE_URL, json=body,
+                                                 headers={"Authorization": f"Bearer {key}"}, timeout=20)
+                    response.raise_for_status()
+                    stage = "decode"
+                    raw = response.json()
+                    estimate = decode(raw, snapshot, version)
+                except Exception as exc:
+                    _archive_jev_result(dump, raw, None, exc)
+                    raise
+                _archive_jev_result(dump, raw, estimate, None)
                 # Cancellation has no synchronous gap in which a terminal loop can race this publication.
                 await asyncio.sleep(0)
                 stage = "publish"
