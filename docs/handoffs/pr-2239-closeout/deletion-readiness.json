@@ -80,7 +80,7 @@
     "scripts/lib/__pycache__/": "reproducible"
   },
   "live_processes": [],
-  "manifest": "/tmp/rca-drain/manifest.json",
+  "manifest": "docs/handoffs/pr-2239-closeout/closeout-manifest.json",
   "open_items": [],
   "pr": 2239,
   "preserved_refs": {
@@ -746,9 +746,7 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-2239-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
