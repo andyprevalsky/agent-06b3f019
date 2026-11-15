@@ -19,6 +19,7 @@ PASS-verified-by-descendant with the live SHA, never relabelled an exact PASS.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
@@ -57,11 +58,14 @@ SCHEMA = 1
 
 # deploy.md Phase 1 path rules (CHANGED_BACKEND / CHANGED_AGENTCARD_PAYMENT).
 BACKEND_RE = re.compile(r'^(back-end/|scripts/run-bench-hub-poller$)')
-AGENTCARD_RE = re.compile(
-    r'^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|'
-    r'src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|'
-    r'agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|'
-    r'front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))')
+# AgentCard runs only when AgentCard infra changed (Andy 2026-11-15): one path set, owned by the predeploy selector.
+_SELECTOR_SPEC = importlib.util.spec_from_file_location(
+    'deploy_prod_select_predeploy_benches',
+    Path(__file__).resolve().parents[1] / 'agents' / 'benchmarks' / 'select_predeploy_benches.py')
+assert _SELECTOR_SPEC and _SELECTOR_SPEC.loader
+_SELECTOR = sys.modules.setdefault(_SELECTOR_SPEC.name, importlib.util.module_from_spec(_SELECTOR_SPEC))
+_SELECTOR_SPEC.loader.exec_module(_SELECTOR)
+AGENTCARD_RE: re.Pattern[str] = _SELECTOR.AGENTCARD_INFRA_PATH_RE
 LEDGER_PREFIX = 'agents/benchmarks/history/'
 AGENTS_WORKFLOW_PATH = '.github/workflows/deploy-agents.yml'
 # Step 13w: `grep -F` substrings. Build inputs force --build-wmh + --refresh-wmh
@@ -418,7 +422,9 @@ def resume_argv(job_id: str) -> list[str]:
 MIGRATION_ARGV = ['npx', 'tsx', 'scripts/validate-prod-workflow-migration.ts', '--execute']
 SMOKE_ARGV = ['npx', 'tsx', 'scripts/prod-endpoint-smoke.ts']
 AGENTCARD_ARGV = ['scripts/run-bench', AGENTCARD_TASK]
-WMH_ARGV = ['scripts/run-bench', 'raise-5m-rose-labs-brex', '--sim-on', 'raise-5m-rose-labs-brex']
+# --wait: a fleet run detaches by default and its launcher exits 0 at launch; the lane must return the
+# detached controller's own exit status (task FAIL/CHILDFAIL is non-zero), never the launch receipt.
+WMH_ARGV = ['scripts/run-bench', 'raise-5m-rose-labs-brex', '--sim-on', 'raise-5m-rose-labs-brex', '--wait']
 WMH_BUILD_ARGV = (['bash', 'scripts/run-bench-cloud', '--build-wmh'], ['bash', 'scripts/run-bench-cloud', '--refresh-wmh'])
 
 
@@ -603,9 +609,15 @@ def lane_fly(ctx: Ctx) -> Result:
             return False, f'Fly lane blocked (production exit {code}): {receipt.get("error") or "see [fly] output"}', code
         resume = show(resume_argv(job), cwd=ctx.root / 'back-end', root=ctx.root, env_file='back-end')
         if not ctx.resume_fly:
-            return False, (f'durable job {job} is {stage}, not SUCCEEDED; resume the SAME job: `{resume}` '
-                           '(or rerun with --resume-fly)'), code
-        resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end')
+            return False, (f'durable job {job} is {stage}, not SUCCEEDED; resume the SAME job: `{resume}` with '
+                           'FLY_API_TOKEN from agents/.env exported (or rerun with --resume-fly)'), code
+        # The cutover child needs FLY_API_TOKEN, which only agents/.env holds; the environment wins.
+        token = {} if ctx.environ.get('FLY_API_TOKEN') else {
+            key: value for key, value in ctx.dotenv('agents').items() if key == 'FLY_API_TOKEN' and value}
+        if not (ctx.environ.get('FLY_API_TOKEN') or token):
+            return False, (f'durable job {job} is {stage}; resuming it needs FLY_API_TOKEN: export it or add it to '
+                           'agents/.env, then rerun with --resume-fly'), 2
+        resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end', hidden=token)
         if resumed != 0:
             return False, f'resume of durable job {job} exited {resumed}', resumed
         code = ctx.sh('fly', production_argv(ctx.sha, ctx.state_dir))

@@ -2,11 +2,11 @@
  * STATE MACHINE: IntegrationSections
  *
  * [MOUNTED] --> renders each section card delegating to domain hooks.
- * Signed-in accounts also get CLI setup, with backend-verified connection state.
  *
  * Meeting note taker: shared Granola/Fireflies provider cards and hooks.
- * GitHub Repos (signed in, before the meeting note takers): GithubReposSection over useGithubRepos
- * (list incl. auto-imported repos, connect with an optional folder, disconnect).
+ * Signed in, after File System, sharing integrationCardStyles: GitHub Repos
+ * (useGithubRepos), CLIs (verified via a setup agent), MCP servers (URL + optional
+ * API key header or OAuth via /integrations/mcp/callback; reconnect, remove).
  * Pebble Index 01 (last) opens the guided setup modal owned by Integrations.
  *
  * File System is a FE-only stub: website shows Download for Mac; Mac app
@@ -35,7 +35,7 @@ import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
 import FileSystemSection from './FileSystemSection';
-import CliIntegrationsSection from './CliIntegrationsSection';
+import ToolIntegrationSections from './ToolIntegrationSections';
 import PebbleIndexSection from './PebbleIndexSection';
 
 interface IntegrationSectionsProps {
@@ -311,15 +311,11 @@ function SecondaryIntegrationSections({
       </SearchGroup>
 
       {isFullySignedIn && (
-        <SearchGroup catalogKey="clis" search={search}>
-          <CliIntegrationsSection />
-        </SearchGroup>
-      )}
-      {isFullySignedIn && (
         <SearchGroup catalogKey="githubRepos" search={search}>
           <GithubReposSection github={github} />
         </SearchGroup>
       )}
+      {isFullySignedIn && <ToolIntegrationSections search={search} />}
       {isFullySignedIn && (
         <SearchGroup catalogKey="meetingNotes" search={search}>
           <MeetingNotesSection connections={meetingNotes} />

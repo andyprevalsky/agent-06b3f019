@@ -3663,6 +3663,43 @@ def _payment_reconciliation_timeout(
     return RuntimeError(message)
 
 
+async def _ledger_bound_release_stall(
+    base_url: str, agent_id: str, task: BenchmarkTask, lifecycle: object, error: str
+) -> Optional[AgentCardReleaseStall]:
+    """After a failed final read, accept the exact stall only while the owned ledger still holds it.
+
+    The last successful lifecycle observation inside the unchanged deadline must already be the
+    exact release stall. AgentCard's org-token 401/429 storms can fail every later provider-backed
+    read, so bind that observation to a DB-only read of the owned stack's ledger (no provider call):
+    the same purchase must still be HELD/RECLAIMING with the same card, transfer, payment intent and
+    total. Runs without an owned-stack ledger, or a ledger that left the stall, stay strict.
+    """
+    if not (_agentcard_release_skip_enabled() and _agentcard_release_skip_lifecycle(task.name, lifecycle)):
+        return None
+    try:
+        snapshot = await asyncio.to_thread(cloud_batch_cleanup.exact_root_sessions, base_url, agent_id)
+        purchase, transfer = lifecycle["purchase"], lifecycle["orgTransfer"]
+        rows = [row for row in snapshot["purchase_cleanup"] if row["purchase_id"] == purchase["id"]]
+    except Exception:
+        return None
+    if not (
+        len(rows) == 1
+        and rows[0].get("status") == "HELD"
+        and rows[0].get("funding_status") == "RECLAIMING"
+        and rows[0].get("card_id") == purchase.get("cardId")
+        and rows[0].get("provider_transfer_id") == transfer.get("id")
+        and rows[0].get("stripe_payment_intent_id") == purchase.get("stripePaymentIntentId")
+        and rows[0].get("total_cents") == purchase.get("totalCents")
+    ):
+        return None
+    return AgentCardReleaseStall(
+        "Payment lifecycle did not reach the expected terminal state before timeout: "
+        f"{error}{_payment_lifecycle_settlement_state(lifecycle)}; the final provider read failed and the "
+        "owned ledger still holds this exact stall",
+        lifecycle=lifecycle,
+    )
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -3712,6 +3749,9 @@ async def _wait_for_expected_payment_lifecycle(
             return lifecycle
         if time.monotonic() >= deadline:
             if last_fetch_error is not None:
+                stall = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error)
+                if stall is not None:
+                    raise stall from last_fetch_error
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
@@ -3777,9 +3817,12 @@ async def _wait_for_expected_payment_lifecycle(
             if isinstance(fetch_error, _PaymentReconciliationDeadline) or (
                 owned_timeout is not None and owned_timeout.expired()
             ):
-                raise _payment_reconciliation_timeout(
+                timeout = _payment_reconciliation_timeout(
                     error, lifecycle, task_name=task.name, allow_release_skip=last_fetch_error is None
-                ) from fetch_error
+                )
+                if last_fetch_error is not None and not isinstance(timeout, AgentCardReleaseStall):
+                    timeout = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error) or timeout
+                raise timeout from fetch_error
             # Lifecycle reads join local DB state with several read-only provider
             # views. A single transient provider timeout must not turn a
             # successfully compensated purchase into a benchmark failure. Keep
@@ -3790,6 +3833,9 @@ async def _wait_for_expected_payment_lifecycle(
             consecutive_fetch_errors += 1
             last_fetch_error = fetch_error
             if time.monotonic() >= deadline:
+                stall = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error)
+                if stall is not None:
+                    raise stall from fetch_error
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {fetch_error}"
@@ -3805,6 +3851,9 @@ PAYMENT_CLEANUP_TIMEOUT_SECONDS = 180
 # Owned-cleanup release-stall observations run inside PAYMENT_CLEANUP_TIMEOUT_SECONDS
 # at the task reconciliation poll cadence; they never extend that deadline.
 PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS = 10
+# Owned cleanup's abandonment start is bounded by PAYMENT_CLEANUP_TIMEOUT_SECONDS alone. Its
+# shortest retry wait is 2 s, so this attempt count can never end the drain before that deadline.
+PAYMENT_CLEANUP_ABANDON_ATTEMPTS = PAYMENT_CLEANUP_TIMEOUT_SECONDS // 2 + 1
 # Matches the existing stale RECLAIMING lease in purchaseCleanup.ts. This is
 # retry eligibility within the unchanged 420-second reconciliation window.
 PAYMENT_RECLAIM_RETRY_AFTER_SECONDS = 120
@@ -3951,14 +4000,27 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
     headers = await _api_headers()
     for attempt, retry_delay in enumerate((*AGENTCARD_SETUP_RETRY_DELAYS_SECONDS, None), start=1):
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
-                headers=headers,
-                # The AgentCard integration must be reset/completed for the user the task actually runs
-                # as. Hardcoding the default benchmark user left the run user's integration untouched,
-                # so the setup fixture silently configured the wrong account.
-                json={"userId": _current_benchmark_user_id(), "action": action},
-            )
+            try:
+                resp = await client.post(
+                    f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
+                    headers=headers,
+                    # The AgentCard integration must be reset/completed for the user the task actually
+                    # runs as. Hardcoding the default benchmark user left the run user's integration
+                    # untouched, so the setup fixture silently configured the wrong account.
+                    json={"userId": _current_benchmark_user_id(), "action": action},
+                )
+            except httpx.TimeoutException as timeout_error:
+                # The backend rides out an org 429/401 storm inside one request, with its own retry
+                # budget, so one request can outlast this unchanged per-request bound. Every action is
+                # idempotent, so a timed-out attempt spends one of the same retries as a 5xx.
+                if retry_delay is None:
+                    raise
+                print(
+                    f"    ⚠ AgentCard setup attempt {attempt} timed out; retrying in {retry_delay}s "
+                    f"({type(timeout_error).__name__})"
+                )
+                await asyncio.sleep(retry_delay)
+                continue
         if resp.status_code == 200:
             return resp.json()
         failure = f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}"
@@ -7190,10 +7252,14 @@ async def _finalize_owned_root_payments(
                 # may be best effort, so only the next durable ledger read can
                 # complete this contract, including for non-abandonment tasks.
                 try:
+                    # A throttled org can refuse the abandon for minutes; the cleanup deadline is
+                    # the one authoritative bound, never a separate shorter attempt count.
                     await _start_payment_abandonment_with_recovery(
                         base_url,
                         agent_id,
+                        max_attempts=PAYMENT_CLEANUP_ABANDON_ATTEMPTS,
                         abandon_payment=abandon_test_payment,
+                        fetch_lifecycle=get_test_payment_lifecycle,
                     )
                 except Exception as error:
                     errors.append(f"{agent_id}: {str(error) or type(error).__name__}")

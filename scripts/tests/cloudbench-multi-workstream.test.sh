@@ -2974,6 +2974,7 @@ os.execvp(sys.argv[1], sys.argv[1:])')
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
         -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
         -u FLY_API_TOKEN -u FLY_ACCESS_TOKEN -u GITHUB_TOKEN \
+        -u R2_ACCOUNT_ID -u R2_ACCESS_KEY_ID -u R2_SECRET_ACCESS_KEY -u R2_BUCKET_TRACE_ARCHIVE \
         PATH="$FIXTURE_STORAGE:$FAKE_BIN:$PATH" \
         PYTHONPATH="$FIXTURE_STORAGE${PYTHONPATH:+:$PYTHONPATH}" \
         CLOUDBENCH_TEST_STORAGE_SCOPE="$TMP_ROOT" \
@@ -3195,6 +3196,14 @@ PY_RESET
 assert_and_reset_unsealed_failed_owner() {  # <registry> <controller-log> [task verdict]
     grep -qxF "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" "$2" ||
         { echo "missing unsealed runtime-evidence retention record in $2" >&2; return 1; }
+    # The fixture has no R2 trace archive: an attempted default capture must fail
+    # and retain loudly, and nothing may ever be destroyed as archived.
+    ! grep -qF "📦 unsealed guest evidence archived to R2" "$2" ||
+        { echo "unsealed guest was destroyed as archived without an R2 archive in $2" >&2; return 1; }
+    if grep -qF "❌❌ evidence archive unavailable" "$2"; then
+        grep -qF "❌❌ evidence archive FAILED: unsealed guests stay RETAINED" "$2" ||
+            { echo "missing loud evidence-archive retention record in $2" >&2; return 1; }
+    fi
     python3 - "$1" "${3:-failed}" "$FAKE_DIR" <<'PY_UNSEALED'
 import json
 from pathlib import Path

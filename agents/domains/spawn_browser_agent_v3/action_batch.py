@@ -5,11 +5,40 @@ or any unsuccessful/intercepted action discards the remainder with call IDs.
 """
 from copy import deepcopy
 
+from browser_tools.schemas import PHONE_NAVIGATION_OPERATIONS, PHONE_READ_OPERATIONS, phone_call_batchable
+
 
 CONTINUE_AFTER = frozenset({
     'input_text', 'select_dropdown', 'press_key', 'read_browser_state',
     'screenshot', 'read_network_requests', 'read_console_logs',
 })
+
+
+def _phone_read(action):
+    params = action.get('params') or {}
+    return action.get('action') == 'phone' and (
+        params.get('mode') == 'status'
+        or (params.get('mode') == 'operation' and params.get('operation') in PHONE_READ_OPERATIONS))
+
+
+def _phone_lease(snapshot):
+    """Exact active claim observed for this decision, else None."""
+    view = (snapshot or {}).get('interaction') if (snapshot or {}).get('enabled') is True else None
+    lease = (view or {}).get('lease') or {}
+    cursor = (view or {}).get('cursor')
+    if (lease.get('status') != 'ACTIVE' or not isinstance(lease.get('id'), str)
+            or not isinstance(cursor, int) or isinstance(cursor, bool)):
+        return None
+    return lease['id'], cursor
+
+
+def _phone_fence_holds(fence, snapshot):
+    """A queued phone call runs only on the cursor its predecessor left behind."""
+    if fence is None or _phone_lease(snapshot) != fence:
+        return False
+    view = snapshot['interaction']
+    return (not (view.get('lease') or {}).get('attentionRequestId')
+            and (view.get('pendingOperation') or {}).get('status') not in {'CONNECTING', 'RUNNING', 'UNKNOWN'})
 
 
 def _node_identity(node):
@@ -59,6 +88,8 @@ class BrowserActionBatch:
         self._started = False
         self._references = {}
         self._cached = False
+        self._phone_fence = None
+        self._reads_only = False
         self.is_continuation = False
 
     def discard_pending(self, reason):
@@ -95,10 +126,12 @@ class BrowserActionBatch:
                          for item in actions if item['action'].get('index') is not None}
         self.stream = stream
         self._cached = bool((result.get('usage') or {}).get('from_fast_cache'))
+        self._phone_fence = _phone_lease(result.get('_phone_snapshot'))
+        self._reads_only = False
         self._base = {key: value for key, value in result.items() if key not in {'action', 'batch_actions'}}
         return self._take(first=True)
 
-    def _take(self, first=False):
+    def _take(self, first=False, phone=None):
         item = self.pending.pop(0)
         self.current_ids = item['tool_call_ids']
         self._selected = item
@@ -108,13 +141,23 @@ class BrowserActionBatch:
         self.stream.select_tools(self.current_ids)
         action = item['action'] if first else {**item['action'], 'thinking': None}
         base = self._base if first else {key: value for key, value in self._base.items() if key != '_fast_cache_browser_target'}
+        if not first and '_phone_snapshot' in base:
+            # Each queued call carries the loop's fresh observation, never the
+            # planning snapshot: the server CAS sees the current cursor.
+            base = {**base, '_phone_snapshot': phone or {}}
         return {**base, 'action': action, 'tool_call_id': self.current_ids[0],
                 **({} if first else {'usage': {}, 'timing': {}, '_batch_continuation': True})}
 
-    async def next(self, dom, state):
+    async def next(self, dom, state, phone=None):
         if not self.pending:
             return None
         action = self.pending[0]['action']
+        if self._reads_only and not _phone_read(action):
+            await self.discard('Batch remainder skipped: observe the phone screen before acting again.')
+            return None
+        if action.get('action') == 'phone' and not _phone_fence_holds(self._phone_fence, phone):
+            await self.discard('Batch remainder skipped: phone lease, cursor or attention changed.')
+            return None
         reference = (action.get('params') or {}).get('observation_ref')
         if reference:
             bound = self._references.get((reference['observation_id'], reference['target']))
@@ -139,7 +182,7 @@ class BrowserActionBatch:
         if not self._completed or state != self._context or not same_target:
             await self.discard('Batch remainder skipped: outcome, page, target, authority or user input changed.')
             return None
-        return self._take()
+        return self._take(phone=phone)
 
     def current_matches(self, dom, state):
         if self._selected is None or state != self._context:
@@ -183,6 +226,26 @@ class BrowserActionBatch:
             self._context = deepcopy(state)
         return {**result, 'observation_id': observation_id, 'target_refs': refs}
 
+    def _phone_continues(self, action, result):
+        if action.get('action') != 'phone':
+            return False
+        params = action.get('params') or {}
+        if not phone_call_batchable(params):
+            return False
+        if params.get('mode') == 'status':
+            cursor = (result.get('phone') or {}).get('cursor')
+        else:
+            operation = result.get('operation') or {}
+            if operation.get('status') != 'SUCCEEDED':
+                return False
+            # The receipt cursor is the lease cursor this call left behind.
+            cursor = operation.get('cursor')
+        if self._phone_fence is None or not isinstance(cursor, int) or isinstance(cursor, bool):
+            return False
+        self._phone_fence = (self._phone_fence[0], cursor)
+        self._reads_only = self._reads_only or params.get('operation') in PHONE_NAVIGATION_OPERATIONS
+        return True
+
     def started(self):
         self._started = True
 
@@ -192,7 +255,7 @@ class BrowserActionBatch:
         successful = isinstance(result, dict) and result.get('success', True) is True
         self._completed = successful and not self._cached and not result.get('status') in {
             'needs_write_approval', 'awaiting_payment_card_approval', 'paused', 'cancelled',
-        } and action.get('action') in CONTINUE_AFTER
+        } and (action.get('action') in CONTINUE_AFTER or self._phone_continues(action, result))
         # Enter submits a form; later actions must observe its outcome first.
         if action.get('action') == 'press_key' and str((action.get('params') or {}).get('key', '')).lower() in {'enter', 'return'}:
             self._completed = False

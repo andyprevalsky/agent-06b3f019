@@ -20,9 +20,10 @@ tags:
   - provider-epoch
   - setup-verification
 sources:
+  - PR #2101
   - agent f1802539-7e5d-5a76-9028-133ad4e9fb75
 repro: back-end/src/tests/blackbox/iphone-control.continuity.cases.ts "session expiry refresh (in-op|reconciler) during an in-progress first setup keeps verified steps without promoting"
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -38,6 +39,8 @@ Why was this possible? Continuity (commits d72f77f480 / ab01056598) was designed
 ## Solution
 
 `configurationAfterConfirmedStop` keeps every existing fence (disabled device, account, owner phone, active private input, observed sign-out). For a not-ready device with no completed configuration, it now rebinds the in-progress attempt's current non-runtime proofs to the next epoch through the same `carryChecks` logic, preserving `observedProviderEpoch`/`observedAt`. Runtime proofs still expire, and nothing is promoted to ready. A re-setup whose device still holds a completed configuration keeps the old behavior (completed path only). That is a known, untested remaining gap, outside this incident. The completed-configuration path is unchanged. Per-device O(checks) work inside the existing device lock, so 10k agents add no fan-in.
+
+Shipped: PR #2101 (merge cae118243454), production lanes PASS. The 2026-11-15 live setup (agent 33712aad) carried its verified steps through to the Gmail sign-in.
 
 ## Human feedback
 

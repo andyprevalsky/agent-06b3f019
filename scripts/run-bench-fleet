@@ -804,6 +804,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-lost-evidence-release.py" \
+       "$ROOT_DIR/scripts/cloudbench-evidence-archive.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
@@ -6793,6 +6794,30 @@ finally:
     os.close(fd)
 PYGUARD
     exec {REGISTRY_RECOVERY_GUARD_FD}< "$guard" || return 1
+    # Bash cannot open the guard close-on-exec, so every child inherits its
+    # flock. flyctl may fork a long-lived `flyctl agent` daemon that would keep
+    # the guard held after recovery exits; the original-volume capture then
+    # refuses "exact-owner recovery guard is held" (PR #1972). While the guard
+    # is held, a private PATH shim closes that one fd and then execs the real
+    # flyctl, so the process tree, `$!` and argv stay exactly flyctl's (a shell
+    # function would make `flyctl proxy ... &` return a wrapper PID). Helpers
+    # that verify the guard still receive it through --guard-fd. Inline here:
+    # callers and fixtures extract this function on its own.
+    if [ -z "${RECOVERY_GUARD_FLYCTL_SHIM_DIR:-}" ] \
+        && CLOUDBENCH_REAL_FLYCTL="$(type -P flyctl)" && [ -n "$CLOUDBENCH_REAL_FLYCTL" ]; then
+        RECOVERY_GUARD_FLYCTL_SHIM_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-guard-flyctl.XXXXXX")" \
+            || { unset RECOVERY_GUARD_FLYCTL_SHIM_DIR; exec {REGISTRY_RECOVERY_GUARD_FD}<&-; unset REGISTRY_RECOVERY_GUARD_FD; return 1; }
+        printf '%s\n' '#!/usr/bin/env bash' \
+            '[ -z "${CLOUDBENCH_FLYCTL_CLOSE_FD:-}" ] || exec {CLOUDBENCH_FLYCTL_CLOSE_FD}<&-' \
+            'exec "$CLOUDBENCH_REAL_FLYCTL" "$@"' > "$RECOVERY_GUARD_FLYCTL_SHIM_DIR/flyctl" \
+            && chmod 700 "$RECOVERY_GUARD_FLYCTL_SHIM_DIR/flyctl" \
+            || { rm -rf "$RECOVERY_GUARD_FLYCTL_SHIM_DIR"; unset RECOVERY_GUARD_FLYCTL_SHIM_DIR; exec {REGISTRY_RECOVERY_GUARD_FD}<&-; unset REGISTRY_RECOVERY_GUARD_FD; return 1; }
+        RECOVERY_GUARD_SAVED_PATH="$PATH"
+        export CLOUDBENCH_REAL_FLYCTL CLOUDBENCH_FLYCTL_CLOSE_FD="$REGISTRY_RECOVERY_GUARD_FD"
+        export PATH="$RECOVERY_GUARD_FLYCTL_SHIM_DIR:$PATH"
+    else
+        unset CLOUDBENCH_REAL_FLYCTL
+    fi
     local guard_status=1
     for _ in $(seq 1 30); do
         guard_status=0
@@ -6849,6 +6874,12 @@ PYGUARD
 }
 
 release_registry_recovery_guard() {
+    if [ -n "${RECOVERY_GUARD_FLYCTL_SHIM_DIR:-}" ]; then
+        export PATH="$RECOVERY_GUARD_SAVED_PATH"
+        rm -f "$RECOVERY_GUARD_FLYCTL_SHIM_DIR/flyctl"
+        rmdir "$RECOVERY_GUARD_FLYCTL_SHIM_DIR" 2>/dev/null || true
+        unset CLOUDBENCH_REAL_FLYCTL CLOUDBENCH_FLYCTL_CLOSE_FD RECOVERY_GUARD_SAVED_PATH RECOVERY_GUARD_FLYCTL_SHIM_DIR
+    fi
     if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
         exec {REGISTRY_RECOVERY_GUARD_FD}<&-
         unset REGISTRY_RECOVERY_GUARD_FD
@@ -15917,6 +15948,82 @@ except Exception as error:
 PYBILLING
 }
 
+fleet_worker_evidence_verified() {  # read-only: primary archives never replace a worker's runtime evidence
+    local j out base wid token
+    for j in "${!CHILD_OUT[@]}"; do
+        out="${CHILD_OUT[$j]}"
+        [ -n "$out" ] || continue
+        cloudbench_validate_worker_evidence_coverage "$out" "${CHILD_MACHINE[$j]}" "$FLEET_OWNER_TOKEN-$j" || return 1
+        for base in "$out"/worker-runtime-evidence/*; do
+            [ -e "$base" ] || [ -L "$base" ] || continue
+            wid="${base##*/}"
+            [ -d "$base" ] && [ ! -L "$base" ] && [ -f "$base/capture/manifest.json" ] \
+                && [ ! -L "$base/capture/manifest.json" ] || return 1
+            token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_token"])' "$base/owner.json")" \
+                || return 1
+            python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-evidence.py" verify-directory \
+                --run-token "$token" --machine-id "$wid" --output "$base/capture" > /dev/null || return 1
+        done
+    done
+}
+
+fleet_archive_unsealed_disposable_evidence() {  # 0 only when every owned guest is archived and stopped
+    # Default for a terminal, failed or cancelled guest whose runtime never sealed
+    # (Andy, 2026-11-14): copy its original volume evidence to the private R2 trace
+    # archive (smoke-evidence/<machine>/<ts>/, sha256 manifest, verified read-back),
+    # restore its stopped original config, and let the exact-owner reap destroy it
+    # instead of retaining a ~40 GB volume. Any failure retains the whole owner.
+    [ "${FLEET_REGISTRY_PUBLISHED:-0}" = 1 ] && fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
+    # Preconfiguration phases keep evidence outside the guest volume; this archive cannot replace it.
+    if [ -e "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ] || [ -L "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ] \
+        || fleet_has_replaced_preconfig_phase "$FLEET_REGISTRY_DIR"; then
+        echo "❌❌ evidence archive: preconfiguration evidence phase present; not archiving" >&2
+        return 1
+    fi
+    if ! fleet_worker_evidence_verified; then
+        echo "❌❌ evidence archive: worker runtime evidence is unverified; primary archives cannot replace it" >&2
+        return 1
+    fi
+    local record id volume j index pid failed=0 count=0 dir="$FLEET_DIR/_batch/evidence-archive"
+    local -a protected=() pids=()
+    [ -z "${WARM_ID:-}" ] || protected+=(--protected-machine "$WARM_ID")
+    [ -z "${SHARED_WARM_ID:-}" ] || protected+=(--protected-machine "$SHARED_WARM_ID")
+    mkdir -p "$dir" || return 1
+    for record in "$FLEET_REGISTRY_DIR"/clones/*; do
+        [ -e "$record" ] || [ -L "$record" ] || continue
+        id="$(registry_meta_value "$record" id)"
+        volume="$(registry_meta_value "$record" volume_id)"
+        index=""
+        for j in "${!CHILD_MACHINE[@]}"; do
+            [ "${CHILD_MACHINE[$j]}" != "$id" ] || index="$j"
+        done
+        if [ ! -f "$record" ] || [ -L "$record" ] || [ -z "$id" ] || [ -z "$volume" ] || [ -z "$index" ]; then
+            echo "❌❌ evidence archive: owned resource ${record##*/} is not an archivable primary guest" >&2
+            failed=1
+            break
+        fi
+        # 900 s capture deadline, then up to 2 x 240 s to stop and restore the original config.
+        timeout --kill-after=120 1500 \
+            python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-evidence-archive.py" \
+            capture-destroy --capture-only --app "$APP" --machine-id "$id" --volume-id "$volume" \
+            --run-token "$FLEET_OWNER_TOKEN-$index" --receipt-dir "$dir" --capture-seconds 900 \
+            --env-file "$ROOT_DIR/agents/.env" "${protected[@]}" &
+        pids+=("$!")
+        count=$((count + 1))
+        # Bounded like worker evidence transfers: four guests at a time.
+        if [ "${#pids[@]}" -ge 4 ]; then
+            for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+            pids=()
+        fi
+    done
+    for pid in "${pids[@]:-}"; do
+        [ -n "$pid" ] || continue
+        wait "$pid" || failed=1
+    done
+    [ "$failed" = 0 ] && [ "$count" -gt 0 ] || return 1
+    rm -f "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" && cloudbench_fsync_directory "$FLEET_REGISTRY_DIR"
+}
+
 fleet_verify_staged_primary_return() {  # <machine> <volume>; before exact claim release
     local id="$1" volume="$2" index out="" attempt
     local -a refresh_args=()
@@ -16158,6 +16265,7 @@ cleanup() {
     # durable evidence latch through every crash window until all primary and
     # historical worker captures are verified, including workers scaled down
     # before the benchmark finished.
+    local keep_before_evidence="${KEEP_CLONES:-0}" teardown_before_evidence="$teardown_failed"
     if ! cloudbench_collect_remaining_runtime_evidence; then
         if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" && [ "${KEEP_CLONES:-0}" != 1 ]; then
             echo "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" >&2
@@ -16170,13 +16278,27 @@ cleanup() {
         teardown_failed=1
     fi
     if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR"; then
-        fleet_record_disposable_cleanup_state "$guest_shutdown_failed" "$runtime_evidence_failed" || { ec=1; teardown_failed=1; }
+        fleet_record_disposable_cleanup_state "$guest_shutdown_failed" "$runtime_evidence_failed" \
+            || { ec=1; teardown_failed=1; teardown_before_evidence=1; }
     fi
     # Finish all data-plane reads first. Evidence retention does not authorize
     # provider release; this separate helper may only stop verified idle owned
     # Machines and retains every latch, audit, claim, file and volume.
-    if ! archived_reuse_retire_all; then ec=1; teardown_failed=1; fi
+    if ! archived_reuse_retire_all; then ec=1; teardown_failed=1; teardown_before_evidence=1; fi
     fleet_billing_stop_retained_idle "$billing_owned_joins"
+    # Unsealed evidence alone no longer retains stopped guests: archive, then reap.
+    if [ "$runtime_evidence_failed" = 1 ] && [ "$keep_before_evidence" != 1 ] \
+        && [ "$teardown_before_evidence" = 0 ] && [ "$guest_shutdown_failed" = 0 ] \
+        && [ "$billing_owned_joins" = 1 ]; then
+        if fleet_archive_unsealed_disposable_evidence; then
+            echo "📦 unsealed guest evidence archived to R2 ($FLEET_DIR/_batch/evidence-archive); destroying the guests instead of retaining them"
+            runtime_evidence_failed=0
+            KEEP_CLONES=0
+            teardown_failed=0
+        else
+            echo "❌❌ evidence archive FAILED: unsealed guests stay RETAINED (stopped Machine + volume); recover with scripts/run-bench --recover-stale-owner $FLEET_OWNER_TOKEN" >&2
+        fi
+    fi
     # SIGKILL cannot run an autoscaler's EXIT trap. Release any remaining
     # complete lease records owned by this exact controller/run under the same
     # allocator lock before the snapshotted helper is removed.

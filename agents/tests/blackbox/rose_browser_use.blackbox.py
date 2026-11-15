@@ -2787,8 +2787,9 @@ async def run_all_tests():
         "normalize_provider_input_text_batch_mixed_indexes",
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
-    from benchmarks.browser_action_batch_test import form_chain, observe_chain, full_activity_batch
+    from benchmarks.browser_action_batch_test import form_chain, observe_chain, full_activity_batch, phone_batch_contract
     await r.record_async("ordered native batch uses one model decision", form_chain)
+    await r.record_async("phone calls share one model turn in order with per-call fences", phone_batch_contract)
     await r.record_async("same-turn observed target binds before click", observe_chain)
     await r.record_async("actual browser activity consumes ordered batch", full_activity_batch)
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
@@ -3633,7 +3634,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "ad0667593d0ca516ae2c76c5b11128d8d0ab084ad38e19ce0b94437b1167c4a4", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "6e5f34b52b1f3bf075055f77ea027ecd1c16711c21808e810e136d8be49e1434", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:

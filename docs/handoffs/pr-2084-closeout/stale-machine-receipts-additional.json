@@ -1,0 +1,708 @@
+{
+ "app": "navi-whisper-lux-bench",
+ "date": "2026-11-14/15",
+ "helper": "scripts/cloudbench-evidence-archive.py capture-destroy (merged in #2084, 1a05bfd85a)",
+ "machines": [
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:34:44.615705+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "be27a3c4f1b345b4aff7c8b29d8453b9",
+   "machine_id": "781e041f397178",
+   "objects": {
+    "evidence.tar.gz": "7fad643f338d7b6c76af99ada2b617f7a683506718fca45050e9b11cad1dceb5",
+    "inventory.json": "9ad1d24bd72c8105768bff5a4468e648fc3e39c26342a6b0d5e0c732490b3dcb",
+    "machine-config.redacted.json": "6b6fbaad3c27a2165ef0d0de65d7fe5feaa97cab5cc7e39e2d22e2787b1183c5",
+    "manifest.json": "ab8302c44bd535af1ba973e9303f6f4a6257a3f5445adb1e02de9f74b8c6e2f9"
+   },
+   "r2_prefix": "smoke-evidence/781e041f397178/20261114T193338Z",
+   "volume_id": "vol_rnzxxnd25x79oqer",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T20:01:54.148786+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "be3a4978b96a43c5bad51219aa94ea68",
+   "machine_id": "843205c264d228",
+   "objects": {
+    "evidence.tar.gz": "58d2ba3ad676a0491dc05fb10c531b975f2c4f4e8e69ee8b68447087626f7eca",
+    "inventory.json": "be243f9ee83712cff0c8d8ea7f42d381cb13916716300816d99a51be6076fcfa",
+    "machine-config.redacted.json": "d331e59c97d90538d6e688ea47bfbc8b4c7fa82f529513eb8e56f5fff2a70c68",
+    "manifest.json": "bf00033a492350adb582585a3980582506030a55c2614679cb3e3ec728cc7774"
+   },
+   "r2_prefix": "smoke-evidence/843205c264d228/20261114T200057Z",
+   "volume_id": "vol_vdeppo5mejkn7zw4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:35:52.076450+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "c2aa6dde68c44cac9100f903186635e9",
+   "machine_id": "8744e10c01e458",
+   "objects": {
+    "evidence.tar.gz": "47bbf12922483e53d97d59e01c99eb0ddc6d6790439ed26391904e03bb8015d7",
+    "inventory.json": "1db91b7bb5239f12b5e4d58db71c833fdbb580e64b1f3ddefbdbf6e57861c174",
+    "machine-config.redacted.json": "a7145f091ab4376fb89898c256fd95632cf7bb2c387e3563a3c8491123981711",
+    "manifest.json": "384816c901306b327f75697e112f60015b63c032815904af92581380d9379724"
+   },
+   "r2_prefix": "smoke-evidence/8744e10c01e458/20261114T193448Z",
+   "volume_id": "vol_vdeppj1o1pkmyp64",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:36:59.372625+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "6d29bc6a21b74c968f7a7d121b89cca7",
+   "machine_id": "8ed9102b224418",
+   "objects": {
+    "evidence.tar.gz": "a824272d6d3c4077314a45cb87d93ea4b02d53ab90bc20b1571b583f1925ae8b",
+    "inventory.json": "d6364bbf7cf71c60ccf8f7874e6a3d935f4359658e5ac357ea374b3157c04b77",
+    "machine-config.redacted.json": "6580c5b7766e7207b79f8257b2e784ae4003386626f14b2e1056a8a7abd94f12",
+    "manifest.json": "a9b0ceaec00285ffa1bf64755906a837e0277d391ce7392c6ac10c2071d00b7b"
+   },
+   "r2_prefix": "smoke-evidence/8ed9102b224418/20261114T193555Z",
+   "volume_id": "vol_rnzxxn1we9w7x80r",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:39:33.441701+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "1e0cdb35203f498eaf9976d5180840ba",
+   "machine_id": "8d1d6dae931938",
+   "objects": {
+    "evidence.tar.gz": "78cc2df0334d42d3734184fa7d3d0dd5d0e23c6745148a9bb03c5dc8f8817ac9",
+    "inventory.json": "46fabeadaa4c325c55dafd004ea2a9a54269b7388d50e6c99c8978607dbbc3c6",
+    "machine-config.redacted.json": "bf3d32134baaac851387b292db7fd1a0315709bf5dae4753a2f2d7760335f1fe",
+    "manifest.json": "e74ddbb65eda2f35086583519e51e8a3645379e5a578afffa17395356a423f49"
+   },
+   "r2_prefix": "smoke-evidence/8d1d6dae931938/20261114T193703Z",
+   "volume_id": "vol_45811x50g795gyx4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:40:43.489478+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "73dcfbd6acea40c2a84058a2b4a6497e",
+   "machine_id": "80ee505c6e3e78",
+   "objects": {
+    "evidence.tar.gz": "ffce87d8abc118e6fb4509553ff71de03056b6208a09ebd7d47ac99a1d501503",
+    "inventory.json": "1010b61836baf6ec4020f6118401f2554390cebf8e16da82f1642a192918bf9b",
+    "machine-config.redacted.json": "b5ce191536fe71134072e556d2e7fdf4f3d2c1ca515456f6543d908cd9b2f681",
+    "manifest.json": "2c18735ff255d225bfc43463ae8a85244170f7f9ad4ee871e3fce64923afeb9b"
+   },
+   "r2_prefix": "smoke-evidence/80ee505c6e3e78/20261114T193937Z",
+   "volume_id": "vol_r6865oj687g3nln4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:41:47.729269+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "9b25216a329a42b38c6337a89c353e12",
+   "machine_id": "8744500a324978",
+   "objects": {
+    "evidence.tar.gz": "b69e5fc99a33b550ff55a9fdbd48dccd194d70a7fd12c44a1862063e9e40d90b",
+    "inventory.json": "865fdd87ce27c2fed0785dd8a5e56922c3d19a1d252dbf061f309cafb9328304",
+    "machine-config.redacted.json": "6cd489fc557d605348fd0136b46979b8dae22cb58964f8204d3c6d0e9472ff92",
+    "manifest.json": "7505efbdfce293e0a21246d5d2f4365ce52cbb348a1c43c90c3a6c40750c2762"
+   },
+   "r2_prefix": "smoke-evidence/8744500a324978/20261114T194047Z",
+   "volume_id": "vol_4oj88kon8wj237or",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:42:54.164554+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "c55589ae4221431aaea0d72e3bbd2c71",
+   "machine_id": "8de396be2ded18",
+   "objects": {
+    "evidence.tar.gz": "39c2336f47e098563a613123a7630e57c9764886378a6d10c252ffe50396239d",
+    "inventory.json": "095a9f0b08923ecc106296f7989306a7d76bf7df6853031cdb3b5ba8eeca26f6",
+    "machine-config.redacted.json": "2d2a34e68bd7f17a57bc70c7ddd1f48c98f7e3c0b49b1258a3c235b91723ddee",
+    "manifest.json": "e95c741a807a54ba18b8b7c6d5e783ff0ef28c76186ee57071b633a91b2ccee0"
+   },
+   "r2_prefix": "smoke-evidence/8de396be2ded18/20261114T194151Z",
+   "volume_id": "vol_vly771q363n30kd4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:44:13.015850+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "234fbcd133d648eabc09e5d62c312f36",
+   "machine_id": "83d1141a209928",
+   "objects": {
+    "evidence.tar.gz": "d37c0d536b10b828564cc060193dde96dd4d4cba4b31d34690820ef5c7b89519",
+    "inventory.json": "f0c207ad2051f447c7adb4bf45bfdb69d9b0b559abbc1435f895a67aaef84770",
+    "machine-config.redacted.json": "a3e81a26d972197a84acc554ff87de61401001ff099ab92f8512795004ceeb62",
+    "manifest.json": "ad90eaeacad817732a6b2ed7d915d0a44d66c428caec5a4c84a269475734e376"
+   },
+   "r2_prefix": "smoke-evidence/83d1141a209928/20261114T194258Z",
+   "volume_id": "vol_42kxpdjl0zykm984",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:45:23.906003+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "6da2b4aaca96464f89da59b08aeced94",
+   "machine_id": "85777d3c752598",
+   "objects": {
+    "evidence.tar.gz": "fff56f6f994ec6ac82263cc4a7ff1d1a31439c18689cef759973e7333e090628",
+    "inventory.json": "697638a91683aa33c8ef15cea7c9a4d9a44c23a69142724ddd44aa4e7d840aa2",
+    "machine-config.redacted.json": "efa676dda8cb5af3c35624c592151f7a66d61ae0f76b37bdd9320df2ee72f65f",
+    "manifest.json": "44f512534941c77b966f609c88cff72e11f6fd442dbcd373f395c8594351223e"
+   },
+   "r2_prefix": "smoke-evidence/85777d3c752598/20261114T194417Z",
+   "volume_id": "vol_491e3509xm8eeezr",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:46:26.066345+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "13babbe08ed94f63838b94238132ddee",
+   "machine_id": "8655379ce47668",
+   "objects": {
+    "evidence.tar.gz": "5f0e3c253eed69302ab9b0c32a79a2c4d8c6739e15766a9ed195ad5a8b54bc45",
+    "inventory.json": "c412bfccb961db03b86a36506fd2c4c01d43714f544a0e8c2a21b0378794e74d",
+    "machine-config.redacted.json": "a15b435f9befafc4e6bd82daafbd6a7a17db95f4c7ef473a0387ef25c7b7aa3b",
+    "manifest.json": "485a782cf89008495e5648d09dc6ca0387c81d5b40cdbbf41ed473570c1321d3"
+   },
+   "r2_prefix": "smoke-evidence/8655379ce47668/20261114T194527Z",
+   "volume_id": "vol_458dlpxzj02e2pj4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:48:03.893562+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "276dc2d88ddb4f1cabe98ef82f4cadb3",
+   "machine_id": "895901f65454e8",
+   "objects": {
+    "evidence.tar.gz": "ab54facb9e989e126ca15c2787c4f230c4c918e8cbaec9ed9336dde7a213ed40",
+    "inventory.json": "e5a4957c23fb06085d950acbcc272e8f99df2458d3de72976be87626e77ba921",
+    "machine-config.redacted.json": "b0f289be9e620e332031d82b49ed045943936697f4f31108bf0ff168a68f3836",
+    "manifest.json": "460c42e5a004093bc39e057146b5e7087403c510b41e97bce64fbc519f9517f2"
+   },
+   "r2_prefix": "smoke-evidence/895901f65454e8/20261114T194630Z",
+   "volume_id": "vol_4m3olxgmnne9qldv",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:49:29.387287+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "be3a4978b96a43c5bad51219aa94ea68",
+   "machine_id": "840490b2676778",
+   "objects": {
+    "evidence.tar.gz": "3a99091754ec5cd3542f719673f6882c0b1cfb87b578de81afcdc375ee0f4647",
+    "inventory.json": "c1490d0dc5100002a64c3d5cab49ac0dbbc63560518e023096cdb4b37dacae16",
+    "machine-config.redacted.json": "6e8fc15d805969f2d8a9f3e9083eb93a6e566a74d650899e2589fe050898cf97",
+    "manifest.json": "6b37d885ac5b52cffc233371b9eb9be4a748772314c4f04cdce178e673fc5141"
+   },
+   "r2_prefix": "smoke-evidence/840490b2676778/20261114T194811Z",
+   "volume_id": "vol_rnzxxg1033j961kr",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:50:35.986477+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "a8a1513878e841cfaadd46efab913d9a",
+   "machine_id": "862ee7ce413508",
+   "objects": {
+    "evidence.tar.gz": "1163946dfd6dfcde4546183e83dd9dd7bf29bd4781e0521cb119427c8734886d",
+    "inventory.json": "a16cdda0d8b0d715f617a938578c2b5967f42ac3c403015f9cc2084b1b85b14e",
+    "machine-config.redacted.json": "4d03bafeda52a3a5982698f56576e35de912ac6ab0249bf36044b4699865e303",
+    "manifest.json": "0b65d7db28eb8792bbffea6e6ce3a1a0a7a7031c149e44a50060ef0c8e558a52"
+   },
+   "r2_prefix": "smoke-evidence/862ee7ce413508/20261114T194937Z",
+   "volume_id": "vol_vjy22l7jqq25ywmv",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T20:02:54.945818+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "276dc2d88ddb4f1cabe98ef82f4cadb3",
+   "machine_id": "845003f2609078",
+   "objects": {
+    "evidence.tar.gz": "0e4713b7377bec455e76711d1ae6c9a7c99662dc83a90aa209010d3221f74635",
+    "inventory.json": "d4d6ede6f3c692a29dcb0cb37a70bd53f35f4fd3be174b334e3fe8c9ba2e1683",
+    "machine-config.redacted.json": "3be46b04304b85ac4dfa5f0a2ce04cbfaced11efec99273cd26387fa33fb8787",
+    "manifest.json": "d5c9af51eda308becdde04fafb03ce15160c3ecd226a5021137a6acbfb03b689"
+   },
+   "r2_prefix": "smoke-evidence/845003f2609078/20261114T200157Z",
+   "volume_id": "vol_vlyg288o80g121m4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T21:59:44.945671+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "008143f6dd8b46939a9ec12342210e21",
+   "machine_id": "8d96714b47e738",
+   "objects": {
+    "evidence.tar.gz": "bc644c8ff6bfb6637670f8a4706d0102e116f77deac2aa529a21d47da86e83fd",
+    "inventory.json": "fcd54d2e06251b568945dee2a09a9b08e15e7289aa04adcee128cd0e014ce962",
+    "machine-config.redacted.json": "4e9a705315d1ca7d3bcefa70ee370014d073259b6a20c39f1f56d81feea5dfb0",
+    "manifest.json": "7c8cd42607c38734c2d19a346290dcf4d23264611388ac9a46d3f4f7a07a7f4e"
+   },
+   "r2_prefix": "smoke-evidence/8d96714b47e738/20261114T215704Z",
+   "volume_id": "vol_4y816kd1l7zemojr",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:52:11.334120+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "a4b2999b567546a7a243098c27dce3c7",
+   "machine_id": "80d21ef63524d8",
+   "objects": {
+    "evidence.tar.gz": "61ce9e0a04cb611345abf5cf87d22a440b580f15e9cad1a4bdfe275d6f560345",
+    "inventory.json": "6a6b9de86d27866975b6124140ae908c8af70b6ce99d3d67b92607681a5a5bf8",
+    "machine-config.redacted.json": "8099eb4b32abfcb4b885c9fdf90d138eed65487f76ccf460e1600915c2617f8e",
+    "manifest.json": "b5311a947f89b9f464a2ac4a0234d159783de006dc6ef34f55b0360b44ec0952"
+   },
+   "r2_prefix": "smoke-evidence/80d21ef63524d8/20261114T195111Z",
+   "volume_id": "vol_458d62q5wpe59dj4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:53:12.787931+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "9612212e0b784dd48c32697545471a64",
+   "machine_id": "862e7ebe479958",
+   "objects": {
+    "evidence.tar.gz": "a5f4b20527f0b2531ede4d96a93abd5c31de9a17feb15b84196cbd087d010fc1",
+    "inventory.json": "b6ab0b49620b1697f34bd9f80ded21dcb01c48163f4ced33e03899e41cedc0ba",
+    "machine-config.redacted.json": "88a29db9cd3e3cb98f010a6141b1fcd19927ff4121bbfcefdc9e2f0c9da27ce2",
+    "manifest.json": "74318037f39610547710758575f02ac53a1f644e6e1698bfee42dcfbe591e1fc"
+   },
+   "r2_prefix": "smoke-evidence/862e7ebe479958/20261114T195215Z",
+   "volume_id": "vol_rnzqjgyl2qkj7qer",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:54:17.873803+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "5b69062a80d14578a251befb3c45018e",
+   "machine_id": "8d99ed0b2d6e58",
+   "objects": {
+    "evidence.tar.gz": "714faef35b2e063d20e0220b59caf3dab91ee5cec1e92df9de9d4aaf9cd35e35",
+    "inventory.json": "990700f8f6da297ff9befe13495547a3f3bc85d6c95b65940c0836398b38b2e5",
+    "machine-config.redacted.json": "3b7411dadd4290fb1e49fda8bfa955c4083786af9b080d15368b0514ccd9a93f",
+    "manifest.json": "8145441ba2029eabbc1ddb413ef3c7208375f119f3a1937e491fe91898a23600"
+   },
+   "r2_prefix": "smoke-evidence/8d99ed0b2d6e58/20261114T195316Z",
+   "volume_id": "vol_rkgpnzo7dx7q8064",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:55:23.530000+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "2d56e47600094a918270f4c663975bf0",
+   "machine_id": "8edd003f7d62d8",
+   "objects": {
+    "evidence.tar.gz": "6527b85dc957a8fc0bcc717b445c61218dfe6145c07f2d4d6e402980e1f89ab9",
+    "inventory.json": "563dacf929ecbb45ddb9c9a5ec7f75bf46b6994ce85b6c2c690c15273edc1f2e",
+    "machine-config.redacted.json": "bc57b02cae4f81a55cd32fd59eeec9d8f3bd2b24dc3e619d05e3063027a2d74c",
+    "manifest.json": "d02e6a334c1b5d6a494dcba74b20f58945b39892354bf00be02bb0aaaab88831"
+   },
+   "r2_prefix": "smoke-evidence/8edd003f7d62d8/20261114T195422Z",
+   "volume_id": "vol_4m3ojep3k7jm883v",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:56:27.500067+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "7a92d97bd3384498a0e60cfe132366fa",
+   "machine_id": "8111046c59e698",
+   "objects": {
+    "evidence.tar.gz": "ef904760e3073f3ea9bbf0fa83c18c11ef804855a5cec88af5db594f0663b3df",
+    "inventory.json": "0dd709dedfeb8fb8c5c1a7f425533bc554e0a8a90ac1572ce088b033fd6cf966",
+    "machine-config.redacted.json": "449827cd4f6fe3b8a2a2dbd6bf88adb5bf74da954ea0d37c4f67a435c16f86dc",
+    "manifest.json": "7a874b81cab70dc262b74c13cb856f82c371f283cf35b4a56ee7facdb345a896"
+   },
+   "r2_prefix": "smoke-evidence/8111046c59e698/20261114T195527Z",
+   "volume_id": "vol_vde12y0eo8yxj9w4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:57:32.911367+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "2490169205fc4274bf68fc3b0856aa3b",
+   "machine_id": "811d692b3d73d8",
+   "objects": {
+    "evidence.tar.gz": "dfb771332d69db0d9f532cbacae3b4fe469028384f7b3c76feb8aba618076b94",
+    "inventory.json": "55a5ce06f319dc59013f0a5345d2aadc599fa01d8f2a3a070e63cb4aab6810a4",
+    "machine-config.redacted.json": "aee1ba195caf0bbb66bb661d879c8cba7ce85227c9c25f41dde28446eeb484a2",
+    "manifest.json": "865170c4a6183d217ea5f71d35a15b10f4ebb2594485b9a3033e7fb42a8698d6"
+   },
+   "r2_prefix": "smoke-evidence/811d692b3d73d8/20261114T195632Z",
+   "volume_id": "vol_vp2019q202e269e4",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:58:38.321704+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "99b7bf7ff7584f74a11441bedf41defb",
+   "machine_id": "801673b6ed2448",
+   "objects": {
+    "evidence.tar.gz": "cf4388f2e75604d06e37f466e766e65a67ed181506c475c876f547d34af2ec4e",
+    "inventory.json": "c21f50f1c047027a678375ca971fbe49ffcb0244ef586f683f505fd0baafe562",
+    "machine-config.redacted.json": "3a79fe088a06dbf8dcbc9cff30aadf5882a32ca1203a440553eda1f4b80de962",
+    "manifest.json": "a553e10bca7b531c19ed89a8966ad34749d3b27d873fb0c185035f79074e9182"
+   },
+   "r2_prefix": "smoke-evidence/801673b6ed2448/20261114T195736Z",
+   "volume_id": "vol_rkgpndkg0662le24",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T19:59:40.401119+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "05e99dccf96b49d0a8a9901e92fe2f70",
+   "machine_id": "80d479b6449238",
+   "objects": {
+    "evidence.tar.gz": "6b1a6084d178e2b27fa7c1563bf89a1803fd2294cbd9707b207d654a57d3911e",
+    "inventory.json": "a8d94c834c7af91e528c60654fa02aa0e4667db217236a9657d2fdc644153ccb",
+    "machine-config.redacted.json": "f8cbd66019053d80b27efc78390f93eb895a2cd0f97f3f70b3f96b9f255f72d4",
+    "manifest.json": "496f2065b62a07756c77806ff2030ccc19d6f64a749e102476c9abcfa9175adf"
+   },
+   "r2_prefix": "smoke-evidence/80d479b6449238/20261114T195842Z",
+   "volume_id": "vol_491e65d1ngqy956r",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "Andy 2026-11-14 coordinator thread ph78393fcn3: 'Save logs, then delete the 25 abandoned test Machines' -> '1 -> yes'",
+   "destroyed_at": "2026-11-14T20:00:43.559925+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "f7bce8ad92ac4ed6b762c407657bf7ad",
+   "machine_id": "2879637b730498",
+   "objects": {
+    "evidence.tar.gz": "1d2ceb664f1d2da192e8d4783dc30acc221377557dc82429575dcf82d374f5d9",
+    "inventory.json": "629377cf3df6b893c005fafdc86914d77398511251e6fd4bc1bc938eaec55bcd",
+    "machine-config.redacted.json": "b640423d038a09fb3b8165a09242f62267ac34c727a13aee13195f87451956fa",
+    "manifest.json": "6ff9e979bfa2dac729feab2db3d3ed3129115c93c1db7bbdf1f8c6161fad4fb1"
+   },
+   "r2_prefix": "smoke-evidence/2879637b730498/20261114T195944Z",
+   "volume_id": "vol_rnzqk1lz9gyl961r",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "PR #1967 owner-confirmed (ph7b26yr CONFIRM)",
+   "destroyed_at": "2026-11-14T20:08:29.108317+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "67264f18c6b64cd38577a7c9912f9cc6",
+   "machine_id": "8e2545a70622e8",
+   "objects": {
+    "evidence.tar.gz": "1d8865a9219e3403b92991550cb73dba6719533151f73109dd84f7e1542afdae",
+    "inventory.json": "7e4ce389a06a1c34cdda7155dd954fc2b8a4aa1df9c8ab65843c566a4a3556d3",
+    "machine-config.redacted.json": "ef3a4b3f16d33c415b83b683e78f36dd46ed1f9c0283fcb2f2322d8539b0e1b7",
+    "manifest.json": "298413a3ad6f5720ad1cdde538a2f9b9be3959c0df07907f3f4c9c1afe9df03e"
+   },
+   "r2_prefix": "smoke-evidence/8e2545a70622e8/20261114T200630Z",
+   "volume_id": "vol_r7y81eelnloqz09r",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "PR #2005 owner request",
+   "destroyed_at": "2026-11-15T02:42:45.399305+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "b19c88c9d9354928a95cd1d5a9f3652d",
+   "machine_id": "829e14f79e24d8",
+   "objects": {
+    "evidence.tar.gz": "d2a1abf82d9360357e99cf46d6adda6b341ef581abd5082c914400c13d66f830",
+    "inventory.json": "f200cef74be2927698daec86da0d689e8d26b8b1bb57f3e6ad1769dc206298ac",
+    "machine-config.redacted.json": "8d8bb7a394b356b9cdf431ad8467599ec0ec8ef08676f551e1aef97278bf95d0",
+    "manifest.json": "87e194e4726b6dc8529d0635837b1f98100b8dcdd056a34ab5f9a4ac808355aa"
+   },
+   "r2_prefix": "smoke-evidence/829e14f79e24d8/20261115T023714Z",
+   "volume_id": "vol_r1j06d3z155do3wr",
+   "volume_size_gb": 40
+  },
+  {
+   "authority": "PR #2005 owner request",
+   "destroyed_at": "2026-11-15T02:43:57.369538+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "b19c88c9d9354928a95cd1d5a9f3652d",
+   "machine_id": "82dd664a7dd0d8",
+   "objects": {
+    "evidence.tar.gz": "a6e47c525c6218bd8f4c38e0087d68aa205295cedd1e8673df5a45ff6d620342",
+    "inventory.json": "37bec37b3ba4855fdc795d33e507e0d7393fab2be6622282ccbfc12305eb6751",
+    "machine-config.redacted.json": "63ed482585e17034ca8aa9a1167da20cad8849c13946bc80601ab052ae263bbc",
+    "manifest.json": "ca804d5b4a76cc614d88323cb5238cf91962cee9846e5e1918abb45cafcafe46"
+   },
+   "r2_prefix": "smoke-evidence/82dd664a7dd0d8/20261115T024248Z",
+   "volume_id": "vol_rkgpj3x0eypx9xo4",
+   "volume_size_gb": 40
+  }
+ ],
+ "schema": "smoke-evidence-archive-receipts-v1"
+}

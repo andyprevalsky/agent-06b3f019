@@ -24,6 +24,8 @@ sources:
   - commit daacc1627c
   - commit fe15de14ee
   - PR #1931
+  - PR #2118
+  - commit a2d48bbf18
 repro: scripts/tests/cloudbench-shared-transport-integration.test.py
 status: fixed
 ---
@@ -95,6 +97,13 @@ regression pins the writer's `SO_SNDBUF` (a flakiness cross-review showed an AF_
 otherwise follows `net.core.wmem_default`); it passes and the `sendall` variant fails at both the
 default and a 16 MiB `wmem_default`, and it passed 5/5 consecutive runs. Test-only change; no
 production or 10k-agent effect.
+
+Shipped in PR #2118 (merge a2d48bbf18, 2026-11-15). Its deploy gates passed 15/15 in one
+round; on Blacksmith the deploy-command-structural gate ran `cloudbench-shared-transport-integration`
+PASS among 8 concurrent suites (run 43666562427), and the new diagnostic line measured the CI host:
+`payload 528 MiB, kernel buffer capacity 256 MiB, echoed in 0.38s`. So the CI payload is ~14x the
+default-buffer payload, as the diagnosis assumed; that passing run's transfer was fast, and the
+failing round's own timing remains unrecorded. Production semantics PASS (run 43672718027).
 
 ## Human feedback
 

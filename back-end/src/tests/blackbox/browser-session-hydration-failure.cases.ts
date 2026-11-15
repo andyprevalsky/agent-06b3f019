@@ -7,6 +7,7 @@ import {
   withBrowserResumeLifecycle,
   type ResumeLifecycleDependencies,
 } from '../../providers/browser/resumeLifecycle';
+import { runRotationRestoreTunnelCases } from './browser-session-rotation-restore.cases';
 
 // Captured at 18:00:36Z on 2026-10-28, after Kernel had allocated and bound
 // the replacement. Payment setup had already completed successfully.
@@ -16,6 +17,7 @@ export async function runBrowserHydrationFailureCases(): Promise<void> {
   const database = new URL(process.env.DATABASE_URL!);
   assert(['localhost', '127.0.0.1'].includes(database.hostname));
   assert.match(database.pathname, /^\/victoria_[\w-]+$/);
+  await runRotationRestoreTunnelCases();
   for (const scenario of [
     'known-failure',
     'release-unconfirmed',
