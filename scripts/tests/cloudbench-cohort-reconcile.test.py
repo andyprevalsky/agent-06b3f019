@@ -272,7 +272,7 @@ class CohortReconciliation(unittest.TestCase):
         lease.write_text(json.dumps(winner));done.write_text(json.dumps(baseline))
         f.assert_records_preserved()
 
-    @tq.quarantine(since='2026-11-15', repair='pending-handoff:b7248ac5873d434aa5320ab2bea17f4c',
+    @tq.quarantine(since='2026-11-15', repair='https://boxes.dev/thread/thr_bf22de6a504f4b93881a8a6145fb172f',
                    error='FAIL: test_campaign_noop_and_mutation_share_the_completed_barrier (__main__.CohortReconciliation.test_campaign_noop_and_mutation_share_the_completed_barrier) (mutated=True)',
                    evidence='.context/deploy-pipeline-pr2104/rca/b7248ac5873d434aa5320ab2bea17f4c.json')
     def test_campaign_noop_and_mutation_share_the_completed_barrier(self):
