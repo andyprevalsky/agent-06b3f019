@@ -26,7 +26,7 @@
  * Each section hides (stays mounted) when the integrations search does not match.
  */
 import { useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Loader2, Plug, Terminal } from 'lucide-react';
+import { Loader2, Terminal } from 'lucide-react';
 
 import { AccountTeamShare } from '@/components/teams/TeamSharing';
 import { useAccountShares, type AccountShareLookup } from '@/hooks/useTeams';
@@ -41,20 +41,27 @@ import DesktopIntegrationRow, {
   type DesktopIntegrationView,
 } from './DesktopIntegrationRow';
 import { DropdownIconPreset } from './DropdownIconFrame';
+import { McpLogo } from './toolIcons';
+import { TOOL_ROW_ERROR_CLASSES, TOOL_ROW_INPUT_CLASSES } from './integrationCardStyles';
 
 type Cli = ReturnType<typeof useCliIntegrations>;
 type Mcp = ReturnType<typeof useMcpServers>;
 
-const INPUT_CLASSES =
-  'h-8 min-w-0 rounded-md border border-border bg-background px-2.5 text-[13px] outline-none placeholder:text-muted-foreground focus:border-foreground/40';
+const INPUT_CLASSES = TOOL_ROW_INPUT_CLASSES;
 const CANCEL_CLASSES = 'shrink-0 text-[12.5px] text-muted-foreground hover:text-foreground';
-const ERROR_CLASSES = 'text-xs text-destructive dark:text-red-300';
+const ERROR_CLASSES = TOOL_ROW_ERROR_CLASSES;
 
-const glyph = (icon: ReactNode) => (
-  <span className="flex h-full w-full items-center justify-center text-[#1f2937]">{icon}</span>
-);
+/** A currentColor glyph pinned dark and centered on the light app-icon tile. */
+export function ToolGlyph({ children }: { children: ReactNode }) {
+  return (
+    <span className="flex h-full w-full items-center justify-center text-[#1f2937]">
+      {children}
+    </span>
+  );
+}
+const glyph = (icon: ReactNode) => <ToolGlyph>{icon}</ToolGlyph>;
 
-function ToolSection({
+export function ToolSection({
   title,
   hidden,
   children,
@@ -72,7 +79,7 @@ function ToolSection({
 }
 
 /** The inline form under a row: indented to the chips, plain inputs, pink Connect. */
-function RowForm({
+export function RowForm({
   label,
   busy,
   error,
@@ -180,7 +187,7 @@ function CliRow({ cli }: { cli: Cli }) {
     name: 'CLIs',
     icon: {
       preset: DropdownIconPreset.cli,
-      glyph: glyph(<Terminal className="h-[70%] w-[70%]" />),
+      glyph: glyph(<Terminal className="h-[85%] w-[85%]" />),
     },
     accounts: cli.integrations.map((row) => cliAccount(row, retry, cli.submitting, shareTarget)),
     availability: 'ready',
@@ -276,7 +283,7 @@ function McpRow({ mcp }: { mcp: Mcp }) {
   const view: DesktopIntegrationView = {
     key: 'mcp',
     name: 'MCP servers',
-    icon: { preset: DropdownIconPreset.mcp, glyph: glyph(<Plug className="h-[70%] w-[70%]" />) },
+    icon: { preset: DropdownIconPreset.mcp, glyph: glyph(<McpLogo />) },
     accounts: mcp.servers.map((server) => mcpAccount(server, mcp)),
     availability: 'ready',
     onConnect: () => setOpen(true),

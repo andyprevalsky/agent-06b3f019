@@ -69,8 +69,9 @@ export const DropdownIconPreset = {
   fireflies: { iconScale: 64, iconFit: 'contain' },
   fileSystem: { iconScale: 62, iconFit: 'contain' },
   pebbleIndex: { iconScale: 108, iconFit: 'cover' },
-  cli: { iconScale: 56, iconFit: 'contain' },
-  mcp: { iconScale: 56, iconFit: 'contain' },
+  cli: { iconScale: 64, iconFit: 'contain' },
+  mcp: { iconScale: 58, iconFit: 'contain' },
+  android: { iconScale: 62, iconFit: 'contain' },
 } as const;
 
 export function BrowserDropdownIconPreset(
