@@ -418,7 +418,9 @@ def resume_argv(job_id: str) -> list[str]:
 MIGRATION_ARGV = ['npx', 'tsx', 'scripts/validate-prod-workflow-migration.ts', '--execute']
 SMOKE_ARGV = ['npx', 'tsx', 'scripts/prod-endpoint-smoke.ts']
 AGENTCARD_ARGV = ['scripts/run-bench', AGENTCARD_TASK]
-WMH_ARGV = ['scripts/run-bench', 'raise-5m-rose-labs-brex', '--sim-on', 'raise-5m-rose-labs-brex']
+# --wait: a fleet run detaches by default and its launcher exits 0 at launch; the lane must return the
+# detached controller's own exit status (task FAIL/CHILDFAIL is non-zero), never the launch receipt.
+WMH_ARGV = ['scripts/run-bench', 'raise-5m-rose-labs-brex', '--sim-on', 'raise-5m-rose-labs-brex', '--wait']
 WMH_BUILD_ARGV = (['bash', 'scripts/run-bench-cloud', '--build-wmh'], ['bash', 'scripts/run-bench-cloud', '--refresh-wmh'])
 
 
