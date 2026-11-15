@@ -1059,6 +1059,11 @@ STABILITY_UNIT_BUDGETS = {
         ("bash", "scripts/tests/cloudbench-multi-workstream.test.sh"), 2400,
     ),
 }
+# The standing treasury rule (.claude/commands/deploy.md "Skippable tests"; deploy_failure_report's
+# TREASURY_POLICY, which accepts only `backend-coverage-blackbox/blackbox:treasury-rails`) applied
+# to the same unit here: it still runs, a native FAIL stays FAIL on its row, and only that row is
+# non-blocking. UNVERIFIED, runner errors and every other unit keep their verdict.
+TREASURY_STABILITY_UNITS = frozenset({"backend-blackbox:treasury-rails"})
 STABILITY_LOAD_LOOP = (
     "import os, sys\n"
     "parent = int(sys.argv[1])\n"
@@ -1800,6 +1805,24 @@ def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float | None,
     return row
 
 
+def apply_treasury_policy(rows: dict[str, dict]) -> list[str]:
+    """Mark each treasury unit's native FAIL with the standing treasury disposition; return their keys.
+
+    Only a FAIL from a run that executed and exited non-zero qualifies (the policy requires an
+    actual native FAIL); the row's status, attempts and logs stay exactly as recorded.
+    """
+    from deploy_failure_report import TREASURY_POLICY, TREASURY_SKIP
+    skipped = []
+    for key, row in rows.items():
+        attempts = row.get("attempts") or []
+        if (key in TREASURY_STABILITY_UNITS and row["status"] == "FAIL" and attempts
+                and attempts[-1].get("exit") not in (0, None) and not attempts[-1].get("missing_cases")
+                and not row.get("missing_logs")):
+            row.update(disposition=TREASURY_SKIP, standing_policy=TREASURY_POLICY, blocking=False)
+            skipped.append(key)
+    return skipped
+
+
 def isolate_plan(plan: StabilityPlan, unit: Unit, index: int, server: str | None = None) -> StabilityPlan:
     """Give a backend DB-lane plan its own identity, port, database and schema setup."""
     if unit.lane not in STABILITY_DB_LANES:
@@ -1915,15 +1938,20 @@ def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: i
             row["reason"] = f"{row['reason']}; {note}" if row.get("reason") else note
             if row["status"] == "PASS":
                 row["status"] = "UNVERIFIED"
+    treasury = apply_treasury_policy(ordered)
     statuses = {row["status"] for row in ordered.values()}
-    # A platform-omitted unit neither passes nor blocks; it never counts as a PASS.
-    verdicts = statuses - {"PLATFORM_OMITTED"}
+    # A platform-omitted unit neither passes nor blocks; it never counts as a PASS. A
+    # treasury-skipped FAIL neither blocks nor passes: the check reports TREASURY_SKIPPED.
+    verdicts = {row["status"] for key, row in ordered.items() if key not in treasury} - {"PLATFORM_OMITTED"}
     overall = ("FAIL" if "FAIL" in verdicts else "UNVERIFIED" if verdicts - {"PASS"}
+               else "TREASURY_SKIPPED" if treasury
                else "PASS" if verdicts else "PLATFORM_OMITTED")
     counts = {status: sum(1 for row in ordered.values() if row["status"] == status) for status in sorted(statuses)}
     report = {"status": overall, "counts": counts, "runs": runs, "load": load_record, "digest_before": before,
               "digest_after": after, "units": ordered, "logs": str(log_root),
               "wall_seconds": round(time.monotonic() - began, 2)}
+    if treasury:
+        report["treasury_skipped"] = treasury
     # The unit -> attempt -> log index travels with the logs into the gate artifact.
     log_root.mkdir(parents=True, exist_ok=True)
     (log_root / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -2079,7 +2107,11 @@ def main(argv: list[str] | None = None) -> int:
                 attempts = row.get("attempts") or []
                 if row["status"] != "PASS" and attempts:
                     print(f"      log {attempts[-1]['log']}")
-        return {"PASS": 0, "PLATFORM_OMITTED": 0, "FAIL": 1}.get(report["status"], 2)
+            for key in report.get("treasury_skipped", []):
+                row = report["units"][key]
+                print(f"⚠️ Skipped — {key} · native FAIL retained ({row['standing_policy']}); "
+                      f"list it in the scorecard · Evidence: {row['attempts'][-1]['log']}")
+        return {"PASS": 0, "PLATFORM_OMITTED": 0, "TREASURY_SKIPPED": 0, "FAIL": 1}.get(report["status"], 2)
     if args.rev:
         global SRC
         SRC = Source(args.rev)

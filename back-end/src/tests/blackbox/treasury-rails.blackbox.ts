@@ -27,19 +27,20 @@
 
 import assert from 'node:assert/strict';
 import { loadDotenvWithCallerOverrides } from '../../providers/loadDotenvWithCallerOverrides';
-import { callOrgTool } from '../../providers/agentcard/org-runtime';
+import { callOrgTool, type AgentCardOrgToolCaller } from '../../providers/agentcard/org-runtime';
 import { readAgentCardOrgWallet } from '../../providers/agentcard/org-wallet-monitor';
 import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
 import {
   AgentCardRecoveryError,
   isSettledRecovery,
-  nudgeCardholderRecovery,
+  nudgeCardholderRecoveries,
 } from '../../providers/agentcard/fund-recovery';
 import { planOrgWalletTopUp } from '../../providers/agentcard/org-wallet-topup';
 import { fiatPullEnabled, resolveFiatSource } from '../../providers/agentcard/org-wallet-fiat';
 import {
   UNUSED_MINT_RECLAIM_DEADLINE_MS,
   classifyUnusedMintTransfer,
+  paceOrgThrottle,
   waitForUnusedMintSettled,
   type MintTransferObservation,
 } from '../../providers/agentcard/unused-mint-settle';
@@ -71,26 +72,60 @@ function isTransientOrgMcpPollError(error: unknown): boolean {
 }
 
 /**
+ * Paced org-throttle waits one run may add on top of the runtime's own per-call budget (two
+ * throttle windows), shared by every read-only call before the mint loop. It fits inside the
+ * domain's unchanged 15-minute timeout; the settle poll keeps its own pacing inside its own window.
+ */
+const TREASURY_RAILS_THROTTLE_BUDGET_MS = 120_000;
+
+/** The read-only org tools this run issues; anything else (every mutation) is never re-issued. */
+const PACED_READ_TOOLS = new Set([
+  'get_company_wallet',
+  'whoami',
+  'list_cardholders',
+  'get_cardholder_kyc_status',
+  'list_cards',
+  'list_recoveries',
+  'list_transfers',
+]);
+
+/**
+ * The run's org caller: read-only tools are re-issued through an org-wide throttle within the
+ * run's one shared budget (jittered, honoring the advertised reset); mutations and every
+ * non-throttle error pass through untouched.
+ */
+function pacedOrgToolCaller(): AgentCardOrgToolCaller {
+  const pacing = {
+    budget: { remainingMs: TREASURY_RAILS_THROTTLE_BUDGET_MS },
+    random: Math.random,
+    report: (line: string) => console.log(line),
+  };
+  return (toolName, args, deadlineAtMs) =>
+    PACED_READ_TOOLS.has(toolName)
+      ? paceOrgThrottle(() => callOrgTool(toolName, args, deadlineAtMs), pacing)
+      : callOrgTool(toolName, args, deadlineAtMs);
+}
+
+/**
  * One recovery nudge per cardholder whose residual matters to this run (coalescing on a recovery
- * already in flight). A provider refusal for one cardholder is logged and the rest continue.
+ * already in flight), from ONE read of the org's open recoveries per round. A provider refusal
+ * for one cardholder is logged and the rest continue.
  */
 async function recoverCardholderResiduals(
-  cardholderIds: readonly string[]
+  cardholderIds: readonly string[],
+  orgTool: AgentCardOrgToolCaller
 ): Promise<{ settledCents: number; pendingCents: number }> {
   let settledCents = 0;
   let pendingCents = 0;
-  for (const id of cardholderIds) {
-    try {
-      const nudge = await nudgeCardholderRecovery(id, callOrgTool);
-      if (nudge.kind === 'coalesced') pendingCents += nudge.inFlightCents;
-      else if (nudge.kind === 'requested' && isSettledRecovery(nudge.recovery.status))
-        settledCents += nudge.recovery.amountCents;
-      else if (nudge.kind === 'requested') pendingCents += nudge.recovery.amountCents;
-    } catch (error) {
-      if (!(error instanceof AgentCardRecoveryError)) throw error;
-      console.log(`  residual recovery refused for ${id}: ${error.message}`);
-    }
-  }
+  const nudges = await nudgeCardholderRecoveries(cardholderIds, orgTool);
+  nudges.forEach((nudge, index) => {
+    if (nudge instanceof AgentCardRecoveryError)
+      console.log(`  residual recovery refused for ${cardholderIds[index]}: ${nudge.message}`);
+    else if (nudge.kind === 'coalesced') pendingCents += nudge.inFlightCents;
+    else if (nudge.kind === 'requested' && isSettledRecovery(nudge.recovery.status))
+      settledCents += nudge.recovery.amountCents;
+    else if (nudge.kind === 'requested') pendingCents += nudge.recovery.amountCents;
+  });
   return { settledCents, pendingCents };
 }
 
@@ -109,13 +144,14 @@ async function recoverCardholderResiduals(
  */
 async function sweepResidualHeadroom(
   cardholderIds: readonly string[],
+  orgTool: AgentCardOrgToolCaller,
   timeoutMs = 60_000
 ): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let recoveredTotal = 0;
   let idleRounds = 0;
   while (Date.now() < deadline && idleRounds < 2) {
-    const sweep = await recoverCardholderResiduals(cardholderIds);
+    const sweep = await recoverCardholderResiduals(cardholderIds, orgTool);
     if (sweep.settledCents > 0) {
       recoveredTotal += sweep.settledCents;
       idleRounds = 0;
@@ -197,9 +233,14 @@ const RECLAIM_DEADLINE = hours(UNUSED_MINT_RECLAIM_DEADLINE_MS);
 /** Earlier runs' unused mints that had not come back yet; any lost past the deadline fails here. */
 async function checkEarlierUnusedMints(
   cardholderIds: ReadonlySet<string>,
-  ledgerPath: string
+  ledgerPath: string,
+  orgTool: AgentCardOrgToolCaller
 ): Promise<void> {
-  const checks = await checkPendingUnusedMints({ callOrgTool, ledgerPath, cardholderIds });
+  const checks = await checkPendingUnusedMints({
+    callOrgTool: orgTool,
+    ledgerPath,
+    cardholderIds,
+  });
   if (checks.length === 0) {
     record('no earlier unused mints awaiting reclaim');
     return;
@@ -251,9 +292,10 @@ async function main(): Promise<void> {
     return;
   }
 
+  const orgTool = pacedOrgToolCaller();
   let wallet;
   try {
-    wallet = await readAgentCardOrgWallet(callOrgTool);
+    wallet = await readAgentCardOrgWallet(orgTool);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Provider-side OAuth/token outages (invalid token, grant failure, timeout) are
@@ -344,16 +386,16 @@ async function main(): Promise<void> {
   // ── Leg 3: the AgentCard money loop (REAL, on sandbox) ───────────────────────────────────────
   const cardholders =
     (
-      (await callOrgTool('list_cardholders', {})) as {
+      (await orgTool('list_cardholders', {})) as {
         structuredContent?: { cardholders?: Array<{ id: string }> };
       }
     ).structuredContent?.cardholders ?? [];
   assert.ok(cardholders.length > 0, 'sandbox org has no cardholders to test with');
-  const paymentBenchmarkCardholderId = await resolveBenchmarkCardholderId();
+  const paymentBenchmarkCardholderId = await resolveBenchmarkCardholderId(undefined, orgTool);
   const cardholderId = await waitForIdleTreasuryRailCardholder(
     cardholders.map((cardholder) => cardholder.id),
     paymentBenchmarkCardholderId,
-    callOrgTool,
+    orgTool,
     { timeoutMs: 5 * 60_000, pollMs: 15_000 }
   );
   assert.ok(
@@ -370,7 +412,7 @@ async function main(): Promise<void> {
   const sweepCardholderIds = [
     ...new Set([cardholderId, ...readOpenPendingMints(ledgerPath).map((m) => m.cardholderId)]),
   ];
-  const preSweepCents = await sweepResidualHeadroom(sweepCardholderIds);
+  const preSweepCents = await sweepResidualHeadroom(sweepCardholderIds, orgTool);
   if (preSweepCents > 0) {
     record(`pre-mint residual sweep returned ${usd(preSweepCents)} to the pool`);
   } else {
@@ -380,13 +422,17 @@ async function main(): Promise<void> {
   }
 
   // After the sweep: recovering residual is what usually flips an earlier mint to reclaimed.
-  await checkEarlierUnusedMints(new Set(cardholders.map((holder) => holder.id)), ledgerPath);
+  await checkEarlierUnusedMints(
+    new Set(cardholders.map((holder) => holder.id)),
+    ledgerPath,
+    orgTool
+  );
 
   const mintCents = 1_300;
   const cardsToClose = new Set<string>();
   let provedPoolMint = false;
   for (let mintAttempt = 1; mintAttempt <= 2; mintAttempt += 1) {
-    if (mintAttempt > 1) await sweepResidualHeadroom([cardholderId]);
+    if (mintAttempt > 1) await sweepResidualHeadroom([cardholderId], orgTool);
     const minted = (await callOrgTool('create_card', {
       cardholder_id: cardholderId,
       amount_cents: mintCents,
@@ -487,7 +533,7 @@ async function main(): Promise<void> {
         if (!cardClosed) await callOrgTool('close_card', { card_id: cardId });
       } finally {
         // The sandbox cardholder is shared. Cleanup may close only cards this test created.
-        const cleaned = await cleanupTreasuryRailCards(cardholderId, cardsToClose, callOrgTool);
+        const cleaned = await cleanupTreasuryRailCards(cardholderId, cardsToClose, orgTool);
         if (cleaned > 0) record(`cleanup: closed ${cleaned} lingering open card(s)`);
       }
     }
