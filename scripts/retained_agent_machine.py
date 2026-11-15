@@ -254,8 +254,8 @@ def wait_stopped(fly, version):
                 raise
             sleep(backoff(failures - 1))
             continue
-        # Post-wait verification and custody writes run under the same lease.
-        fly.keep_lease()
+        # Post-wait verification and custody writes start with a full lease TTL.
+        fly.keep_lease(refresh_after=0)
         return completed
 
 
@@ -285,7 +285,7 @@ class Fly:
 
         return replay_transient(once, TRANSIENT_ATTEMPTS if (method == "GET" if replay is None else replay) else 1)
 
-    def keep_lease(self):
+    def keep_lease(self, refresh_after=LEASE_REFRESH_AFTER_SECONDS):
         """Extend our own lease during a long native wait (fly-go RefreshLease).
 
         Verified against the Machines API on 2026-11-15: POST /lease?ttl= with
@@ -296,7 +296,7 @@ class Fly:
         replaying it after a transient failure is idempotent; a lost lease is
         refused natively or answered with another holder and fails closed.
         """
-        if not self.nonce or monotonic() - self.leased_at < LEASE_REFRESH_AFTER_SECONDS:
+        if not self.nonce or monotonic() - self.leased_at < refresh_after:
             return
         granted = self.request("POST", f"/lease?ttl={LEASE_TTL_SECONDS}", replay=True)
         nonce = (granted.get("data") or {}).get("nonce") if isinstance(granted, dict) else None

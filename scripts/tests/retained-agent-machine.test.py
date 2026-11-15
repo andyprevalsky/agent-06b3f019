@@ -584,6 +584,22 @@ class RetainedWorkerTests(unittest.TestCase):
             self.assertEqual(pool.wait_stopped(fly, "native-version-2"), {"ok": True})
         self.assertEqual(calls, [("GET", "/wait"), ("POST", "/lease?ttl=500")])
         self.assertEqual(fly.leased_at, 250)
+        # CodeRabbit 4576849794: a wait succeeding just below the threshold (239s) still renews.
+        clock[0], calls[:] = 0.0, []
+        fly.leased_at = 0.0
+
+        def young(request, timeout):
+            suffix = request.full_url.split("/machines/1234", 1)[1]
+            calls.append((request.get_method(), suffix.split("?", 1)[0] if suffix.startswith("/wait") else suffix))
+            if suffix.startswith("/wait?"):
+                clock[0] += 239
+                return io.BytesIO(b'{"ok":true}')
+            return io.BytesIO(json.dumps({"data": {"nonce": "owned-native-nonce"}}).encode())
+
+        with patch.object(pool, "urlopen", young), patch.object(pool, "monotonic", lambda: clock[0]):
+            self.assertEqual(pool.wait_stopped(fly, "native-version-2"), {"ok": True})
+        self.assertEqual(calls, [("GET", "/wait"), ("POST", "/lease?ttl=500")])
+        self.assertEqual(fly.leased_at, 239)
 
     def test_native_reads_replay_transient_fly_failures_but_writes_do_not(self):
         """2026-10-20 reset and 2026-10-26 read timeout each killed a production cutover on one read."""
