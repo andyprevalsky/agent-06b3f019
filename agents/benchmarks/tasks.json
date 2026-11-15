@@ -950,6 +950,12 @@
   },
   {
     "name": "background-agent-message-smoke",
+    "quarantine": {
+      "since": "2026-11-15",
+      "repair": "https://boxes.dev/thread/ph77xckbcc8jvnqeaaw3x92tg18j0eb4",
+      "error": "Timeout after 182s (task timeout=180s) | Investigate: python agents/benchmarks/agent_latency.py 058a97e4-1978-4db6-b342-35da913f3a71 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR #2097 deploy 17ba8b2cd6 smoke: first attempt (root 058a97e4) still ACTIVE at 180s: response_schema refresh after the mid-run follow-up (Cerebras 429 -> Foundry fallback, 16.5s) blocked the root's next turn, explore finished first, verifier rejected the post-completion forward (50%), second cycle completed ~16s late; same-source rerun PASSED (FLAKY 48f4f224); NOT_INTRODUCED, #2097 changes only front-end/ (0 /api/teams or browser traffic); same symptom as docs/rca/cases/2026-11-10-background-message-completion-exceeded-deadline.md, repair owner PR #1946"
+    },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,
@@ -6017,7 +6023,7 @@
     "name": "browser-auth-guest-purchase",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:896710fd9bdc4326914365053da347e2",
+      "repair": "https://boxes.dev/thread/thr_717118a13d76431a95869b1abba1577b",
       "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 2} | Agent status: ACTIVE (expected COMPLETED) | Browser agent aeb2dafa-36c8-5945-ab58-a24fa46f2518 recorded 0 trajectory step(s); expected at least 5 per browser agent",
       "evidence": "PR #1992 smoke gate on e7af654e05 FLAKY 896710fd9bdc4326914365053da347e2 (first attempt FAILED run 20261113-015501-1857759, same-ref rerun PASSED); passed natively on 1b85b08dd with this PR's bytes unchanged"
     },
@@ -8280,7 +8286,7 @@
     "name": "agent-payment-test-shop",
     "quarantine": {
       "since": "2026-11-15",
-      "repair": "pending-handoff:1c280e1eda6e4664b936358b2fa2744e",
+      "repair": "https://boxes.dev/thread/thr_ca4cc0b2e036448c8d617a473e298ec0",
       "error": "Timeout after 904s (task timeout=900s) | Agent status: ACTIVE (expected COMPLETED) | Browser agent 5da61f13 (Tilion POST /v1/session 503 capacity_unavailable x2, then timed out after 15000ms; the FAILED browser-initialization record stayed latched so every later init failed 'Browser initialization failed before readiness'). First native attempt FAILED; one automatic retry PASS (FLAKY).",
       "evidence": "PR #2110 deploy smoke .context/deploy-cloud/b05d3a22af70afd20fc25877a2789bf41e21591032a98d08c58e53a9160e4baf (agent cf2f2f5d-6054-4f1f-bf17-37399f231f2f); RCA: initialization.ts initializeLogicalBrowser latches an ambiguous TilionTimeoutError create (unhandled by PR #2010's typed-validation release)"
     },

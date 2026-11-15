@@ -93,7 +93,7 @@
   "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr-2125-closeout",
+      "branch": "detached",
       "current": true,
       "locked": false,
       "needs_integration": false,
