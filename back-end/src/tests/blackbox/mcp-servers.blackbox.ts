@@ -301,7 +301,7 @@ const tests: BlackboxTest[] = [
     name: 'sandbox rose mcp lists the connected tools in every new agent session',
     fn: async () => {
       for (const agentId of [rootA, otherA]) {
-        const [, list, called] = await roseMcp(agentId, [
+        const replies = await roseMcp(agentId, [
           { id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
           { id: 2, method: 'tools/list' },
           {
@@ -310,6 +310,10 @@ const tests: BlackboxTest[] = [
             params: { name: 'fixture-docs__echo', arguments: { text: 'x' } },
           },
         ]);
+        // The stdio server handles lines concurrently: match replies by id, not arrival order.
+        const byId = new Map(replies.map((reply) => [reply.id, reply]));
+        const list = byId.get(2)!;
+        const called = byId.get(3)!;
         const names = (list.result.tools ?? []).map((t) => t.name);
         assert(names.includes('display') && names.includes('fixture-docs__echo'), names.join());
         assert(names.includes('keyed-docs__echo'), 'header-auth server listed too');

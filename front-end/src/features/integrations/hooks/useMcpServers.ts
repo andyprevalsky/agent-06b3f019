@@ -1,7 +1,7 @@
 /**
  * STATE MACHINE: useMcpServers (McpServersSection)
  *
- *   [MOUNT] --GET /integrations/mcp--> [LISTED] | listError
+ *   [MOUNT] --GET /integrations/mcp--> [LISTED] (merged with rows a faster connect added) | listError
  *   [LISTED] --connect(url, headers?)--> [CONNECTING]
  *     --{server}--> [LISTED] (row upserted)
  *     --{server, authorize_url}--> remember this page (MCP_RETURN_KEY) and send
@@ -74,7 +74,12 @@ export function useMcpServers() {
     mounted.current = true;
     fetchMcpServers()
       .then((rows) => {
-        if (mounted.current) setServers(rows);
+        // Merge: a connect that finished before this first load keeps its row.
+        if (mounted.current)
+          setServers((current) => [
+            ...rows,
+            ...current.filter((row) => !rows.some((loaded) => loaded.id === row.id)),
+          ]);
       })
       .catch((cause: unknown) => {
         if (mounted.current) setListError(message(cause, 'Could not load MCP servers'));

@@ -17,6 +17,7 @@ import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import Integrations from '@/pages/Integrations';
 import { McpCallback } from '@/features/integrations/components';
+import { MCP_SIGN_IN_POLL_MS } from '@/features/integrations/hooks/useMcpServers';
 import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -173,6 +174,8 @@ describe.each([false, true])('MCP servers (desktop=%s)', (roseDesktop) => {
         });
       }),
     );
+    // Only the sign-in poll interval is faked; userEvent and msw keep real timers.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     try {
       renderWithProviders(<Integrations />, { roseDesktop });
       const card = await section();
@@ -181,8 +184,11 @@ describe.each([false, true])('MCP servers (desktop=%s)', (roseDesktop) => {
       await user.click(card.getByRole('button', { name: 'Connect MCP server' }));
       await waitFor(() => expect(openExternal).toHaveBeenCalledWith(authorizeUrl));
       expect(bodies[0].redirect_uri).toBe('https://www.roselabs.ai/integrations/mcp/callback');
-      expect(await card.findByText('Connected · 2 tools', {}, { timeout: 8_000 })).toBeVisible();
+      await vi.advanceTimersByTimeAsync(MCP_SIGN_IN_POLL_MS);
+      expect(await card.findByText('Connected · 2 tools')).toBeVisible();
+      expect(listed).toBe(2);
     } finally {
+      vi.useRealTimers();
       delete window.api;
     }
   });
