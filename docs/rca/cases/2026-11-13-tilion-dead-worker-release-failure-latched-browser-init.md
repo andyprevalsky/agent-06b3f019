@@ -12,7 +12,7 @@ symptoms:
   - "Browser initialization failed before readiness"
   - "Browser session init failed after 5 transient-proxy retries"
   - "Tilion HTTP 503 on DELETE /v1/session/sess_993d70"
-  - "browserType.connectOverCDP: WebSocket error: 503 Service Temporarily Unavailable"
+  - "Failed to resume browser task error=AggregateError"
 tags:
   - tilion
   - browser-provider
@@ -24,6 +24,7 @@ sources:
   - PR #1975 r7/r8 smoke (sess_993d70aa, sess_993d7010, sess_993d70a1, sess_993d707b, sess_993d7042)
   - PR #1981 r11, PR #2005 r2, PR #2008 smoke (2026-11-13 02:00-05:30Z)
   - task local probe east.back.tilion.dev 2026-11-13T05:16Z and 05:20Z (create X-Request-ID 4b75055ec1144521)
+  - PR #2014 smoke on pre-fix sources 16f0be6d3 and b6ed04d2d (2026-11-13 07:49-09:36Z; occurrences 2e42c9c8, a9d11683, 2a9b044c)
 repro: back-end/src/tests/blackbox/browser-session-tilion-dead-worker.fixture.ts
 status: fixed
 ---
@@ -221,6 +222,55 @@ and again in its 11:35Z rerun. That group cannot be attributed: it has no source
 it has no factory-ledger rows, and it was frozen before 10:43Z. Every attributable
 source that contains #2010 passed `browser-smoke`. From 12:00Z the Hub shows no
 `before readiness` or `failed validation and cleanup` failures.
+
+## Recurrence on pre-fix sources (PR #2014 smoke, 2026-11-13)
+
+The PR #2014 deploy smoke ran on sources 16f0be6d3 and b6ed04d2d. Neither contains
+7d3fc34cac (`git merge-base --is-ancestor` exits 1), and their `back-end/` product
+code is identical. Three tasks failed with this case's signature, and every one of
+their first creates landed on `sess_993d70*`:
+
+| Task (occurrence) | Root | First bad boundary (guest backend.log) | Task error |
+|---|---|---|---|
+| browser-biometrics-webdecoy (FLAKY 2e42c9c8) | 332cd6e6 | init: 1 create, DELETE 503 ×4, `failed validation and cleanup`, then `before readiness` ×4 | `Timeout after 425s (task timeout=420s)` |
+| agent-payment-idempotent-abandonment (FLAKY a9d11683) | 464ba8f6 | init latch, as above; the second spawn reused task `25991e50` and hit the same FAILED receipt | `Timeout after 905s (task timeout=900s)` |
+| browser-auth-guest-purchase, attempt 1 (FAIL 2a9b044c) | 07d62495 | init latch, as above; the root spawned a second browser | `exceeded its exact root call limit … expected 1, got 2` |
+| browser-auth-guest-purchase, rerun | 5012b110 | init healthy (`sess_98241c`); after the payment-card pause, `POST /api/browser-session/resume` made 1 create on `sess_993d70`, DELETE 503 ×4, `Failed to resume browser task` (500), then the root respawned | same |
+
+This is not a failed guardrail: none of these sources contained the fix. The local
+repro was the identical command
+`node --experimental-test-module-mocks --import tsx src/tests/blackbox/browser-session-tilion-dead-worker.fixture.ts`,
+run with `CONDUCTOR_WORKSPACE_NAME` and a local `victoria_<workspace>` database, as the
+blackbox runner provides. On 16f0be6d3 the fixture is overlaid, plus a test-only
+module exporting `TILION_TASK_CREATE_ATTEMPTS = 2`:
+
+- 16f0be6d3: exit 1. `dead-then-healthy` made 1 create and then hit `before readiness` ×4 (the smoke signature). The resume-only variant made 1 create and ended `failed validation and cleanup` (the rerun signature).
+- main 60d5ca599f: exit 0. All five scenarios pass: init recovers on the second create, and resume makes dead, dead, then binds `sess_c3d0eb`.
+
+Cloud proof on main 60d5ca599f, task unchanged: `scripts/run-bench browser-biometrics-webdecoy`
+fleet run `20261114-181020-342800` (agent `6ef53dab`) PASSED, with cleanup verified. Every
+session landed on `sess_98241c`, so this run proves the task passes on main but did not
+exercise the dead worker live. The local fixture is the recovery proof.
+
+An independent review reached the same first bad boundary for all four runs. These
+paths remain open on main by design:
+
+- A create call that fails outright (5xx, timeout, or no session id) still latches the receipt, because the allocation is ambiguous.
+- A resume replacement fails about 1 in 81 times with one of three workers dead.
+- After a failed resume, the close logs `Logical browser pause ownership changed`. That is downstream of the resume error, not a separate cause.
+
+Marker status on 2026-11-15, from main's factory ledger:
+
+- The `browser-biometrics-webdecoy` marker is released at 7/5 consecutive deploy QUARANTINED_PASS.
+- The `agent-payment-idempotent-abandonment` marker stays, linked to its repair thread, at 2/5. Its only reset was PR #2085's run on `c8a41c131f`, which failed `orgTransfer.transferredCents expected 4396 got 3096` on a healthy session (`sess_c3d0eb`). That is a separate payment-transfer boundary, owned by the payment-interference fix PR #2107, and not this cause.
+
+The regression stays in `/deploy`: a fixture-only change selects the
+`backend-blackbox` `browser-session` domain, whose full run reaches the fixture
+through `runLogicalBrowserCases`. `select_affected_tests.py --lanes-for` reports the
+spawned fixture file itself as unregistered because the call is dynamic, but the
+domain still runs it. The original incident's CDP error
+(`browserType.connectOverCDP: WebSocket error: 503 Service Temporarily Unavailable`)
+does not appear in these guest logs.
 
 ## Human feedback
 
