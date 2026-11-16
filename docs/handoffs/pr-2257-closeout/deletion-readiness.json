@@ -86,7 +86,8 @@
   "live_processes": [],
   "manifest": "docs/handoffs/pr-2257-closeout/closeout-manifest.json",
   "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2257-closeout/closeout-manifest.json, docs/handoffs/pr-2257-closeout/private-archive-receipt.json"
+    "1 unpushed commit(s) in /home/boxes/rose",
+    "branch records/pr2257-closeout has 1 commit(s) on no remote"
   ],
   "pr": 2257,
   "preserved_refs": {
@@ -113,12 +114,8 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-2257-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2257-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-2257-closeout/private-archive-receipt.json"
-      ],
-      "unpushed_commits": 0
+      "uncommitted": [],
+      "unpushed_commits": 1
     }
   ]
 }
