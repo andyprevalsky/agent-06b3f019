@@ -17,7 +17,12 @@ import { IPhoneError, type Transaction } from './types';
 import type { Agent, IPhoneLease } from '@prisma/client';
 
 export async function availability(userId: string, taskId: string) {
-  return runTransactionWithRetry((tx) => availabilityInTransaction(tx, userId, taskId));
+  return runTransactionWithRetry(async (tx) => {
+    // Discovery must not combine the old custody envelope with a newly promoted
+    // lease. Commands retain their device-locked, current-state authorization.
+    await tx.$executeRaw`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`;
+    return availabilityInTransaction(tx, userId, taskId);
+  });
 }
 
 export async function availabilityInTransaction(tx: Transaction, userId: string, taskId: string) {
