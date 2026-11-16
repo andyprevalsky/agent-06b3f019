@@ -160,12 +160,33 @@ The fix is test-only, in `front-end/tests-e2e`:
   order (it uncounts the in-flight counted request, or skips the next one).
   Entry-recovery reloads, chunk reloads and every other document still count.
   `versionReloads` lists each announced target.
-- **`serveDeploySwitchAfterFirstDocument`.** The proxy answers `/version.json`
-  with 404, so a real promote can't add documents to that test's exact counts.
-- **`servesFirstDocument` (the cached-immutable test and the new regression).**
-  The proxy serves its first document from the exact HTML the entry was read
-  from (`liveDocument`), closing the window for a promote between reading the
-  entry and the first document.
+- **`serveDeploySwitchAfterFirstDocument`.** Its documents come from the pinned
+  build: later ones are the pinned HTML with the entry renamed to the simulated
+  next build.
+- **A third mechanism, from PR #2221's repair thread (run 43691173465).** An
+  edge served freshly promoted HTML before that node held its assets, so the
+  recovery's revalidate got a real immutable 404. Their `edge-sim.mjs` (a proxy
+  that 404s the HTML's entry once) reproduces it: main's `:156` fails with
+  `Expected: 2 Received: 3`, and this branch passes 3/3. The pin answers the
+  build under test's assets, so origin 404s never reach it. The proxy answers `/version.json` with 404. Before this, a real
+  promote at 04:53:50Z on 2026-11-16 handed its third document a newer build
+  (`nextRequests` 2, expected 3).
+- **`pinLiveBuild` / `servesPinnedBuild` / `servePinnedBuild` (every
+  entry-load test).** The test reads the live build's HTML and crawls every
+  module and stylesheet its documents can load: 28 files, about 13 MB, on
+  2026-11-16. It re-reads if the origin already lacks one. Each test's proxy serves every
+  document and every pinned asset from that snapshot. The page.route tests
+  navigate to the proxy too.
+  - Why: verification on the merged source caught another window. At 04:45:21Z
+    on 2026-11-16 a promote undeployed the build under test; its entry
+    `index-DWgLaNQK.js` returned 404 at the origin. A Vercel edge kept serving its
+    HTML (Age 14–15 s), so the recovery reload got that HTML again and reloaded
+    a second time (`:156`: `Expected: 2 Received: 3`, 1 of 30 runs).
+  - The same event made main's `project-folder-controls.spec.ts` 390px exhaust
+    `acrossAppReload`'s retries: "the app replaced the document this step ran
+    on". Its failing branch is main's, so it was not introduced here; it is
+    recorded for that test's owner.
+  - With the pin, the build under test stays whole whatever the origin does.
 - **`sidebar-agent-tree.spec.ts` `openSidebarPreview`.** It already routes every
   `/api/**` call to deterministic fixtures, and now also answers `/version.json`
   with 404. `fetchDeployedBuildId` returns null, so no fixture document (the
@@ -186,10 +207,17 @@ after):
   Received: 3`.
 - `sidebar-agent-tree.spec.ts` "the sidebar fixture pages never reload onto a
   build promoted mid-test". Every lower-priority `/version.json` answer names a
-  newer build. Pre-fix: `page.goto: net::ERR_ABORTED at https://www.roselabs.ai/`,
-  the production error, with no timing fixture. Post-fix the promoted route is
-  never reached (`promotedAnswers` 0), and the documents are exactly preview,
-  then home.
+  newer build.
+  - Pre-fix: `page.goto: net::ERR_ABORTED at https://www.roselabs.ai/` (the
+    production error), or `promotedAnswers` 2.
+  - Post-fix: the promoted route is never reached, the final document's
+    `<html data-version-check>` settles to `idle`, and no non-chunk
+    `rose:version-reload:` guard is written.
+- `entry-load-recovery.spec.ts` "the build under test undeployed mid-test, its
+  HTML still at an edge: the recovery reloads once". Every document is the
+  pinned HTML, and the origin 404s its assets after the first. Without the pin:
+  `#root .rose-static-links` stays visible (Expected 0, Received 1). With it:
+  2 documents, count 2, 5/5 runs.
 - `app-reload-helper.spec.ts` "a navigation cancelled by the open document
   reloading is retried after that reload" (static fixture; pre-fix helper:
   `net::ERR_ABORTED`). Its negative control is "acrossAppReload does not retry a
@@ -204,13 +232,18 @@ production-only regressions skip. `select_affected_tests.py --lanes-for` still
 reports NOT RUN for `tests-e2e` specs (the gap predates this change, recorded
 in the PR #2110 case).
 
-Remaining same-class exposure (recorded, not fixed here): a promote between
-`entryPath()` and `goto` in the page.route-based entry-load tests, or during
-"an entry that never loads stops after three bounded reloads". The flakiness
-review also put the residual risk of a promote landing between a document's
-HTML and one of its asset fetches at about 0.1–0.3% per document. Those are alias entry switches, not
-version reloads; removing them needs the stale-document tests pinned to an
-immutable deployment URL.
+Remaining same-class exposure (recorded, not fixed here): tests that load the
+live alias directly can still meet an undeployed build.
+- Verification run v8 on 2026-11-16: `sidebar-agent-tree.spec.ts` "mobile drawer
+  survives repeated close, Escape, selection and rotation" timed out at its last
+  Close click after `navigated to .../?agent-id=launch-root`.
+- Experiment: routing `/assets/*.js` to 404 mid-test reproduces it. Rotating to
+  desktop width lazy-loads a chunk, and `appVersion.ts`'s `vite:preloadError`
+  path reloads (`[AppVersion] a code chunk of build ... failed to load;
+  reloading`).
+- That path is independent of `/version.json`, so this change neither causes
+  nor prevents it; it belongs to whoever owns that test.
+- Production promoted about twice a minute during this repair.
 
 10k-agent behavior: test-only; no runtime path changes.
 

@@ -418,20 +418,23 @@ test('the sidebar fixture pages never reload onto a build promoted mid-test', as
       return route.fulfill({ json: { buildId: `${live?.buildId}-promoted` } });
     },
   );
-  const documents: string[] = [];
-  let versionChecks = 0;
-  page.on('request', (request) => {
-    if (new URL(request.url()).pathname === '/version.json') versionChecks++;
-    if (request.isNavigationRequest() && request.frame() === page.mainFrame())
-      documents.push(new URL(request.url()).search);
-  });
   await openSidebarPreview(page, 320);
   await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
   await expect(
     page.getByTestId('query-model-selector').filter({ visible: true }).last(),
   ).toBeVisible();
-  // The home document's own load check has run too.
-  await expect.poll(() => versionChecks, { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
+  // The home document's own load check has settled without reloading (appVersion.ts publishes
+  // its state on <html>). Fixture documents may still reload for an undeployed entry or chunk
+  // under real deploy churn; this test is only about the version check.
+  await expect(page.locator('html')).toHaveAttribute('data-version-check', 'idle', {
+    timeout: 30_000,
+  });
   expect(promotedAnswers).toBe(0);
-  expect(documents).toEqual([`?agent-id=${ROOT}`, '']);
+  const versionReloads = await page.evaluate(() =>
+    Object.keys(sessionStorage).filter(
+      (key) =>
+        key.startsWith('rose:version-reload:') && !key.startsWith('rose:version-reload:chunk:'),
+    ),
+  );
+  expect(versionReloads).toEqual([]);
 });

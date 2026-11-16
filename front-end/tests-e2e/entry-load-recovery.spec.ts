@@ -8,31 +8,88 @@ test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true
 // The entry is the document's last module script: /assets/index-*.js or /assets/main-*.js
 // in production builds (E2E fixtures add a modulepreloaded index-* chunk), /src/main.tsx
 // on the dev server. Resolve it from the served HTML instead of guessing a file name.
-async function liveDocument(page: Page): Promise<{ html: string; entry: string }> {
-  const html = await (await page.request.get(`${FRONTEND_URL}/?no-auto-login`)).text();
+function entryOf(html: string): string {
   const sources = [...html.matchAll(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/g)];
   expect(sources.length).toBeGreaterThan(0);
-  return { html, entry: new URL(sources[sources.length - 1][1], FRONTEND_URL).pathname };
+  return new URL(sources[sources.length - 1][1], FRONTEND_URL).pathname;
 }
-async function entryPath(page: Page): Promise<string> {
-  return (await liveDocument(page)).entry;
+type Pinned = { status: number; headers: Record<string, string>; body: Buffer };
+// The build under test, pinned: its HTML and every module and stylesheet its documents can
+// load, read together. A promote mid-test can undeploy it while an edge still serves its HTML
+// (its assets 404 at the origin, 2026-11-16 04:45Z), and then its entry recovery reloads again
+// for a reason the test did not cause, and a document can name another build's entry. A proxy
+// answering from the pin keeps every document on the build under test, whole. Re-read when the
+// origin already lacks one of its assets.
+async function pinLiveBuild() {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const html = await (await fetch(`${FRONTEND_URL}/?no-auto-login`)).text();
+    const assets = new Map<string, Pinned>();
+    let pending = [...new Set(html.match(/\/assets\/[\w.-]+\.(?:js|css)/g) ?? [])];
+    let whole = true;
+    while (pending.length && whole) {
+      const fetched = await Promise.all(
+        pending.map(async (path) => {
+          const response = await fetch(new URL(path, FRONTEND_URL));
+          const headers: Record<string, string> = {};
+          response.headers.forEach((value, name) => {
+            if (
+              !['connection', 'content-encoding', 'content-length', 'transfer-encoding'].includes(
+                name,
+              )
+            )
+              headers[name] = value;
+          });
+          const body = Buffer.from(await response.arrayBuffer());
+          return { path, pinned: { status: response.status, headers, body } };
+        }),
+      );
+      const next = new Set<string>();
+      for (const { path, pinned } of fetched) {
+        if (pinned.status !== 200) whole = false;
+        assets.set(path, pinned);
+        // Chunks name each other as "./name.js" (imports) or "assets/name.js" (preload map).
+        if (path.endsWith('.js'))
+          for (const [, name] of pinned.body
+            .toString()
+            .matchAll(/(?:assets\/|\.\/)([\w.-]+\.(?:js|css))/g))
+            if (!assets.has(`/assets/${name}`)) next.add(`/assets/${name}`);
+      }
+      pending = [...next];
+    }
+    if (whole) return { html, entry: entryOf(html), assets };
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error('the live build never served all of its assets');
 }
-// A proxy's first document is the HTML the entry was read from, so a build promoted in between
-// cannot hand it another entry; later documents come from the live origin.
-function servesFirstDocument(html: string) {
-  let documents = 0;
-  return (url: URL, accept: string): Answer | null =>
-    url.pathname === '/' && accept.includes('text/html') && documents++ === 0
-      ? {
-          status: 200,
-          headers: { 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8' },
-          body: html,
-        }
-      : null;
+// Every document is the pinned HTML, and the pinned build's assets come from the pin.
+function servesPinnedBuild(pin: Awaited<ReturnType<typeof pinLiveBuild>>) {
+  return (url: URL, accept: string): Answer | null => {
+    if (url.pathname === '/' && accept.includes('text/html'))
+      return {
+        status: 200,
+        headers: { 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8' },
+        body: pin.html,
+      };
+    return pin.assets.get(url.pathname) ?? null;
+  };
+}
+// A proxy serving only the pinned build (and the live origin for anything else); closed after
+// each test.
+const proxies: { close: () => void }[] = [];
+test.afterEach(() => {
+  for (const proxy of proxies.splice(0)) proxy.close();
+});
+async function servePinnedBuild() {
+  const pin = await pinLiveBuild();
+  const pinned = servesPinnedBuild(pin);
+  const server = await serveFrontend(
+    (url, accept) => pinned(url, accept) ?? { upstreamPath: url.pathname },
+  );
+  proxies.push(server);
+  return { origin: server.origin, entry: pin.entry };
 }
 // After a production alias switch the previous build's entry chunk is a plain 404.
-async function failEntry(page: Page, times: number) {
-  const entry = await entryPath(page);
+async function failEntry(page: Page, entry: string, times: number) {
   let failed = 0;
   await page.route(
     (url) => url.pathname === entry,
@@ -45,7 +102,6 @@ async function failEntry(page: Page, times: number) {
           })
         : route.continue(),
   );
-  return entry;
 }
 const VERSION_RELOAD_GUARD = 'rose:version-reload:';
 // Document requests only: the app's own history updates also fire framenavigated.
@@ -110,9 +166,10 @@ test('stale document whose entry chunk 404s reloads onto the live build and moun
 }) => {
   page.setDefaultTimeout(30_000);
   await installMobileTrajectories(page);
-  const entry = await failEntry(page, 1);
+  const { origin, entry } = await servePinnedBuild();
+  await failEntry(page, entry, 1);
   const loads = await countDocuments(page, entry);
-  const url = `${FRONTEND_URL}/?no-auto-login&agent-id=${MOBILE_AGENTS[0]}`;
+  const url = `${origin}/?no-auto-login&agent-id=${MOBILE_AGENTS[0]}`;
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toBeVisible();
   await expect(page.locator(`[data-message-id^="${MOBILE_AGENTS[0]}-"]`).first()).toBeVisible();
@@ -122,7 +179,7 @@ test('stale document whose entry chunk 404s reloads onto the live build and moun
 // A real origin in front of the frontend. `answer` serves a request itself, or names the
 // upstream path to forward it to and an optional rewrite of the forwarded body.
 type Answer =
-  | { status: number; headers: Record<string, string>; body: string }
+  | { status: number; headers: Record<string, string>; body: string | Buffer }
   | { upstreamPath: string; rewrite?: (body: string) => string };
 async function serveFrontend(answer: (url: URL, accept: string) => Answer) {
   const server = http.createServer((request, response) => {
@@ -168,23 +225,21 @@ async function serveFrontend(answer: (url: URL, accept: string) => Answer) {
 // Vercel answers a missing /assets/* file with 404 plus that path's year-long immutable
 // Cache-Control, and a reload replays a cached 404 without asking the network. page.route
 // disables the browser HTTP cache, so a real origin in front of the frontend serves it.
-async function serveEntryCachedAs404Once({ html, entry }: { html: string; entry: string }) {
+async function serveEntryCachedAs404Once(pin: Awaited<ReturnType<typeof pinLiveBuild>>) {
   let entryRequests = 0;
-  const firstDocument = servesFirstDocument(html);
-  const server = await serveFrontend(
-    (url, accept) =>
-      firstDocument(url, accept) ??
-      (url.pathname === entry && entryRequests++ === 0
-        ? {
-            status: 404,
-            headers: {
-              'cache-control': 'public, max-age=31536000, immutable',
-              'content-type': 'text/plain; charset=utf-8',
-            },
-            body: 'The page could not be found',
-          }
-        : { upstreamPath: url.pathname }),
-  );
+  const pinned = servesPinnedBuild(pin);
+  const server = await serveFrontend((url, accept) => {
+    if (url.pathname === pin.entry && entryRequests++ === 0)
+      return {
+        status: 404,
+        headers: {
+          'cache-control': 'public, max-age=31536000, immutable',
+          'content-type': 'text/plain; charset=utf-8',
+        },
+        body: 'The page could not be found',
+      };
+    return pinned(url, accept) ?? { upstreamPath: url.pathname };
+  });
   return { ...server, entryRequests: () => entryRequests };
 }
 // Every production deploy starts this suite, so a later merge can switch the alias between a
@@ -192,18 +247,27 @@ async function serveEntryCachedAs404Once({ html, entry }: { html: string; entry:
 // build's entry, which 404s once (an edge node served the new HTML before it held the new
 // assets; page.route disables the HTTP cache, so no immutable header is needed) and then
 // serves a module importing the real entry: lazy chunks import it by name, so one app copy.
-// The simulated switch is the only one these documents see: /version.json is not served, so a
-// real promote mid-test cannot add appVersion reloads to the exact document counts below.
-async function serveDeploySwitchAfterFirstDocument(entry: string) {
+// The simulated switch is the only one these documents see: they all come from the pinned
+// build, and /version.json is not served, so a real promote mid-test (04:53:50Z on 2026-11-16
+// handed the third document a newer build: nextRequests 2) cannot change the exact counts.
+async function serveDeploySwitchAfterFirstDocument(pin: Awaited<ReturnType<typeof pinLiveBuild>>) {
+  const { entry } = pin;
   const next = entry.replace(/(\.[^./]+)$/, '-next$1');
+  const pinned = servesPinnedBuild(pin);
   let documents = 0;
   let nextRequests = 0;
   const server = await serveFrontend((url, accept) => {
     if (url.pathname === '/version.json')
       return { status: 404, headers: { 'content-type': 'text/plain' }, body: 'Not found' };
+    // Every document is the pinned build's; the simulated switch, not a real one, renames its
+    // entry after the first.
     if (url.pathname === '/' && accept.includes('text/html') && documents++ > 0)
-      return { upstreamPath: '/', rewrite: (html) => html.replaceAll(`"${entry}"`, `"${next}"`) };
-    if (url.pathname !== next) return { upstreamPath: url.pathname };
+      return {
+        status: 200,
+        headers: { 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8' },
+        body: pin.html.replaceAll(`"${entry}"`, `"${next}"`),
+      };
+    if (url.pathname !== next) return pinned(url, accept) ?? { upstreamPath: url.pathname };
     if (nextRequests++ === 0)
       return { status: 404, headers: { 'content-type': 'text/plain' }, body: 'Not found' };
     return {
@@ -218,9 +282,9 @@ test('an entry 404 cached as immutable is refetched before the reload and the ap
   page,
 }) => {
   page.setDefaultTimeout(30_000);
-  const live = await liveDocument(page);
-  const { entry } = live;
-  const origin = await serveEntryCachedAs404Once(live);
+  const pin = await pinLiveBuild();
+  const { entry } = pin;
+  const origin = await serveEntryCachedAs404Once(pin);
   try {
     const loads = await countDocuments(page, entry);
     await page.goto(`${origin.origin}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
@@ -237,8 +301,6 @@ test('an entry 404 cached as immutable is refetched before the reload and the ap
 // Prod semantic run 43686929632: a build went live between the recovery reload and the mount,
 // so the recovered document's load check reloaded it onto that build (Expected 2, Received 3).
 // Every /version.json here names a newer build; the entry 404s once (no-store: never cached).
-// Should a real promote also hand the recovery reload the next build, that build announces the
-// reload instead, which is not the build under test's: the counts below hold either way.
 test('a build promoted before the recovered document mounts: its version reload is not the recovery’s', async ({
   page,
 }) => {
@@ -251,12 +313,11 @@ test('a build promoted before the recovered document mounts: its version reload 
   // The Vite dev server has no build id, so the app never version-reloads there.
   test.skip(!live?.buildId, 'frontend is not a production build');
   const promoted = `${live?.buildId}-promoted`;
-  const { html, entry } = await liveDocument(page);
-  const firstDocument = servesFirstDocument(html);
+  const pin = await pinLiveBuild();
+  const { entry } = pin;
+  const pinned = servesPinnedBuild(pin);
   let entryRequests = 0;
   const origin = await serveFrontend((url, accept) => {
-    const first = firstDocument(url, accept);
-    if (first) return first;
     if (url.pathname === '/version.json')
       return { upstreamPath: url.pathname, rewrite: () => JSON.stringify({ buildId: promoted }) };
     if (url.pathname === entry && entryRequests++ === 0)
@@ -265,7 +326,7 @@ test('a build promoted before the recovered document mounts: its version reload 
         headers: { 'cache-control': 'no-store', 'content-type': 'text/plain' },
         body: 'Not found',
       };
-    return { upstreamPath: url.pathname };
+    return pinned(url, accept) ?? { upstreamPath: url.pathname };
   });
   try {
     let documents = 0;
@@ -275,8 +336,7 @@ test('a build promoted before the recovered document mounts: its version reload 
     const loads = await countDocuments(page, entry);
     await page.goto(`${origin.origin}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
     // The recovered document reloaded onto the promoted build, once (appVersion's guard), and
-    // that document mounts. The raw total is only a wait: a real promote mid-test can add a
-    // foreign build's own documents (seen in this repair's runner check: a 07:40:46Z promote).
+    // that document mounts.
     await expect.poll(() => loads.versionReloads.length, { timeout: 30_000 }).toBe(1);
     await expect.poll(() => documents, { timeout: 30_000 }).toBeGreaterThanOrEqual(3);
     await expect(page.locator('#root .rose-static-links')).toHaveCount(0);
@@ -288,11 +348,57 @@ test('a build promoted before the recovered document mounts: its version reload 
     origin.close();
   }
 });
+// Semantic gate check, 2026-11-16 04:45Z: a promote undeployed the build under test (its
+// entry 404 at the origin) while an edge kept serving its HTML for ~15 s, so the recovery
+// reload got that HTML again and reloaded a second time (Expected 2, Received 3). Here every
+// document is that HTML, and once the first has loaded the origin no longer has its assets.
+test('the build under test undeployed mid-test, its HTML still at an edge: the recovery reloads once', async ({
+  page,
+}) => {
+  page.setDefaultTimeout(30_000);
+  const pin = await pinLiveBuild();
+  const pinned = servesPinnedBuild(pin);
+  let documents = 0;
+  let entryRequests = 0;
+  const origin = await serveFrontend((url, accept) => {
+    if (url.pathname === '/version.json')
+      return { status: 404, headers: { 'content-type': 'text/plain' }, body: 'Not found' };
+    if (url.pathname === '/' && accept.includes('text/html') && documents++ > 0)
+      return {
+        status: 200,
+        headers: { 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8' },
+        body: pin.html,
+      };
+    if (url.pathname === pin.entry && entryRequests++ === 0)
+      return {
+        status: 404,
+        headers: { 'cache-control': 'no-store', 'content-type': 'text/plain' },
+        body: 'Not found',
+      };
+    const answer = pinned(url, accept);
+    if (answer) return answer;
+    // The origin after the promote: the undeployed build's assets are gone.
+    if (url.pathname.startsWith('/assets/'))
+      return { status: 404, headers: { 'content-type': 'text/plain' }, body: 'Not found' };
+    return { upstreamPath: url.pathname };
+  });
+  try {
+    const loads = await countDocuments(page, pin.entry);
+    await page.goto(`${origin.origin}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('#root .rose-static-links')).toHaveCount(0);
+    await expect(page.locator('#root > *').first()).toBeAttached();
+    expect(documents).toBe(2);
+    expect(loads.count).toBe(2);
+  } finally {
+    origin.close();
+  }
+});
 test('an entry that never loads stops after three bounded reloads', async ({ page }) => {
   await installMobileTrajectories(page);
-  const entry = await failEntry(page, Number.POSITIVE_INFINITY);
+  const { origin, entry } = await servePinnedBuild();
+  await failEntry(page, entry, Number.POSITIVE_INFINITY);
   const loads = await countDocuments(page, entry);
-  await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${origin}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
   await expect.poll(() => loads.count, { timeout: 20_000 }).toBe(4);
   // Twice the largest backoff: a fourth reload would have started by now.
   await page.waitForTimeout(4_000);
@@ -306,7 +412,7 @@ test('connectivity lost during the backoff waits for online without spending an 
 }) => {
   page.setDefaultTimeout(30_000);
   await installMobileTrajectories(page);
-  const entry = await entryPath(page);
+  const { origin, entry } = await servePinnedBuild();
   let failed = 0;
   // The connection drops just as the stale entry fails, before the backoff timer fires.
   await page.route(
@@ -318,7 +424,7 @@ test('connectivity lost during the backoff waits for online without spending an 
     },
   );
   const loads = await countDocuments(page, entry);
-  await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${origin}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
   // Past the first 0.5 s backoff: no offline reload, and the attempt is not charged.
   await page.waitForTimeout(2_000);
   expect(loads.count).toBe(1);
@@ -337,8 +443,9 @@ test('a deploy switch during the offline backoff: the stale document reloads onc
 }) => {
   page.setDefaultTimeout(30_000);
   await installMobileTrajectories(page);
-  const entry = await entryPath(page);
-  const origin = await serveDeploySwitchAfterFirstDocument(entry);
+  const pin = await pinLiveBuild();
+  const { entry } = pin;
+  const origin = await serveDeploySwitchAfterFirstDocument(pin);
   try {
     let failed = 0;
     await page.route(
@@ -389,7 +496,7 @@ test('connectivity lost while revalidating the entry waits for online and charge
 }) => {
   page.setDefaultTimeout(30_000);
   await installMobileTrajectories(page);
-  const entry = await entryPath(page);
+  const { origin, entry } = await servePinnedBuild();
   let requests = 0;
   // The stale entry 404s online; the connection drops just as the recovery refetches it.
   await page.route(
@@ -406,7 +513,7 @@ test('connectivity lost while revalidating the entry waits for online and charge
     },
   );
   const loads = await countDocuments(page, entry);
-  await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${origin}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
   await expect.poll(() => requests).toBe(2);
   // No offline navigation: the static links stay, and the one attempt is charged once.
   await page.waitForTimeout(2_000);
