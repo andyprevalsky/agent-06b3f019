@@ -1137,6 +1137,10 @@ ROOT_DIR={shlex.quote(str(tmp_path))}
 BENCHES=(fixture)
 CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
 WARM_ID=exact-donor
+# Pin the receipt in the fixture itself: an unpinned run only warns (32d496a713),
+# so the inherited controller environment must not decide the outcome.
+CLOUDBENCH_IMAGE_BUILD_RECEIPT=/fixture/cloudbench-image-build.json
+CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256={'0' * 64}
 primary_clone_storage_mode() {{ printf '%s' {'snapshot' if case == 'snapshot-primary' else 'fresh'}; }}
 cloudbench_node_dependency_fingerprint() {{ printf node; }}
 cloudbench_manifest_fingerprint() {{ printf python; }}
@@ -1962,6 +1966,10 @@ def test_predeploy_local_runner_selects_via_predeploy_selector() -> None:
     assert "PREDEPLOY_BENCH_CAP" in PREDEPLOY_LOCAL_SCRIPT.read_text()
 
 
+def _sealed_run_identity(raw: bytes) -> str:
+    return f"run_result: bytes={len(raw)} sha256={hashlib.sha256(raw).hexdigest()}"
+
+
 @pytest.mark.parametrize("fault", ["truncated-stream", "missing-capture", "foreign-owner", "foreign-task"])
 def test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated(tmp_path: Path, fault: str) -> None:
     """Run the actual artifact selection and identity checks after collection."""
@@ -2007,7 +2015,9 @@ def test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated(
         with pytest.raises(json.JSONDecodeError):
             json.loads(streamed)
     log = tmp_path / "driver.log"
-    log.write_text(f"RESULT-BEGIN\n{streamed}RESULT-END\n")
+    sealed = (capture / "run.json").read_bytes() if (capture / "run.json").exists() else raw.encode()
+    identity = _sealed_run_identity(sealed)
+    log.write_text(f"RESULT-BEGIN\nrun_file: /data/repo/.context/cloudbench/run.json\n{identity}\n{streamed}RESULT-END\n")
     selected = tmp_path / "selected.json"
     setup = "\n".join(
         [
@@ -2050,6 +2060,145 @@ def test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated(
         assert result.returncode != 0, "unowned or invalid evidence was admitted"
         assert not selected.exists()
         assert (output / "runtime-evidence.pending").exists()
+
+
+def _emit_guest_result(tmp_path: Path, run_bytes: bytes, inline: str | None) -> bytes:
+    """Run the guest's real emit_report_and_result() over one fresh run record."""
+    driver = (CLOUD_SCRIPT.parent / "cloudbench-run.sh").read_text()
+    function = _extract_fleet_function(driver, "emit_report_and_result() {")
+    repo = tmp_path / "repo"
+    context = repo / ".context/cloudbench"
+    runs = repo / "agents/benchmarks/runs"
+    context.mkdir(parents=True)
+    runs.mkdir(parents=True)
+    marker = tmp_path / "run-start.marker"
+    marker.write_text("")
+    os.utime(marker, (time.time() - 60, time.time() - 60))
+    (runs / "run_fixture.json").write_bytes(run_bytes)
+    (context / "report-card.json").write_text('{"run_id": "fixture"}')
+    selector = tmp_path / "select_run.py"
+    selector.write_text("import sys\nprint(sys.argv[1] + '/run_fixture.json')\n")
+    setup = "\n".join(
+        [
+            "REPO_DIR=" + shlex.quote(str(repo)),
+            "CONTEXT_DIR=" + shlex.quote(str(context)),
+            "RUN_OUTPUT_MARKER=" + shlex.quote(str(marker)),
+            "CURRENT_RUN_ARTIFACT_SCRIPT=" + shlex.quote(str(selector)),
+            "APP_USER=nobody-fixture",
+            "CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0",
+            "REPORT_BEGIN=REPORT-BEGIN",
+            "REPORT_END=REPORT-END",
+            "RESULT_BEGIN=RESULT-BEGIN",
+            "RESULT_END=RESULT-END",
+            *([] if inline is None else ["export CLOUDBENCH_INLINE_RUN_RESULT=" + inline]),
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-c", setup + "\n" + function + "\nemit_report_and_result"],
+        capture_output=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr[-600:]
+    return result.stdout
+
+
+def test_boot_guest_result_streams_identity_not_the_run_record(tmp_path: Path) -> None:
+    """RCA 2026-11-14 sealed-evidence recurrence (2026-11-16): boot-launch guests
+    copied a 54-77 MB run.json into bench.log between the result markers, so the
+    controller streamed it through the shared relay in 256 KiB reads for ~6
+    minutes and then downloaded the same record again as sealed evidence; the
+    relay re-leased the status route 23-32 times and the sealed reads timed out.
+
+    A boot-launch member must emit only the record's identity; the controller
+    must still select and verify the sealed copy. Held-driver paths keep the
+    inline record they read."""
+    document = {
+        "timestamp": "2026-11-16T05:00:00+00:00",
+        "summary": {"total": 1, "passed": 1, "failed": 0, "pass_rate": 1.0},
+        "tasks": [
+            {
+                "name": "owned-bench",
+                "world_model_mode": "real",
+                "passed": True,
+                "benchmark_status": "PASSED",
+                "logs": ["x" * 1024] * (50 * 1024),
+            }
+        ],
+    }
+    raw = (json.dumps(document, indent=2) + "\n").encode()
+    assert len(raw) > 50 * 1024 * 1024
+
+    emitted = _emit_guest_result(tmp_path / "boot", raw, "0")
+    assert len(emitted) < 4096, len(emitted)
+    assert raw[:4096] not in emitted
+    identity = _sealed_run_identity(raw)
+    assert emitted.decode().splitlines().count(identity) == 1, emitted.decode()
+    # Held-driver paths (and controllers that predate the flag) keep the inline record.
+    for inline in ("1", None):
+        assert raw.rstrip(b"\n") in _emit_guest_result(tmp_path / f"inline-{inline}", raw, inline)
+
+    # The controller selects the sealed record and binds it to the emitted identity.
+    cloud = CLOUD_SCRIPT.read_text()
+    assert '--env "CLOUDBENCH_INLINE_RUN_RESULT=$(cloudbench_inline_run_result)"' in cloud
+    assert 'echo "export CLOUDBENCH_INLINE_RUN_RESULT=$(cloudbench_inline_run_result)"' in cloud
+    mode = _extract_fleet_function(cloud, "cloudbench_inline_run_result() {")
+    held = _extract_fleet_function(cloud, "cloudbench_skip_held_driver_teardown_race() {")
+    for boot, probe, skip, expected in (("1", "0", "0", "0"), ("1", "1", "0", "1"), ("1", "0", "1", "1"), ("0", "0", "0", "1")):
+        chosen = subprocess.run(
+            ["bash", "-c", held + mode + "cloudbench_inline_run_result"],
+            env={**os.environ, "CLOUDBENCH_BOOT_LAUNCH": boot, "CLOUDBENCH_INFRA_PROBE": probe,
+                 "CLOUDBENCH_SKIP_AUTOSCALER": skip},
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert chosen == expected, (boot, probe, skip, chosen)
+    start = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then', cloud.index("# ── 5. Retrieve report-card.json"))
+    block = cloud[start : cloud.index('\necho ""\necho "════════════════════ REPORT CARD', start)]
+    token, machine = "owned-terminal-0", "abcdef12345678"
+    output = tmp_path / "bench"
+    capture = output / "remote-logs/runtime-evidence"
+    capture.mkdir(parents=True)
+    (capture / "run.json").write_bytes(raw)
+    owner = {"version": 1, "run_token": token, "machine_id": machine}
+    (output / "runtime-evidence.pending").write_text(json.dumps(owner))
+    (output / "runtime-evidence.owner.json").write_text(json.dumps(owner))
+    log = tmp_path / "driver.log"
+    log.write_bytes(emitted)
+    selected = tmp_path / "selected.json"
+    setup = "\n".join(
+        [
+            "cloudbench_skip_held_driver_teardown_race() { return 1; }",
+            "CLOUDBENCH_BOOT_LAUNCH=1",
+            "BENCH_SIMULATE=0",
+            "CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0",
+            "REPORT_BEGIN=REPORT-BEGIN",
+            "REPORT_END=REPORT-END",
+            "RESULT_BEGIN=RESULT-BEGIN",
+            "RESULT_END=RESULT-END",
+            "BENCH_TASKS=(owned-bench)",
+            "SSH_LOG=" + shlex.quote(str(log)),
+            "OUT_DIR=" + shlex.quote(str(output)),
+            "RUN_LOG_TOKEN=" + shlex.quote(token),
+            "mid=" + shlex.quote(machine),
+            "CLOUDBENCH_RESULT_SCRIPT=" + shlex.quote(str(CLOUDBENCH_RESULT_SCRIPT)),
+        ]
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            setup
+            + "\n"
+            + block
+            + '\n[ "$RUN_IDENTITY_OK" = "1" ] || exit 70\nprintf "%s\\n" "$RUN_JSON" > '
+            + shlex.quote(str(selected)),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout[-600:] + result.stderr[-600:]
+    assert json.loads(selected.read_text()) == document
+    assert not (output / "runtime-evidence.pending").exists()
 
 
 def test_cloudbench_result_allows_only_approved_claude_credential_skip(tmp_path: Path) -> None:
