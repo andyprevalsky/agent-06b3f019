@@ -12,9 +12,9 @@ export interface OutboundPhoneNumber {
 
 // Pool of outbound phone numbers for load distribution.
 // Randomly selecting from the pool helps avoid spam flags and per-number rate limits.
+// +14159416744 (2fe93786-…) is excluded: it is the phone-call-payment benchmark's answering line.
 export const OUTBOUND_PHONE_NUMBER_POOL: OutboundPhoneNumber[] = [
   { id: '632d5264-34f2-4bf4-a4e3-3822b11adcf1', number: '+14154498445' },
-  { id: '2fe93786-c619-4a57-8a74-710f87b7b13b', number: '+14159416744' },
 ];
 
 // Default ElevenLabs voice ID for outbound calls — "Rose", the first preset

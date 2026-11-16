@@ -11,6 +11,8 @@ symptoms:
   - "failed proof abandoned exact cleanup obligation"
   - "unexpected EOF while looking for matching"
   - "process substitution: line 617"
+  - "process substitution: line 1007"
+  - "trap: line 2: unexpected EOF while looking for matching"
 tags:
   - fleet-proof
   - signal
@@ -19,9 +21,13 @@ sources:
   - PR #1770
   - commit b544c29434ccbb5075952850b7701ffec14545c9
   - commit b5d81c3e240c1349439c99dab00c3ea77631e76c
+  - PR #1921
+  - PR #1992
+  - commit 2af91a1ada2089205587f5cb78597962e7c7af4a
+  - commit b380b1eae733dec70c4409d6ce9aa658ffe4f587
   - task .context/deploy-runs/main705-b5d81c3e2-qualification-20261016/A-FAILURE-RECEIPT.json
   - task .context/test-runs/fleet-proof-test_signal_waits_for_owned_producer_before_recovery-97jeu3ju/fixture/output.log
-repro: python3 scripts/tests/fleet-stability-cleanup.test.py FleetFailureCleanup.test_signal_waits_for_owned_producer_before_recovery
+repro: python3 scripts/tests/fleet-stability-cleanup.test.py FleetFailureCleanup.test_waiter_probes_survive_trapped_signal_storm
 status: fixed
 ---
 
@@ -102,6 +108,65 @@ whole-suite outcome are separate evidence. The existing permanent test already
 owns this exact cancellation/recovery boundary; its assertions and deadlines
 are unchanged and the deploy structural runner continues to execute it.
 
+### Second recurrence — November 12, 2026
+
+PR #1921's Blacksmith structural run 43288783754 (source b380b1eae7, which
+already contains the November 7 fix) failed the unchanged
+FleetFailureCleanup.test_cancellation_does_not_depend_on_body_pid_probe once
+(FLAKY 6a8453c3ef3b46a08607ecdf27b9dcdc): `0 != 1 : failed proof abandoned
+exact cleanup obligation`, with cloudbench-env.sh `trap: line 2` and
+`process substitution: line 1007` unexpected EOF. Line 1007 is the waiter's
+`pgid="$(cloudbench_tracked_owner_value ...)"` prologue read. The retained
+fixture shows calls with only the fleet line, slice-0.cleanup.json still
+`pending`, and the slice later SIGKILLed by the test's own finally cleanup.
+The fixture file was not truncated: the "EOF" is Bash's own parse of the
+substitution text.
+
+Why the earlier fix did not hold: it converted only recover_proof_slice's
+probe. forward_proof_cancellation runs every 0.1 seconds and re-sends the
+signal to the published waiter for the waiter's whole life, so every
+`$(...)`/`<(...)` executed by that process is a target: the
+run_owned_proof_slice owner reads and log-relay process substitution after
+publication, and every owner read, group-state probe, `$(seq ...)` and
+cloudbench_pid_matches_start inside cloudbench_wait_tracked_detached.
+
+Mechanism, reduced (Bash 5.2.21): a subshell with `trap ':' TERM` looping on
+`x="$(f)"` while only that PID receives TERMs prints exactly
+`trap: line 2: unexpected EOF while looking for matching `)'` and
+`process substitution: line N: ...`, and the trapped shell itself exits: no
+later statement in or after the function runs, so `|| true` guards cannot
+contain it. The CI evidence matches: no `FATAL: detached ownership handshake
+is malformed` line (an empty read would print it), slice-0.cleanup.json stayed
+`pending` and active-waiter.owner was never removed. With the same
+storm, a fork-free `while IFS= read -r` record reader and a pipeline producer
+whose tri-state is returned through the reader's exit status returned correct
+values on all iterations across 766,443 delivered TERMs.
+
+Causal fail/pass: the new permanent
+FleetFailureCleanup.test_repeated_waiter_cancellation_keeps_exact_cleanup runs
+the unchanged cancel case while delivering TERM to the published waiter every
+0.5 ms. Buggy source: 3/6 runs failed with the unexpected EOF signature (an
+earlier scratch storm failed 4/10, three with the exact CI assertion
+`0 != 1 : failed proof abandoned exact cleanup obligation`). Fixed source: 5/5
+consecutive passes together with the original test, a 20-run scratch storm of
+about 3,000 TERMs each passed 20/20, and the full fleet-stability-cleanup suite
+passes. The unchanged original test also passed 96/96 under 6-core CPU load
+on the buggy source, which is why the dense storm is the discriminating repro.
+
+### Deterministic regression — November 15, 2026
+
+A post-merge review of #1992 found that the cancel-case storm reproduces only
+intermittently (it passed 3/3 on the parent commit there, and 1-3/6 failed
+here), because the waiter runs few substitutions per case. The permanent
+FleetFailureCleanup.test_waiter_probes_survive_trapped_signal_storm now runs
+the waiter's own identity and group probes (cloudbench_pid_matches_start,
+cloudbench_process_group_exists) 1500 times in a TERM-trapped shell that
+receives TERM every 2 ms. It failed 8/8 on the pre-fix library with
+`unexpected EOF` and passed 10/10 on the fix, including 3/3 under 6-core CPU
+load. A flakiness cross-review passed it after adding a bounded signal
+deadline and an explicit unreaped-child PID check. The cancel-case storm now
+only signals a PID whose proc-start birth still matches.
+
 ## Solution
 
 ### Original investigation — October 16, 2026 (superseded below)
@@ -150,10 +215,27 @@ empty observations and a producer that emits absent but exits nonzero; only
 absent with exit zero recovers. Golden reference: not applicable (ordinary
 operational cleanup code, no approval-gated hunk).
 
+### Implemented second-recurrence fix — November 12, 2026
+
+Make every expansion in the signal-reachable waiter process substitution-free,
+keeping traps, deadlines, ownership checks and fail-closed tri-states:
+cloudbench_tracked_owner_value_into (fork-free first-match record read),
+cloudbench_tristate_into (producer runs as a pipeline child; live/absent pass
+through, anything else is unknown), used for every group-state probe and for
+cloudbench_pid_matches_start/cloudbench_process_group_exists; arithmetic
+status-grace loops; and a builtin read of the terminal status. The proof now
+publishes active-waiter.owner after the log-relay process substitution, just
+before the waiter; earlier cancellation is still caught by the existing
+cancel.request check before launch and by repeated forwarding afterwards.
+The trapped top-level controller's forward_proof_cancellation, which runs every
+0.1 seconds, reads cancel.request and active-waiter.owner with builtins for
+the same reason.
+The quarantine marker on the original test was removed (main independently released it at its 5-pass streak in dab14eab09). Shipped in PR #1992, merged 2af91a1ada on 2026-11-15; its final deploy round passed all 17 gates on 1f68ad81b, and production semantic verification passed (run 43677075875).
+
 ## Human feedback
 
 None recorded.
 
 ## Reusable lesson
 
-Keep cancellation waiters out of nested command-substitution parsing while retaining fail-closed canonical process-state checks.
+Any Bash process that can receive a trapped signal must not execute $(...) or <(...) itself; read records fork-free and return producer state from pipeline children.

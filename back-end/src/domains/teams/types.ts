@@ -22,6 +22,7 @@ export interface ShareableAccount {
   provider: string;
   accountId: string;
   accountEmail: string | null;
+  label: string | null;
   name: string;
   status: string;
   ownerUserId: string;

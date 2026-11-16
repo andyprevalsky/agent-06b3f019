@@ -31,7 +31,7 @@ from urllib.parse import urlsplit, unquote
 import deploy_gate_progress as progress
 import deploy_test_quarantine as quarantine
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
-from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
+from deploy_test_result import MAX_RECEIPT_BYTES, aggregate_resplit, preserve_contract, validate as validate_result, validate_recipe
 from deploy_test_isolation import validate as validate_isolation, external_tmpdir
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -296,6 +296,11 @@ def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=
             from deploy_test_agentcard_renewal import validate_active
             validate_active(state, warning)
         expected[case] = {'disposition': RESOURCE_SKIP, **warning}
+    policy = quarantine.user_deploy_exclusions(root, state['source'], gate,
+        state['input_fingerprints'].get(name), state.get('environment'))
+    if set(policy) & set(expected):
+        raise ValueError('user deploy quarantine conflicts with another qualification')
+    expected.update(policy)
     if include_custody:
         from deploy_test_historical_custody import guard, identical_inputs_binding
         current = (identical_inputs_binding(state, root)
@@ -361,6 +366,7 @@ def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=Fal
             return None
         request_path = path.parent / 'request.json'
         request = bounded_read(request_path, 'carried gate request')
+        quarantine.validate_user_deploy_receipt(root, gate, receipt, request)
         if (any(request.get(k) != receipt.get(k) for k in ('token', 'source', 'gate'))
                 or request.get('checks') != active
                 or qualification_identity(request.get('skips', {})) != qualification_identity(skips)
@@ -516,6 +522,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
+    user_policy = quarantine.user_deploy_exclusions(root, state['source'], gate,
+        state['input_fingerprints'].get(name), state.get('environment'))
     if any(w.get('gate') == name and 'renewal' in w for w in state.get('resource_warnings', [])):
         reuse_qualifications(state, gate)
     from deploy_test_historical_custody import guard, state_identity, known, recovered_debt
@@ -528,6 +536,9 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     token = uuid.uuid4().hex
     case_skips = {key.split("/", 1)[1]: value for key, value in state["skips"].items()
                   if key.startswith(name + "/") and value["source"] == state["source"]}
+    if set(case_skips) & set(user_policy):
+        raise ValueError('user deploy quarantine conflicts with another case qualification')
+    case_skips.update(user_policy)
     # Qualified third-party resource skips bound to the CURRENT source and gate inputs are not
     # resubmitted; they stay in the request/cases record as SKIP with their evidence (no pass credit).
     qualified = {w["check"].split("/", 1)[1]: {"disposition": RESOURCE_SKIP, **w}
@@ -545,9 +556,11 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         return {"gate": name, "status": "SKIP", "cases": {c: "SKIP" for c in gate["checks"]},
                 "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified,
                 "custody_skips": custody, "elected_skips": elected,
-                "case_complete": {c: False for c in [*custody, *elected]},
+                "case_complete": {c: False for c in [*custody, *user_policy, *elected]},
                 "current_execution": {**{c: "UNVERIFIED" for c in custody},
-                                      **{c: "UNEXECUTED" for c in elected}}}
+                                      **{c: "UNEXECUTED" for c in elected}},
+                "user_deploy_quarantine": user_policy,
+                "user_deploy_quarantine_execution": dict.fromkeys(user_policy, 'UNVERIFIED')}
     # A worker must explicitly consume the case inventory, including exclusions.
     # Without a case-aware worker mixed skip/run would either rerun skipped tests
     # or silently omit checks, so reject it before launch.
@@ -734,10 +747,13 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result = {"gate": name, "status": status, "cases": cases, "native_exit": code,
               "executed": host_admission.get('started', True), "complete": valid and complete,
               "reason": host_admission.get('reason', reason), "timed_out": timed_out,
-              "case_complete": {c: valid and v != 'UNVERIFIED' and c not in custody and c not in elected for c, v in cases.items()},
+              "case_complete": {c: valid and v != 'UNVERIFIED' and c not in custody and c not in user_policy
+                                and c not in elected for c, v in cases.items()},
               "current_execution": {**{c: "UNVERIFIED" for c in custody},
                                     **{c: "UNEXECUTED" for c in elected}},
               "custody_skips": custody, "elected_skips": elected,
+              "user_deploy_quarantine": user_policy,
+              "user_deploy_quarantine_execution": dict.fromkeys(user_policy, 'UNVERIFIED'),
               "cancelled": cancelled, "lingering_group": lingering,
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"),
@@ -3149,6 +3165,8 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path |
     for name, gate in old_gates.items():
         if name in removed:
             continue
+        if aggregate_resplit(gate, new_gates[name]):
+            continue  # planner split a legacy aggregate case into per-check cases; nothing carries
         if name in _tmpdir_gates:
             comparison = copy.deepcopy(new_gates[name])
             comparison['env']['TMPDIR'] = gate['env']['TMPDIR']

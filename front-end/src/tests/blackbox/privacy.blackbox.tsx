@@ -268,14 +268,12 @@ describe('Privacy page', () => {
     });
   });
 
-  it('renders header navigation links for Research and About', () => {
+  it('renders the Research header link and no About page link', () => {
     renderWithProviders(<Privacy />);
     const researchLink = screen.getByRole('link', { name: /research/i });
     expect(researchLink).toHaveAttribute('href', '/research');
-    // About appears in both header nav and footer company links
-    const aboutLinks = screen.getAllByRole('link', { name: /^about$/i });
-    expect(aboutLinks.length).toBeGreaterThanOrEqual(1);
-    expect(aboutLinks[0]).toHaveAttribute('href', '/about');
+    expect(screen.queryByRole('link', { name: /^about$/i })).not.toBeInTheDocument();
+    expect(document.querySelector('a[href="/about"]')).toBeNull();
   });
 
   it('renders the header Rose logo link', () => {

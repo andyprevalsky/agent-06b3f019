@@ -31,3 +31,21 @@ export function includesOwnData(userId: string, scope: TeamSearchScope): boolean
 export function includesPrivateSources(userId: string, scope: TeamSearchScope): boolean {
   return includesOwnData(userId, scope) && scope.accountId === undefined;
 }
+
+/** Agent-facing account id of a message row's channel: inbox email, '' (iMessage) or the provider. */
+const CHANNEL_ACCOUNT = new Map([
+  ['IMESSAGE', ''],
+  ['WHATSAPP', 'whatsapp'],
+  ['LINKEDIN', 'linkedin'],
+]);
+export function channelAccountId(
+  channel: string,
+  googleAccountEmail: string | null
+): string | null {
+  if (channel === 'EMAIL') return googleAccountEmail?.toLowerCase() ?? null;
+  return CHANNEL_ACCOUNT.get(channel) ?? null;
+}
+/** The message channel an agent-facing account id selects, or undefined for a Gmail inbox. */
+export function accountChannel(accountId: string): string | undefined {
+  return [...CHANNEL_ACCOUNT].find(([, account]) => account === accountId)?.[0];
+}

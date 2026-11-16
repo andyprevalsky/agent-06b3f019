@@ -1,6 +1,6 @@
 {
   "agentId": "572da2a5-4fc0-45f4-b9a7-d20b08e19a4e",
-  "recordedAt": "2026-11-13",
+  "recordedAt": "2026-11-15",
   "note": "Agent 572da2a5 (2026-10-12, MAC_APP): firstTurn is its first turn and followUpTurn its turn 2 with the persisted rows before it (metadata trimmed to the fields chat context scoping reads). prodSearch results are reconstructed from the prod web_search TOOL row and format byte-for-byte into its text; prodGeneratorContent is the prod Generator reply to exactly that result. searches and calls hold everything else, keyed by query and by the sha256 of the provider request body, as Parallel and qwen-3.8-27b (direct Cerebras) returned them when recorded with CHAT_SEARCH_ESCALATION_RECORD=1; content null marks a speculative Generator the handler discarded. Current calls were re-recorded with clockInstant appended using the production runtime reminder; prodGeneratorContent is historical evidence only and is never substituted for a live recording. followUpTurn.searchPolicy explicitly projects its original prodSearch.results onto every follow-up query to preserve the historical no-match environment; query text is unchanged and all model responses are recorded from the exact resulting controlled-clock requests.",
   "scenarios": {
     "firstTurn": {
@@ -1638,24 +1638,10 @@
     "manga girl disguises as boy soccer all boys school island childhood friend": {
       "results": [
         {
-          "title": "Uwasa no Midori-kun!! - Wikipedia",
-          "url": "https://en.wikipedia.org/wiki/Uwasa_no_Midori-kun!!",
-          "excerpts": [
-            "[ edit ]\nYamate Midori is a 15-year-old girl who is described as a tomboy. One day, Midori meets a boy called Hino Tsukasa, who came to the island she lives on for vacation. He teaches her to play soccer, and she falls in love with the sport. Inspired by Tsukasa, Midori continues to play soccer, hoping to meet him again someday.\n\n...\n\nDetermined to defeat Tsukasa in soccer and bring him down for betraying her trust, Midori disguises herself as a boy, enrolls at the rival All-Boys High School, and joins their soccer team. Despite this, a boy in her dorm finds out about her actual gender almost immediately.\n\nCharacters\n\n[ edit ]\n\nMain characters\n\n[ edit ]\nMidori Yamate ( 山手 翠 , Yamate Midori ) Voiced by: Mariya Ise (Drama CD), Rie Kugimiya (Digicomi Version) 15 years old, she is a 1st-year girl disguised as a boy at Aoba 3rd High School, living in Aoba 3rd dormitory."
-          ]
-        },
-        {
-          "title": "Uwasa no Midori-kun!!",
-          "url": "https://wiki.bitter.house/content/wikipedia_en_all_maxi_2024-01/A/Uwasa_no_Midori-kun!!",
-          "excerpts": [
-            "Yamate Midori is a 15-year-old girl who is described as a tomboy. One day, Midori meets a boy called Hino Tsukasa, who came to the island she lives on for vacation. He teaches her to play soccer, and she falls in love with the sport. Inspired by Tsukasa, Midori continues to play soccer, hoping to meet him again someday.\n\n...\n\nThe next day, Midori finds Tsukasa demanding payment from his teammates for having won a bet, laughing about how easy it is to get a 'country girl' to become intimate with him, and speculating that he will continue to do so a few more times before leaving her.\n\n...\n\nDetermined to defeat Tsukasa in soccer and bring him down for betraying her trust, Midori disguises herself as a boy, enrolls at the rival All-Boys High School, and joins their soccer team. Despite this, a boy in her dorm finds out about her actual gender almost immediately.\n\nCharacters\n\nMain characters"
-          ]
-        },
-        {
           "title": "\nCrossdressing - Manga - MyAnimeList.net\n",
-          "url": "https://myanimelist.net/manga/genre/44/Crossdressing",
+          "url": "http://myanimelist.net/manga/genre/44/Crossdressing",
           "excerpts": [
-            "With Saki and his childhood friend at his side, Makoto's world brightens, giving him strength amid his struggle between his interests and the expectations placed on him. [Written by MAL Rewrite]\nAuthor Pomu\nSerialization LINE Manga\nThemes Crossdressing School\n7.79\n13K\nAdd to My List\n\nUwasa no Midori-kun!!\n\nManga, 2006 Finished 10 vol, 51 chp\nDrama Romance Sports\n Uwasa no Midori-kun!!\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school."
+            "With Saki and his childhood friend at his side, Makoto's world brightens, giving him strength amid his struggle between his interests and the expectations placed on him. [Written by MAL Rewrite]\n\n...\n\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school. (Source: Tenshi-Tachi) Included one-shots: Volume 8: Shounen x Cinderella Volume 9: Shounen x Cinderella II\nAuthor Ikeyamada, Go\nSerialization Sho-Comi\nThemes Crossdressing Team Sports"
           ]
         },
         {
@@ -1666,10 +1652,24 @@
           ]
         },
         {
-          "title": "\nMidori Yamate (Uwasa no Midori-kun!!) - MyAnimeList.net\n",
-          "url": "https://myanimelist.net/character/11815/Midori_Yamate",
+          "title": "\nUwasa no Midori-kun!! | Manga - MyAnimeList.net\n",
+          "url": "http://myanimelist.net/manga/619/Uwasa_no_Midori-kun",
           "excerpts": [
-            "MyAnimeList.net\nMAL x JAPAN\nHide Ads Login Sign Up\n Play anime bingo and get an exclusive The Vermilion Mask badge for your profile!\n\nMidori Yamate\n\nEdit Character Information\nMidori Yamate\nAdd to Favorites\n    Animeography\nNone Mangaography\n*  | Uwasa no Midori-kun!! add Main\nMember Favorites: 20\n* Details\n* Clubs\n* Pictures\nTop\nCharacters\nMidori Yamate\n\nMidori Yamate (山手 翠)\n\nAn energetic and kind-hearted 15 year old girl. She disguises as a boy at Aoba 3rd High School in order to improve her soccer skills and beat Tsukasa. Although Tsukasa broke her heart, her feelings for him from their childhood days still remain. Kazuma Shinbashi, who knows that she's a girl, has a crush on her and console her whenever she feels down.\nVoice Actors\nNo voice actors have been added to this character. Help improve our database by searching for a voice actor, and adding this character to their roles here .\n\nMore Top Anime\n\n1."
+            "Favorites: 160\n\nResources\n\nicon Wikipedia\nTop\nManga\nUwasa no Midori-kun!!\n7.46\nRanked #3582 Popularity #2111 Members 12,222\nManga Sho-Comi Ikeyamada, Go (Story & Art)\n\n...\n\nSynopsis\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school.\n(Source: Tenshi-Tachi)\nIncluded one-shots: Volume 8: Shounen x Cinderella Volume 9: Shounen x Cinderella II"
+          ]
+        },
+        {
+          "title": "Uwasa no Midori-kun!! - MangaUpdates",
+          "url": "https://www.mangaupdates.com/series/8dh2qiv/uwasa-no-midori-kun",
+          "excerpts": [
+            "Login to add items to your list, keep track of your progress, and rate series!\nDescription\nMidori Yamate is a 15 year-old girl and is very much a tomboy. When she was young, Midori meets a boy called Tsukasa Hino, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school.\nContains a short story of 2 chapters called Shounen x Cinderella in the 8th and 9th Volumes: Sakuragi Azuma has a secret that no one should ever know about: he's actually Momo Kasuka, an up and coming female model!"
+          ]
+        },
+        {
+          "title": "\nTenkou-saki no Seiso Karen na Bishoujo ga, Mukashi Danshi to Omotte Issho ni Asonda Osananajimi Datta Ken | Manga - More Info - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/140072/Tenkou-saki_no_Seiso_Karen_na_Bishoujo_ga_Mukashi_Danshi_to_Omotte_Issho_ni_Asonda_Osananajimi_Datta_Ken/moreinfo",
+          "excerpts": [
+            "MyAnimeList.net\nmini_banner_20260707_KADOKAWA_writing_contest\nHide Ads Login Sign Up\n\nTenkou-saki no Seiso Karen na Bishoujo ga, Mukashi Danshi to Omotte Issho ni Asonda Osananajimi Datta Ken\n\nEdit\nWhat would you like to edit?\nSynopsis Background Alternative Titles Picture Chapters/Volumes Publishing Dates Relations Type External Links\nAdd to My List\nAdd to Favorites\n   \n\nAlternative Titles\n\nSynonyms: A Neat and Pretty Girl at the Transfer Destination Was a Childhood Friend Who Used to Think That She Was a Boy and Played With Her., Tenbin\nJapanese: 転校先の清楚可憐な美少女が、昔男子と思って一緒に遊んだ幼馴染だった件\n\nInformation\n\nType: Manga\nVolumes: 7\nChapters: 39\nStatus: Finished\nPublished: Sep 2, 2021 to Jun 26, 2025\nGenres: Comedy , Romance\nTheme: School\nSerialization: Dra-Dra Flat♭\nAuthors: Oyama, Kina (Art), Hibari, Yu (Story)\n\nStatistics\n\nScore: 6.63 1 (scored by 2,070 users)\n1 indicates a weighted score .\nRanked: #16213 2\n2 based on the top manga page."
           ]
         }
       ]
@@ -1953,14 +1953,7 @@
           "title": "Weather for Paris, Île-de-France, France",
           "url": "https://weather.com/weather/monthly/l/48.85341,2.3488",
           "excerpts": [
-            "Historical daily summary (30 days) for Paris, Île-de-France, France:\nThursday 2026-11-12: AM Light Rain/Wind; High: 54°F; Low: 41°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nWednesday 2026-11-11: AM Fog/PM Clouds; High: 60°F; Low: 48°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-11-10: Showers; High: 56°F; Low: 53°F; Precip: 1.03 in; Rain: 1.03 in; Snow: 0 in\nMonday 2026-11-09: Showers; High: 50°F; Low: 46°F; Precip: 0.62 in; Rain: 0.62 in; Snow: 0 in\nSunday 2026-11-08: Foggy; High: 44°F; Low: 41°F; Precip: 0.05 in; Rain: 0.05 in; Snow: 0 in\nSaturday 2026-11-07: Foggy; High: 50°F; Low: 39°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nFriday 2026-11-06: AM Showers; High: 59°F; Low: 40°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nThursday 2026-11-05: AM Showers; High: 54°F; Low: 45°F; Precip: 0.01 in; Rain: 0.01 in; Snow: 0 in\nWednesday 2026-11-04: Cloudy; High: 50°F; Low: 41°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-11-03: AM Showers; High: 50°F; Low: 43°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nMonday 2026-11-02: PM Rain; High: 55°F; Low: 45°F; Precip: 0.06 in; Rain: 0.06 in; Snow: 0 in\nSunday 2026-11-01: Sunny; High: 59°F; Low: 48°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nSaturday 2026-10-31: Sunny; High: 61°F; Low: 43°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nFriday 2026-10-30: Sunny; High: 63°F; Low: 44°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nThursday 2026-10-29: AM Fog/PM Sun; High: 62°F; Low: 44°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nWednesday 2026-10-28: AM Fog/PM Sun; High: 63°F; Low: 45°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-10-27: PM Rain; High: 61°F; Low: 46°F; Precip: 0.04 in; Rain: 0.04 in; Snow: 0 in\nMonday 2026-10-26: Showers; High: 57°F; Low: 54°F; Precip: 0.11 in; Rain: 0.11 in; Snow: 0 in\nSunday 2026-10-25: AM Rain; High: 60°F; Low: 47°F; Precip: 0.08 in; Rain: 0.08 in; Snow: 0 in\nSaturday 2026-10-24: Rain; High: 54°F; Low: 51°F; Precip: 1.67 in; Rain: 1.67 in; Snow: 0 in\nFriday 2026-10-23: Rain/Wind; High: 58°F; Low: 46°F; Precip: 0.53 in; Rain: 0.53 in; Snow: 0 in\nThursday 2026-10-22: Rain; High: 60°F; Low: 52°F; Precip: 0.44 in; Rain: 0.44 in; Snow: 0 in\nWednesday 2026-10-21: Rain; High: 59°F; Low: 47°F; Precip: 0.19 in; Rain: 0.19 in; Snow: 0 in\nTuesday 2026-10-20: Rain; High: 57°F; Low: 47°F; Precip: 0.08 in; Rain: 0.08 in; Snow: 0 in\nMonday 2026-10-19: PM Showers; High: 55°F; Low: 52°F; Precip: 0.38 in; Rain: 0.38 in; Snow: 0 in\nSunday 2026-10-18: Mostly Sunny; High: 58°F; Low: 43°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nSaturday 2026-10-17: Partly Cloudy; High: 61°F; Low: 45°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nFriday 2026-10-16: AM Fog/PM Clouds; High: 72°F; Low: 50°F; Precip: 0.03 in; Rain: 0.03 in; Snow: 0 in\nThursday 2026-10-15: AM Fog/PM Sun; High: 78°F; Low: 58°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nWednesday 2026-10-14: AM Fog/PM Sun; High: 72°F; Low: 52°F; Precip: 0 in; Rain: 0 in; Snow: 0 in"
-          ]
-        },
-        {
-          "title": "Paris : prévisions météo du vendredi 16 octobre 2026",
-          "url": "https://actus.meteocity.com/previsions-meteo/paris-previsions-meteo-du-vendredi-16-octobre-2026-13679",
-          "excerpts": [
-            "* Actualités\n* Prévisions météo\n* Île-de-France\n* Actuellement: Paris : prévisions météo du vendredi 16 octobre 2026\nÎle-de-France | Paris : prévisions météo du vendredi 16 octobre 2026\n* Partager:\n* \n* \nÎle-de-France\n\nParis : prévisions météo du vendredi 16 octobre 2026\n\nPublié par Météocity , le 16 oct. 2026 à 08:26\nÀ Paris, la journée du vendredi 16 octobre 2026 alterne entre éclaircies matinales et douceurs de l’après-midi, avant l’arrivée de pluies faibles en soirée.\n\n...\n\nCe jeudi 16 octobre 2026 débute sous un temps changeant, caractéristique de l’intersaison en Île-de-France : l’atmosphère reste douce, tandis qu’une perturbation se profile pour la soirée. Voici votre bulletin complet, rédigé par l’équipe Meteocity.\n\nMatin : éclaircies avant midi – lever du soleil à 08 h 12\n\nDès 9 h, la capitale profite d’un ciel variable ."
+            "Historical daily summary (30 days) for Paris, Île-de-France, France:\nSunday 2026-11-15: Rain; High: 56°F; Precip: 0.5 in; Rain: 0.5 in; Snow: 0 in\nSaturday 2026-11-14: Sunny; High: 54°F; Low: 41°F; Precip: 0.21 in; Rain: 0.21 in; Snow: 0 in\nFriday 2026-11-13: Mostly Sunny; High: 53°F; Low: 37°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nThursday 2026-11-12: AM Light Rain/Wind; High: 54°F; Low: 41°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nWednesday 2026-11-11: AM Fog/PM Clouds; High: 60°F; Low: 48°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-11-10: Showers; High: 56°F; Low: 53°F; Precip: 1.03 in; Rain: 1.03 in; Snow: 0 in\nMonday 2026-11-09: Showers; High: 50°F; Low: 46°F; Precip: 0.62 in; Rain: 0.62 in; Snow: 0 in\nSunday 2026-11-08: Foggy; High: 44°F; Low: 41°F; Precip: 0.05 in; Rain: 0.05 in; Snow: 0 in\nSaturday 2026-11-07: Foggy; High: 50°F; Low: 39°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nFriday 2026-11-06: AM Showers; High: 59°F; Low: 40°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nThursday 2026-11-05: AM Showers; High: 54°F; Low: 45°F; Precip: 0.01 in; Rain: 0.01 in; Snow: 0 in\nWednesday 2026-11-04: Cloudy; High: 50°F; Low: 41°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-11-03: AM Showers; High: 50°F; Low: 43°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nMonday 2026-11-02: PM Rain; High: 55°F; Low: 45°F; Precip: 0.06 in; Rain: 0.06 in; Snow: 0 in\nSunday 2026-11-01: Sunny; High: 59°F; Low: 48°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nSaturday 2026-10-31: Sunny; High: 61°F; Low: 43°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nFriday 2026-10-30: Sunny; High: 63°F; Low: 44°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nThursday 2026-10-29: AM Fog/PM Sun; High: 62°F; Low: 44°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nWednesday 2026-10-28: AM Fog/PM Sun; High: 63°F; Low: 45°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-10-27: PM Rain; High: 61°F; Low: 46°F; Precip: 0.04 in; Rain: 0.04 in; Snow: 0 in\nMonday 2026-10-26: Showers; High: 57°F; Low: 54°F; Precip: 0.11 in; Rain: 0.11 in; Snow: 0 in\nSunday 2026-10-25: AM Rain; High: 60°F; Low: 47°F; Precip: 0.08 in; Rain: 0.08 in; Snow: 0 in\nSaturday 2026-10-24: Rain; High: 54°F; Low: 51°F; Precip: 1.67 in; Rain: 1.67 in; Snow: 0 in\nFriday 2026-10-23: Rain/Wind; High: 58°F; Low: 46°F; Precip: 0.53 in; Rain: 0.53 in; Snow: 0 in\nThursday 2026-10-22: Rain; High: 60°F; Low: 52°F; Precip: 0.44 in; Rain: 0.44 in; Snow: 0 in\nWednesday 2026-10-21: Rain; High: 59°F; Low: 47°F; Precip: 0.19 in; Rain: 0.19 in; Snow: 0 in\nTuesday 2026-10-20: Rain; High: 57°F; Low: 47°F; Precip: 0.08 in; Rain: 0.08 in; Snow: 0 in\nMonday 2026-10-19: PM Showers; High: 55°F; Low: 52°F; Precip: 0.38 in; Rain: 0.38 in; Snow: 0 in\nSunday 2026-10-18: Mostly Sunny; High: 58°F; Low: 43°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nSaturday 2026-10-17: Partly Cloudy; High: 61°F; Low: 45°F; Precip: 0 in; Rain: 0 in; Snow: 0 in"
           ]
         },
         {
@@ -1971,17 +1964,24 @@
           ]
         },
         {
-          "title": "Météo Paris : prévisions du vendredi 16 octobre 2026",
-          "url": "https://www.20minutes.fr/planete/previsions-meteo/4254784-20261016-meteo-paris-previsions-vendredi-16-octobre-2026",
+          "title": "Paris : prévisions météo du vendredi 16 octobre 2026",
+          "url": "https://actus.meteocity.com/previsions-meteo/paris-previsions-meteo-du-vendredi-16-octobre-2026-13679",
           "excerpts": [
-            "Jeux Jeux de lettres Jeux de chiffres Jeux Inclassables Quiz et jeux concours\nPrévisions météo du vendredi 16 octobre 2026 à Paris\n Planète Prévisions météo\n\nMétéo Paris : prévisions du vendredi 16 octobre 2026\n\nMétéo • Le soleil sera au rendez-vous : une magnifique journée se profile ! Les températures seront de 17°C la matinée et de 20°C l'après-midi...\n\n...\n\nArthur RainBot Arthur RainBot Publié le 16/10/2026 à 01h00\nUn superbe soleil brillera sur Paris, où la journée s'annoncera des plus plaisantes. Les températures seront de 15°C au plus bas et de 22°C au plus haut. Il fera en moyenne 17°C, le matin. Une modeste brise d'ouest sera ressentie par les habitants. L'après-midi, les valeurs s'échelonneront entre 17 et 22°C. Dans la soirée, des pluies éparses sont attendues. Les températures avoisineront les 16°C. Le ciel sera dépourvu de nuages dans la nuit de vendredi à samedi."
+            "* Actualités\n* Prévisions météo\n* Île-de-France\n* Actuellement: Paris : prévisions météo du vendredi 16 octobre 2026\nÎle-de-France | Paris : prévisions météo du vendredi 16 octobre 2026\n* Partager:\n* \n* \nÎle-de-France\n\nParis : prévisions météo du vendredi 16 octobre 2026\n\nPublié par Météocity , le 16 oct. 2026 à 08:26\nÀ Paris, la journée du vendredi 16 octobre 2026 alterne entre éclaircies matinales et douceurs de l’après-midi, avant l’arrivée de pluies faibles en soirée.\n\n...\n\nCe jeudi 16 octobre 2026 débute sous un temps changeant, caractéristique de l’intersaison en Île-de-France : l’atmosphère reste douce, tandis qu’une perturbation se profile pour la soirée. Voici votre bulletin complet, rédigé par l’équipe Meteocity.\n\nMatin : éclaircies avant midi – lever du soleil à 08 h 12\n\nDès 9 h, la capitale profite d’un ciel variable ."
           ]
         },
         {
-          "title": "Paris, Weather Forecast, France",
-          "url": "https://www.holiday-weather.com/paris/forecast/fourteen-day",
+          "title": "Paris 16 October Weather. Forecast for Paris - France, Ile-de-France",
+          "url": "https://globalmeteo.com/weather/paris-121265/oct-16/",
           "excerpts": [
-            "* L Privacy Policy\nDAY\nfr Flag\n\nParis Weather Forecast, France\n\n* \n\nForecast\n\n* \n\nLive Weather\n\n* \n\nOctober Averages\n\n* \n\nNovember Averages\n\n* \n\nAnnual Averages\n\n* \n\nFrance Weather\n\nToday\n16\nOct\n16° 61°\nClear\nClear\n* °C\n* °F\nShow Close Hourly\n08:04\n* 15\n59\nHour 9\n9:00\n* 16\n61\nHour 10\n10:00\n* 17\n63\nHour 11\n11:00\n* 19\n66\nHour 12\n12:00\n* 20\n68\nHour 13\n13:00\n* 21\n70\nHour 14\n14:00\n* 21\n70\nHour 15\n\n...\n\nThe warmest day over the next 26 days weather in Paris is forecast to be Friday 16th October 2026 at 19°C (66°F) and the warmest night on Friday 16th October 2026 at 15°C (59°F). Read more The average temperature over the next 26 days in Paris from this forecast is 12°C (53°F) and there will be 9 days of sunshine . The average for October is 12°C (0°F). Read less\n\n...\n\n°C\n°F\n* TODAY 16 OCT\n16º 61º\nW 13 KMH\nNight\n15º 59º\n* SAT 17 OCT\n14º 57º\nNNE 18 KMH\nNight\n12º 54º\n* SUN 18 OCT\n12º 54º\nNNE 6 KMH"
+            "US\n* Русский | RU\n* Українська | UA\n* Русский | BY\n* English | US\n\nParis 16 October Weather\n\n1. Weather\n2. France\n3. Paris\n4. 16 October Weather\nAltitude - 33m | 48°51′25″N,2°20′28″E | map (OSM)\nParis\n45\n°F\n3:30 am Rain 6 mph SW\nSun, November 15, 2026 4:12 AM (GMT +01:00)\nToday Hourly 3 days 5 days Week 10 days 14 days Month\n* Sun Today Rain Rain 56 °F low 43 °F\n* Mon Tomorrow Light Rain Light Rain 53 °F low 50 °F\n* Tue Nov 17 Light Rain Light Rain 62 °F low 53 °F\n* Wed Nov 18 Showers Showers 57 °F low 53 °F\n* Thu Nov 19 Showers Showers 54 °F low 50 °F\nClimatic norm in Paris Oct 16\n* 46°\n* 53°\n* 60°\n* minimum\n* average\n* maximum\n* Oct 15\n* Oct 16\n* Oct 17\n* Friday Oct 16 2026 | 12 am | 3 am | 6 am | 9 am | 12 pm | 3 pm | 6 pm | 9 pm\n*  | -- | -- | -- | -- | -- | -- | -- | --\n* temperature °F | 63° | 61° | 60° | 60° | 65° | 70° | 65° | 57°\n* pressure in | 30.05 | 30.02 | 30.01 | 30.03 | 30.04 | 30.02 | 30.05 | 30.13\n1."
+          ]
+        },
+        {
+          "title": "Weather in Paris, France, for October 16 — Temperature, precipitation, wind",
+          "url": "https://meteum.ai/weather/en/paris/date/october/16",
+          "excerpts": [
+            "Go to the Meteum home page Go to the Meteum home page\n* October\n* Oct 13\n* Oct 14\n* Oct 15\n* Oct 16\n* Oct 17\n* Oct 18\n* Oct 19\n\nWeather forecast for October 16 in Paris\n\nThe day is warm, cloudy and rainy. The average daily high is 20 degrees above zero.\n* Morning\n* Day\n* Evening\n* Night\n* +14°\nmorning: +14°, mostly clear, Feels like 13.\n* +20°\nafternoon: +20°, light rain, Feels like 19.\n* +16°\nevening: +16°, light rain, Feels like 14.\n* +12°\nnight: +12°, partly cloudy, Feels like 9.\n\nFeels like\n\n* +13°\n* +19°\n* +14°\n* +9°\n\nWind, m/s\n\n* 2.7 SW\nmorning: , 2.7 meters per second, 6 meters per second, South-West.\n* 3.5 W\nafternoon: , 3.5 meters per second, 8 meters per second, West.\n* 4.6 NW\nevening: , 4.6 meters per second, 10 meters per second, North-West.\n* 4.4 N\nnight: , 4.4 meters per second, 9 meters per second, North.\n\nPeak gusts\n\n* 6\n* 8\n* 10\n* 9\n\nPressure , Normal: 746−766 mmHg"
           ]
         }
       ]
@@ -1989,38 +1989,38 @@
     "weather in Tokyo today October 16 2026": {
       "results": [
         {
-          "title": "Weather for Tokyo, Tokyo, Japan",
-          "url": "https://weather.com/weather/monthly/l/35.6895,139.69171",
-          "excerpts": [
-            "Historical daily summary (30 days) for Tokyo, Tokyo, Japan:\nThursday 2026-11-12: Partly Cloudy; High: 68°F; Low: 48°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nWednesday 2026-11-11: Sunny; High: 63°F; Low: 46°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-11-10: AM Rain; High: 52°F; Low: 40°F; Precip: 0.13 in; Rain: 0.13 in; Snow: 0 in\nMonday 2026-11-09: Rain; High: 49°F; Low: 47°F; Precip: 0.77 in; Rain: 0.77 in; Snow: 0 in\nSunday 2026-11-08: Mostly Cloudy; High: 66°F; Low: 46°F; Precip: 0.19 in; Rain: 0.19 in; Snow: 0 in\nSaturday 2026-11-07: Partly Cloudy; High: 70°F; Low: 50°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nFriday 2026-11-06: Mostly Sunny; High: 82°F; Low: 56°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nThursday 2026-11-05: Showers; High: 63°F; Low: 57°F; Precip: 0.04 in; Rain: 0.04 in; Snow: 0 in\nWednesday 2026-11-04: Rain; High: 61°F; Low: 51°F; Precip: 2.14 in; Rain: 2.14 in; Snow: 0 in\nTuesday 2026-11-03: Cloudy; High: 70°F; Low: 56°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nMonday 2026-11-02: Rain; High: 67°F; Low: 51°F; Precip: 0.56 in; Rain: 0.56 in; Snow: 0 in\nSunday 2026-11-01: Mostly Cloudy; High: 72°F; Low: 56°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nSaturday 2026-10-31: Partly Cloudy; High: 77°F; Low: 53°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nFriday 2026-10-30: AM Rain; High: 68°F; Low: 55°F; Precip: 0.03 in; Rain: 0.03 in; Snow: 0 in\nThursday 2026-10-29: PM Showers; High: 62°F; Low: 54°F; Precip: 0.16 in; Rain: 0.16 in; Snow: 0 in\nWednesday 2026-10-28: Mostly Sunny; High: 67°F; Low: 50°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-10-27: Cloudy; High: 72°F; Low: 58°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nMonday 2026-10-26: Rain; High: 67°F; Low: 59°F; Precip: 1.54 in; Rain: 1.54 in; Snow: 0 in\nSunday 2026-10-25: PM Rain; High: 82°F; Low: 65°F; Precip: 0.42 in; Rain: 0.42 in; Snow: 0 in\nSaturday 2026-10-24: Rain; High: 63°F; Low: 60°F; Precip: 0.27 in; Rain: 0.27 in; Snow: 0 in\nFriday 2026-10-23: Mostly Cloudy; High: 73°F; Low: 59°F; Precip: 0.07 in; Rain: 0.07 in; Snow: 0 in\nThursday 2026-10-22: Mostly Cloudy; High: 75°F; Low: 56°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nWednesday 2026-10-21: Partly Cloudy/Wind; High: 87°F; Low: 69°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nTuesday 2026-10-20: Showers; High: 77°F; Low: 66°F; Precip: 0.01 in; Rain: 0.01 in; Snow: 0 in\nMonday 2026-10-19: Partly Cloudy; High: 82°F; Low: 66°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nSunday 2026-10-18: Partly Cloudy; High: 79°F; Low: 64°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nSaturday 2026-10-17: Partly Cloudy; High: 80°F; Low: 58°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nFriday 2026-10-16: Mostly Cloudy; High: 83°F; Low: 65°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nThursday 2026-10-15: Partly Cloudy; High: 76°F; Low: 64°F; Precip: 0 in; Rain: 0 in; Snow: 0 in\nWednesday 2026-10-14: AM Rain; High: 80°F; Low: 64°F; Precip: 0.08 in; Rain: 0.08 in; Snow: 0 in"
-          ]
-        },
-        {
-          "title": "気象庁｜過去の気象データ検索",
-          "url": "https://www.data.jma.go.jp/stats/etrn/view/hourly_s1.php?prec_no=44&block_no=47662&year=2026&month=10&day=16&view=p1",
-          "excerpts": [
-            "* 各種データ・資料 >\n* 過去の気象データ検索 >\n* １時間ごとの値\n\n１時間ごとの値\n\n* 一覧表 | グラフ\n* 見出しの固定 | メニューに戻る\n* 前年 | 前月 | 前日 |  | 翌日 | 翌月 | 翌年\n* 日ごとの値 | １時間ごとの値 | １０分ごとの値\n\n東京（東京都) 2026年10月16日 （１時間ごとの値）\n\n* 時 | 気圧(hPa) |  | 降水量\n* (mm) | 気温\n* (℃) | 露点\n* 温度\n* (℃) | 蒸気圧\n* (hPa) | 湿度\n* (％) | 風向・風速(m/s) |  | 日照\n* 時間\n* (h) | 全天\n* 日射量\n* (MJ/㎡) | 雪(cm) |  | 天気 | 雲量 | 視程\n* (km)\n* 現地 | 海面 | 風速 | 風向 | 降雪 | 積雪\n* 1 | 1017.6 | 1020.5 | -- | 18.4 | 14.1 | 16.1 | 76 | 1.4 | 北北西 |  |  | × | × |  |  | \n* 2 | 1017.6 | 1020.5 | -- | 18.5 | 13.6 | 15.5 | 73 | 1.5 | 北北西 |  |  | × | × |  |  | \n* 3 | 1017.7 | 1020.6 | -- | 18.2 | 12.9 | 14.8 | 71 | 2.0 | 北北西 |  |  | × | × | 曇 | 10- | 20.0\n* 4 | 1017.6 | 1020.5 | -- | 17.9 | 13.2 | 15.2 | 74 | 1.8 | 北北西 |  |  | × | × |  |  | \n* 5 | 1017.9 | 1020.8 | -- | 18.2 | 13.3 | 15.3 | 73 | 2.4 | 北北西 |  |  | × | × |  |  | \n* 6 | 1018.3 | 1021.2 | -- | 17.8 | 12.9 | 14.9 | 73 | 2.5 | 北北西 | 0.0 | 0.00 | × | × | 曇 | 10- | 15.0"
-          ]
-        },
-        {
-          "title": "【東京都】10/16の天気予報｜FNNプライムオンライン",
-          "url": "https://www.fnn.jp/articles/-/1133771",
-          "excerpts": [
-            "1. トップ\n2. 特集\n3. 天気予報\n【東京都】10/16の天気予報｜FNNプライムオンライン\n天気予報\n\n【東京都】10/16の天気予報\n\nプライムオンライン編集部\nGoogle ニュース プリファードソース 2026年10月16日 金曜 午前5:10\nおはようございます。 気象庁本庁が10月16日午前5時に発表した、東京都内の最新のきょうの天気予報です。\n東京地方は「晴れ時々くもり」、伊豆諸島北部は「くもり朝から昼過ぎ晴れ」、伊豆諸島南部は「晴れ夕方からくもり」、小笠原諸島は「くもり昼過ぎから晴れ所により昼前まで雨で雷を伴う」でしょう。\n最高気温は東京26℃、大島25℃、八丈島26℃、父島30℃でしょう。\n各地の天気予報は以下の通りです。\n●東京地方 「晴れ時々くもり」「北の風後南の風」\n◇降水確率(6時間ごと) ・6時～0% ・12時～0% ・18時～0% ・00時～0%\n◇明日の天気 「晴れ」\n●伊豆諸島北部 「くもり朝から昼過ぎ晴れ」「北の風後南西の風」\n◇降水確率(6時間ごと) ・6時～10% ・12時～10% ・18時～10% ・00時～10%\n◇明日の天気 「晴れ朝晩くもり」\n●伊豆諸島南部 「晴れ夕方からくもり」「北の風」\n◇降水確率(6時間ごと) ・6時～10% ・12時～10% ・18時～10% ・00時～10%\n◇明日の天気 「晴れ時々くもり」\n●小笠原諸島 「くもり昼過ぎから晴れ所により昼前まで雨で雷を伴う」「南東の風後東の風」\n◇降水確率(6時間ごと) ・6時～30% ・12時～10% ・18時～10% ・00時～10%\n◇明日の天気 「晴れ時々くもり」\n●各都市の気温 ・東京 最高26℃ ・大島 最高25℃ ・八丈島 最高26℃ ・父島 最高30℃"
-          ]
-        },
-        {
-          "title": "【東京都】10/16の天気予報｜FNNプライムオンライン",
-          "url": "https://www.fnn.jp/articles/-/1133416",
-          "excerpts": [
-            "1. トップ\n2. 特集\n3. 天気予報\n【東京都】10/16の天気予報｜FNNプライムオンライン\n天気予報\n\n【東京都】10/16の天気予報\n\nプライムオンライン編集部\nGoogle ニュース プリファードソース 2026年10月15日 木曜 午後7:30\n気象庁本庁が10月15日午後5時に発表した、東京都内の最新のあすの天気予報です。\n東京地方は「晴れ時々くもり」、伊豆諸島北部は「くもり時々晴れ所により明け方まで雨で雷を伴う」、伊豆諸島南部は「晴れ時々くもり所により明け方まで雨で雷を伴う」、小笠原諸島は「くもり昼過ぎから晴れ所により明け方まで雨」でしょう。\n最高気温は、東京26℃、大島26℃、八丈島26℃、父島30℃でしょう。 最低気温は、東京17℃、大島18℃、八丈島19℃、父島26℃でしょう。\n各地の天気予報は以下の通りです。\n●東京地方 「晴れ時々くもり」「北の風後南の風」\n◇降水確率(6時間ごと) 【15日】 ・18時～10% 【16日】 ・0時～10% ・6時～0% ・12時～0%\n●伊豆諸島北部 「くもり時々晴れ所により明け方まで雨で雷を伴う」「北の風後南西の風」\n◇降水確率(6時間ごと) 【15日】 ・18時～20% 【16日】 ・0時～20% ・6時～10% ・12時～0%\n●伊豆諸島南部 「晴れ時々くもり所により明け方まで雨で雷を伴う」「西の風後北西の風」\n◇降水確率(6時間ごと) 【15日】 ・18時～20% 【16日】 ・0時～20% ・6時～10% ・12時～0%\n●小笠原諸島 「くもり昼過ぎから晴れ所により明け方まで雨」「南東の風後東の風」\n◇降水確率(6時間ごと) 【15日】 ・18時～50% 【16日】 ・0時～40% ・6時～20% ・12時～20%\n●各都市の気温 ・東京 最低17℃ 最高26℃ ・大島 最低18℃ 最高26℃ ・八丈島 最低19℃ 最高26℃ ・父島 最低26℃ 最高30℃"
-          ]
-        },
-        {
           "title": "Tomorrow, Oct. 16: Tokyo Sunny Spells, Sapporo Rain Then Sun - Weathernews",
           "url": "https://weathernews.com/news/en/japan/2026/10/15/weather-859",
           "excerpts": [
             "weathernews\nEnglish\n1. \n2. |\n3. Japan\n4. \n5. Tomorrow, Oct. 16: Tokyo Sunny Spells, Sapporo Rain Then Sun\n\nTomorrow, Oct. 16: Tokyo Sunny Spells, Sapporo Rain Then Sun\n\nPublished : -\n    \n… Share — more options\nFont Size:\n\nTokyo: Sunny Spells and a High of 25°C\n\nTomorrow, Friday, Oct. 16, Tokyo is forecast to be sunny with occasional clouds, with a low of 17°C and a high of 25°C. The daily precipitation probability is 20% and expected precipitation is 0 mm. Hourly forecasts show sunny and 21°C at 9 a.m., sunny and 24°C at noon, and sunny and 25°C at 3 p.m., with 0 mm of precipitation per hour at each of those times. Relative humidity is forecast at 65% for the day and 48% at 3 p.m. Wind is forecast at 1 m/s at 9 a.m., 0 m/s at noon and 1 m/s at 3 p.m.\n\n...\n\nIts daily precipitation probability is 30% and expected precipitation is 0 mm. At 9 a.m. it is forecast to be sunny at 19°C, and at 3 p.m. cloudy at 25°C. Fukuoka is forecast to be cloudy, occasionally sunny, with a low of 16°C, a high of 25°C, a 30% precipitation probability and 0 mm expected."
+          ]
+        },
+        {
+          "title": "Weekly weather forecast: Sunny through Oct 17, rain arrives Oct 19 - Weathernews",
+          "url": "https://weathernews.com/news/en/japan/2026/10/14/weather-838",
+          "excerpts": [
+            "… Share — more options\nFont Size:\n\nOct 15-17 (Thu-Sat): Sunny skies, rising temperatures\n\nTokyo, Osaka, Fukuoka and Sapporo see mostly sunny weather from Thursday Oct 15 through Saturday Oct 17. A cold front extends across Tokyo, Osaka and Sapporo on Oct 15, while high pressure stays nearly stationary over Fukuoka; all four cities stay sunny, with highs of 22C in Tokyo, 24C in Osaka and Fukuoka, and 16C in Sapporo. By Oct 16, Tokyo and Osaka reach 25C, Fukuoka turns partly cloudy at 25C, and Sapporo warms to 16C. On Oct 17, Fukuoka's ridge moves to the northwest; Fukuoka climbs to 27C, Osaka reaches 26C, Tokyo 24C and Sapporo 15C, with rain chances staying low.\n\nOct 18-19 (Sun-Mon): Fronts bring rain to all four cities\n\nA warm front extends across Fukuoka and Osaka on Sunday Oct 18, with Fukuoka"
+          ]
+        },
+        {
+          "title": "东京最近30天历史天气 日本东京最近30天历史天气查询 Japan Tokyo Weather - IP.cn",
+          "url": "https://ip.cn/tianqi/world/japan/tokyo/history.html",
+          "excerpts": [
+            "首页 / 天气预报 / 国际天气 / 日本天气 / 东京历史天气\n日本东京当地时间\n时区代码：Asia/Tokyo\n所处时区： 东9区\n2026年11月6日\n15 : 04 : 51\n日本 东京 天气 Tokyo Weather\n15° 晴 优\n西北风 <3级 天气更新时间：2026-11-06 06:20:17\n\n东京最近30天历史天气\n\n为你提供快速准确的日本东京最近30天历史天气，Japan Tokyo最近30天的天气预报和气象趋势预测,主要指标包括每天最高气温、最低气温、天气状况、风向等\n* 今天\n* 7天\n* 10天\n* 15天\n* 最近30天\n日本东京：2026-10-07至2026-11-06 天气\n* 一 | 二 | 三 | 四 | 五 | 六 | 日\n*  |  | 10月07日 07 多云 15℃ ～ 23℃ | 10月08日 08 晴 16℃ ～ 23℃ | 10月09日 09 晴 16℃ ～ 24℃ | 10月10日 10 多云转晴 16℃ ～ 24℃ | 10月11日 11 晴转阴 16℃ ～ 25℃\n* 10月12日 12 多云 16℃ ～ 24℃ | 10月13日 13 多云转小雨 20℃ ～ 24℃ | 10月14日 14 小雨 16℃ ～ 26℃ | 10月15日 15 多云转小雨 16℃ ～ 20℃ | 10月16日 16 阴 17℃ ～ 22℃ | 10月17日 17 晴 14℃ ～ 22℃ | 10月18日 18 多云 18℃ ～ 22℃\n\n...\n\n* 星期二 2026-10-13 | 多云转小雨 | 20℃ ～ 24℃ | 东南风 转 西南风 <3级\n* 星期三 2026-10-14 | 小雨 | 16℃ ～ 26℃ | 西南风 转 北风 3-4级转<3级\n* 星期四 2026-10-15 | 多云转小雨 | 16℃ ～ 20℃ | 东南风 转 北风 <3级\n* 星期五 2026-10-16 | 阴 | 17℃ ～ 22℃ | 西北风 转 北风 <3级"
+          ]
+        },
+        {
+          "title": "Weekly Weather Forecast: Tokyo's Mild Start Before Midweek Cold Front - Weathernews",
+          "url": "https://weathernews.com/news/en/japan/2026/10/10/weather-390",
+          "excerpts": [
+            "On Sunday, October 11th, skies stay sunny with a high of 26C, a low of 16C, and a 20% chance of rain. Monday, October 12th, remains mostly sunny with a few clouds as no significant pressure system is expected nearby, with a high of 25C and a low of 17C. On Tuesday, October 13th, a warm front is expected to extend across the Tokyo area, though skies stay mostly sunny with a few clouds, a high of 26C, a low of 18C, and a 20% chance of rain.\n\n...\n\nThe front lingers into Thursday, October 15th, keeping Tokyo cloudy with a high of 23C, a low of 17C, and a 40% chance of rain.\n\nCalmer but Cooler Conditions Return by the Weekend\n\n...\n\nMax 24° Min 17°\n* Sunny\nSun, 18/10 Max 23° Min 13°\n* Sunny, occasional clouds\nMon, 19/10 Max 27° Min 18°\n* Cloudy\nTue, 20/10 Max 28° Min 21°\n* Cloudy, occasionally sunny\nWed, 21/10 Max 29° Min 22°"
+          ]
+        },
+        {
+          "title": "Weekly Forecast: Tokyo Mild and Dry Before Rain Returns Oct. 23 - Weathernews",
+          "url": "https://weathernews.com/news/en/japan/2026/10/16/weather-865",
+          "excerpts": [
+            "weathernews\nEnglish\n1. \n2. |\n3. Japan\n4. \n5. Weekly Forecast: Tokyo Mild and Dry Before Rain Returns Oct. 23\n\nWeekly Forecast: Tokyo Mild and Dry Before Rain Returns Oct. 23\n\nPublished : -\n    \n… Share — more options\nFont Size:\n\nTokyo Mild and Dry Through Oct. 22, Rain Arrives Oct. 23\n\nTokyo stays mostly dry and mild through midweek before rain returns at the end of the period. On Saturday, October 17, skies are sunny with a high of 25C and a low of 18C, and sunny weather continues Sunday the 18th as the high dips to 23C and the low to 14C.\n\n...\n\nRain arrives Friday the 23rd, with a high of only 19C and a low of 16C.\n\nRain Returns to Fukuoka, Osaka, Sapporo and Tokyo\n\nA cold front brings a round of rain to western and northern Japan around midweek, while Tokyo stays largely dry the same day. On Monday, October 19, Osaka is cloudy with brief rain, a high of 27C, a low of 19C, 81% humidity and a 60% chance of rain."
           ]
         }
       ]
@@ -2184,31 +2184,24 @@
     "manga girl disguised as boy soccer all-boys school island childhood friend smut": {
       "results": [
         {
-          "title": "Uwasa no Midori-kun!! - Wikipedia",
-          "url": "https://en.wikipedia.org/wiki/Uwasa_no_Midori-kun!!",
+          "title": "Old Manga Review: Uwasa No Midori-Kun | Patreon",
+          "url": "https://www.patreon.com/posts/old-manga-review-136067809",
           "excerpts": [
-            "[ edit ]\nYamate Midori is a 15-year-old girl who is described as a tomboy. One day, Midori meets a boy called Hino Tsukasa, who came to the island she lives on for vacation. He teaches her to play soccer, and she falls in love with the sport. Inspired by Tsukasa, Midori continues to play soccer, hoping to meet him again someday. When they do meet again, Tsukasa seduces Midori on their first date. To convince her to give up her virginity, which she'd been saving for her future husband, Tsukasa tells Midori they will get married in the future.\n\n...\n\nDetermined to defeat Tsukasa in soccer and bring him down for betraying her trust, Midori disguises herself as a boy, enrolls at the rival All-Boys High School, and joins their soccer team. Despite this, a boy in her dorm finds out about her actual gender almost immediately.\n\nCharacters\n\n[ edit ]\n\nMain characters\n\n[ edit ]"
+            "\"Uwasa No Midori-Kun\" (No official translation yet \"The Legendary Midori-Kun\", \"The Infamous Midori-kun\", \"The Supposed Midori-Kun\", \"The Much Talked About Midori-Kun\" by Ikeyamada Go 6 volumes- ongoing\nMidori lives on a small, remote island. Her childhood friend—the one who taught her soccer—returns and becomes the catalyst for her enrolling in an all-boys school in Tokyo to play soccer. They cut to the chase and get straight to business, and I was like this: O_O?!\nIt manages to stay cute and scandalous at the same time.\n\n...\n\nMidori lives on a small, remote island. Her childhood friend—the one who taught her soccer—returns and becomes the catalyst for her enrolling in an all-boys school in Tokyo to play soccer."
           ]
         },
         {
-          "title": "Uwasa no Midori-kun!!",
-          "url": "https://a.osmarks.net/content/wikipedia_en_all_maxi_2020-08/A/Uwasa_no_Midori-kun!!",
+          "title": "Uwasa no Midori-kun manga - Mangago",
+          "url": "https://www.mangago.me/read-manga/uwasa_no_midori_kun",
           "excerpts": [
-            "( うわさの翠くん!!2 ふたりの翠!? ) .\n\nStory\n\nYamate Midori is a 15-year-old girl and is a tomboy. One day, Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Inspired by Tsukasa, Midori continues to play soccer in hopes that they would meet again someday. When they do meet again, Tsukasa loses her trust by doing something unforgivable.\n\n...\n\nThe next day she finds him demanding payment from his teammates for having won the bet, laughing about how easy it is to get a \"country girl\" to have sex, and speculating that he'd do it with her a\n\n...\n\nDetermined to defeat Tsukasa on the soccer field, and bring him down for what he'd done, Midori disguises herself as a boy and enrolls in an all-boys high school that rivals Tsukasa's and joins their team."
+            "Uwasa no Midori-kun\n\nUwasa no Midori-kun Start Reading\n* Status: Completed\n* Author: [Ikeyamada Go](https://www.mangago.me/r/l_search/?name=ikeyamada go) 2006 released.\n\n...\n\nThe following content is intended for mature audiences and may contain sexual themes, gore, violence and/or strong language. Discretion is advised.\nFrom Tenshi-Tachi:\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa loses her trust by doing something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school.\n\nPhotos about this manga (All)"
           ]
         },
         {
-          "title": "Uwasa no Midori-kun!! | Manga Wiki | Fandom",
-          "url": "https://manga.fandom.com/wiki/Uwasa_no_Midori-kun!!",
+          "title": "\nCrossdressing - Manga - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/genre/44/Crossdressing",
           "excerpts": [
-            "* 3.1.1 Volume listing\n* 3.2 Games\n* 3.3 Drama CD\n* 4 Reception\n* 5 References\n* 6 External links\n\nSynopsis [  ]\n\nYamate Midori is a 15 year-old girl and is a tomboy. One day, Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Inspired by Tsukasa, Midori continues to play soccer in hopes that they would meet again someday. When they do meet again, Tsukasa loses her trust by doing something unforgivable. Determined to defeat Tsukasa on the soccer field, Midori enrolls in an all-boys high school.\n\nCharacters [  ]\n\nMain Characters [  ]\n\n* Midori Yamate ( 山手 翠 Yamate Midori ? ) is 15 years old. She is a 1st year, a girl disguised as a boy, at Aoba 3rd High School. She lives in Aoba 3rd dormitory."
-          ]
-        },
-        {
-          "title": "Tenkousaki no Seiso Karen na Bishoujo ga, Mukashi ...",
-          "url": "https://anilist.co/manga/139732/Tenkousaki-no-Seiso-Karen-na-Bishoujo-ga-Mukashi-Danshi-to-Omotte-Issho-ni-Asonda-Osananajimi-datta-Ken",
-          "excerpts": [
-            "I met my childhood friend again, and she had become a beautiful and innocent-looking girl.\n\"It's been a while, Hayato.\" \"Haruki, is it?\"\nIn the past, I used to play in the mud with my childhood friend in the countryside. When I saw her again, there was no trace of the bratty boy I thought she was back then. But only in front of me will she drop her perfect facade and act in the same crude casual way she did before. The distance between us had not changed.\n(Source: Shousetsuka ni Narou, translated)\n\n...\n\nTenkosaki: The Neat and Pretty Girl at My New School Is a Childhood Friend of Mine Who I Thought Was a Boy เพื่อนสมัยเด็กที่เคยคิดว่าเป็นผู้ชายดันกลายเป็นสาวสวยในโรงเรียนใหม่ Oh Boy, Was I Wrong About Her\n\n...\n\nOfficial Site TH Kadocomi JP Nico Nico Seiga JP\n\nDescription\n\nI met my childhood friend again, and she had become a beautiful and innocent-looking girl.\n\"It's been a while, Hayato.\" \"Haruki, is it?\""
+            "With Saki and his childhood friend at his side, Makoto's world brightens, giving him strength amid his struggle between his interests and the expectations placed on him. [Written by MAL Rewrite]\nAuthor Pomu\nSerialization LINE Manga\nThemes Crossdressing School\n7.79\n13K\nAdd to My List\n\nUwasa no Midori-kun!!\n\nManga, 2006 Finished 10 vol, 51 chp\nDrama Romance Sports\n Uwasa no Midori-kun!!\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school."
           ]
         },
         {
@@ -2216,6 +2209,13 @@
           "url": "https://anilist.co/manga/145928/Nee-Mou-Isso-Tsukiacchau-Osananajimi-no-Bishoujo-ni-Tanomarete-Camouflage-Kareshi-Hajimemashita",
           "excerpts": [
             "Hint: Want more advanced searching? Try the Browse page\nAdd to List\n\nNee, Mou Isso Tsukiacchau? Osananajimi no Bishoujo ni Tanomarete, Camouflage Kareshi Hajimemashita\n\nMasaichi Mazono, an otaku boy, and Toiro Kurumi, the most beautiful girl in school, are childhood friends with a relaxed relationship. Toiro, tired of receiving unwanted romantic attention at school, asked Masaichi to pretend to be her boyfriend. Since they've been together all their lives, they thought it would be easy to be a fake couple, but there is no way that these childhood friends, who have such great chemistry with each other, can end up being just fake lovers...\n\n...\n\nMy Childhood Friend, a Beautiful Girl, Asked Me To Be Her Boyfriend, and I’ve Started a Camouflage Boyfriend\n\nTags\n\nMale Protagonist\n79%\nFake Relationship\n79%\nHeterosexual\n60%\nSeinen\n60%\nSchool\n40%"
+          ]
+        },
+        {
+          "title": "Tenkousaki no Seiso Karen na Bishoujo ga, Mukashi Danshi to Omotte Issho ni Asonda Osananajimi datta Ken - MangaDex",
+          "url": "https://mangadex.org/title/7873dd0e-131f-4f40-8a92-32601713e1da/tenkosaki-the-neat-and-pretty-girl-at-my-new-school-is-a-childhood-friend-of-mine-who-i-thought-was-a-boy",
+          "excerpts": [
+            "Ctrl K\nEnter a search query...\nCover image Japanese flag icon\nTenkousaki no Seiso Karen na Bishoujo ga, Mukashi Danshi to Omotte Issho ni Asonda Osananajimi datta Ken\nThe Case Of The Neat And Beautiful Girl At My New School Turning Out To Be My Childhood Friend Who I Used To Play With Thinking She Was A Boy\nHibari Yu, Ooyama Kina\nAdd To Library Start Reading\n\n...\n\nSuggestive Romance Comedy School Life Slice of Life Adaptation\nPublication: 2021, Completed\nSeven years ago, I promised my best male friend that we would always be friends. When I reunited with him in high school, he was… the neatest and most beautiful girl in the school!? And yet, she acts the same old way only in front of me…\nCharacter Designer: Sisoe\nAdditional Sites:\n* Official X\nAuthor\nHibari Yu\nArtist\nOoyama Kina\nGenres\nComedy Romance Slice of Life\nThemes\nSchool Life\nDemographic\nShounen\nFormat\nAdaptation\nRead or Buy"
           ]
         }
       ]
@@ -2301,38 +2301,38 @@
     "manga female disguised male soccer island childhood friend asshole romance": {
       "results": [
         {
-          "title": "Handsome Must Die - Astra Ashima | MANGA Plus by Shueisha",
-          "url": "https://mangaplus.shueisha.co.jp/titles/100243",
+          "title": "\nUwasa no Midori-kun!! | Manga - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/619/Uwasa_no_Midori-kun",
           "excerpts": [
-            "1. home\n2. manga list\n3. Handsome Must Die\nHandsome Must Die thumbnail\nadd Add to Favorite\n\nHandsome Must Die\n\nAstra Ashima\nTeen T-Shirt\n\nSummary\n\nYuri- a high school student so handsome she has the other girls tripping over their feet and calling her a prince. But behind closed doors, she’s a total idol-fangirl! Her biggest bias? Ryo-kun from the popular group “Handsome Guys”. A chance encounter with Ryo after one of his concerts turns Yuri’s world upside down when she finds herself suddenly thrust into the world of idols- disguised as a guy?! What wayward shenanigans lie ahead in her comedic journey through stardom?\nlabel\nadd Add to Favorite\n\nAvailable Languages\n\nEnglish\n\nUpdate Schedule\n\ncompleted\nCompleted\nShare\ntwitter Post facebook Share\n\nChapter List\n\nsort\nthumbnail\n#001\n・\nMay 6, 2023\nChapter 1\n176\ncommentIcon\nthumbnail\n#002\n・\nMay 13, 2023\nChapter 2\n68\ncommentIcon\nthumbnail\n#003\n・\nMay 20, 2023\nChapter 3"
+            "Genres: Drama , Romance , Sports\nThemes: Crossdressing , Team Sports\nDemographic: Shoujo\nSerialization: Sho-Comi\nAuthors: Ikeyamada, Go (Story & Art)\n\nStatistics\n\n...\n\nAdd to My List Select (10) Masterpiece (9) Great (8) Very Good (7) Good (6) Fine (5) Average (4) Bad (3) Very Bad (2) Horrible (1) Appalling\nVolumes: / 10 \nChapters: / 51 \n\nEdit\n\nSynopsis\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school.\n(Source: Tenshi-Tachi)"
           ]
         },
         {
-          "title": "Read Beautiful Things: The Complete Manga Collection (English) | Seven Seas Entertainment | Comics & Manga Online Free on GlobalComix",
-          "url": "http://globalcomix.com/c/beautiful-things-the-complete-manga-collection/r/b15d6672-7aeb-4b6b-808a-13310eebbba4",
+          "title": "\nUwasa no Midori-kun!! | Manga - MyAnimeList.net\n",
+          "url": "http://myanimelist.net/manga/619",
           "excerpts": [
-            "Log in Sign up - it's free\nCover for Beautiful Things: The Complete Manga Collection\nPreview Buy $14.99 $13.99 with Gold\nOne-shot 1\n\nBeautiful Things: The Complete Manga Collection\n\nSeven Seas Entertainment\nAfter a tough breakup, Matsuoka finds solace in a surprising place--his ex-girlfriend's wardrobe. Donning her outfits, he embarks on nightly escapades that garner a whirlwind of attention, not all of which is welcome. One perilous evening, Matsuoka is rescued from an assault by his unsuspecting co-worker, Hirosue. Hirosue, an endearing klutz, is completely taken by Matsuoka's disguised persona and falls head over heels. As Matsuoka thrives in the glow of Hirosue's adoration, the weight of his secret looms large. How long can he keep his true identity hidden?"
+            "Genres: Drama , Romance , Sports\nThemes: Crossdressing , Team Sports\nDemographic: Shoujo\nSerialization: Sho-Comi\nAuthors: Ikeyamada, Go (Story & Art)\n\nStatistics\n\n...\n\nSynopsis\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school.\n(Source: Tenshi-Tachi)\n\n...\n\nThis anime should not be overlooked, from its heated romance, lovable characters and amazing comedy scenes."
           ]
         },
         {
-          "title": "Beautiful Things: The Complete Manga Collection | Seven Seas Entertainment | Read Comics & Manga Online Free on GlobalComix",
-          "url": "http://globalcomix.com/c/beautiful-things-the-complete-manga-collection",
+          "title": "\nSayonara Football (Sayonara, Football) | Manga - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/26491",
           "excerpts": [
-            "Log in Sign up - it's free\nCover for Beautiful Things: The Complete Manga Collection\nStart reading\n\nBeautiful Things: The Complete Manga Collection\n\nSeven Seas Entertainment\nAfter a tough breakup, Matsuoka finds solace in a surprising place--his ex-girlfriend's wardrobe. Donning her outfits, he embarks on nightly escapades that garner a whirlwind of attention, not all of which is welcome. One perilous evening, Matsuoka is rescued from an assault by his unsuspecting co-worker, Hirosue. Hirosue, an endearing klutz, is completely taken by Matsuoka's disguised persona and falls head over heels. As Matsuoka thrives in the glow of Hirosue's adoration, the weight of his secret looms large. How long can he keep his true identity hidden? And what will unfold when Hirosue discovers the truth?"
+            "Onda Nozomi is in her second year on the middle school soccer team but has yet to play a single game because she is a girl. Growing up playing soccer, she has the technical skills, endurance and the elegance. However, as a girl, she can't overcome the physical difference and she can see all her male teammates that she grew up playing soccer with get further and further away from her. Even her younger brother, Junpei, who is also on the team, is starting to rise above her. Coach Samejima sees that Nozomi is an amazing player but because soccer is such a physical sport, he can't let her play. Nozomi isn't the kind of girl that just gives up so she practices harder than anyone and drives the team in the hopes of one day playing in a game.\n\n...\n\nMain heroine Onda is a middle-schooler with great talent and passion for soccer, but tormented by the thought of being left behind by her male teammates as time passes and their bodies grow larger and manlier. When confronted by a former friend and now rival, she starts her quest to gain her spot in the team to play an ..."
           ]
         },
         {
-          "title": "Female Groin Invincibility - TV Tropes",
-          "url": "https://tvtropes.org/pmwiki/pmwiki.php/Main/FemaleGroinInvincibility",
+          "title": "\nUwasa no Midori-kun!! | Manga - Recommendations - MyAnimeList.net\n",
+          "url": "http://myanimelist.net/manga/619/Uwasa_no_Midori-kun/userrecs",
           "excerpts": [
-            "Advertisement:\nTired of seeing ads? Subscribe!\nThis trope could be considered the female equivalent of Balls of Steel .\n\n...\n\nShe then shrieks back, \"Coulda fooled me!\" and resumes the fight.\n* She's the Man : Viola, pretending to be her brother Sebastian, gets hit in the crotch with a soccer ball, but doesn't react until she sees the boys wincing and so doubles over in faked pain.\n\n...\n\nWhen Eddie, disguised as the wife, is kicked in the crotch by Richie, he makes it a point to tell onlookers, \"It's lucky I am a girl, otherwise that would have really hurt!\"\n\n...\n\nBob identifies as male but when he's hit he usually shouts \"Ow, my ovaries!\" At least once, he managed to tank a kick to the crotch from Saiko because of it.\n\n...\n\n* Downtown : In the episode \"Night Shift\" Serena runs to Alex and Goat, telling them of a suspicious \"man\" (actually Jen, their female friend) who had been following her all night."
+            "add permalink A girl in both manga disguises to be a guy and goes to a guys' school involving in sports. Not only that, her roommate knows about her identity.\n\n...\n\nadd permalink Although Uwasa no midori kun is much more mature, both are wonderful stories with comedy, romance and a awesome love triangle. report Recommended by Orulyon Read recommendations by 1 more user\n* Manga: Moe Kare!! | Moe Kare!! add permalink Same mangaka and similar love triangle concept. ^_^ report Recommended by Master10K Read recommendations by 1 more user\n* Manga: Nononono | Nononono add permalink Both of these manga involve girls with a goal in a certain sport and both pretending to be a male and crossdressing, for Nono it's Ski jumping and Uwasa it's soccer. Along the way, they're discovered but the person instead helps them with the sport and protecting their secret and they both fall for the main heroine. Nono has more drama and seriousness to it then Uwasa has but they're both great manga. If you liked Nono you may also like Uwasa report Recommended by Duckii"
           ]
         },
         {
-          "title": "Romantic False Lead - TV Tropes",
-          "url": "https://tvtropes.org/pmwiki/pmwiki.php/Main/RomanticFalseLead",
+          "title": "Read Hey, Wanna Go Out With Me? My Childhood Friend, a Beautiful Girl, Asked Me To Be Her Boyfriend, and I’ve Started a Camouflage Boyfriend Manga Online for Free",
+          "url": "https://www.mgeko.cc/manga/nee-mou-isso-tsukiacchau-osananajimi-no-bishoujo-ni-tanomarete-camo-kareshi-hajimemashita",
           "excerpts": [
-            "* In Dreamin' Sun , soon after moving in, Shimana discovers that Asahi already has a crush on someone else: her childhood friend Manami. She gives up on him and soon the series focuses on a love triangle between her, Zen, and Taiga.\n\n...\n\n* Whilst Maison Ikkoku doesn't have quite the Love Dodecahedron that would later be seen in Ranma ½ , it still makes relationships complicated by invoking this trope for both its male and female protagonists.\n* Female protagonist Kyoko Otonashi becomes the target of Yusaku Godai's affections from the moment he sees her in the first\n\n...\n\nromance between Naruto and Hinata , which had been planned since the early stages of the manga, as a surprise.\n\n...\n\nEven Shampoo's would-be Childhood Friend Romance Mousse doesn't count for this, because Shampoo makes it clear that she hates him and has always hated him, and she never wavers in that feeling of revulsion. Advertisement:"
+            "My Childhood Friend, a Beautiful Girl, Asked Me To Be Her Boyfriend, and I’ve Started a Camouflage Boyfriend\n\nHey, Wanna Go Out With Me?\n\n...\n\nOsananajimi no Bishoujo ni Tanomarete, Camouflage Kareshi Hajimemashita, Nemotsuki, นี่ เรามาคบกันมั้ย?, ねぇ、もういっそつき合っちゃう？幼馴染の美少女に頼まれて、カモフラ彼氏はじめました, 吶，要不我們交往吧？被美少女青梅竹馬拜託，開始假冒她的男友, 있잖아, 우리 차라리 사귈까?\n\n...\n\nYou are reading chapters on www.mgeko.cc fastest updating comic site. The Summary is\nMasaichi Mazono, an otaku boy, and Toiro Kurumi, the most beautiful girl in school, are childhood friends. Toiro, who was always in Masaichi’s room, was supposed to be like family to him. But one day, Toiro, who was constantly getting annoyed by her romantic troubles, asks Masaichi to play the role of her boyfriend. They thought it would be simple to pretend to be a couple because they’d been together for so long, but their ideal childhood friend can’t possibly end up as a false lover… “E-eh no, holding hands is embarrassing.”"
           ]
         }
       ]
@@ -2340,38 +2340,38 @@
     "erotic manga girl pretends to be boy soccer team all boys school island": {
       "results": [
         {
-          "title": "Ai Ore! Love Me! (Manga) - TV Tropes",
-          "url": "https://tvtropes.org/pmwiki/pmwiki.php/Manga/AiOreLoveMe",
+          "title": "\nCrossdressing - Manga - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/genre/44/Crossdressing",
           "excerpts": [
-            "Ai Ore! Love Me! (Manga)\nAkira Shiraishi, a feminine-looking boy, is the \"princess\" of his all-boys school. Mizuki Sakurazaka, an androgynous-looking girl, is the \"prince\" at her all-girls school. When Akira joins Mizuki's all-girls band, a series of events causes them to come together, despite prejudice due to their looks and their peers' reactions.\n\n...\n\n* Crazy Jealous Guy : Akira doesn't like not knowing what Mizuki is doing.\n* Disproportionate Retribution : For associating herself with the middle-lower class boys' high school and dressing up in their uniform, the student body president locks Mizuki up in a jail cell with nothing but a loose shirt to wear.\n\n...\n\n* Every single girl who was not a member of Blaue Rosen (except Momoko) dressed like this in The Movie .\n* Erotic Dream : Mizuki's had a couple of erotic dreams.\n\n...\n\n* One-Gender School : Akira goes to an all-boys' school, while Mizuki goes to an all-girls' school. Both of them are extremely popular at their respective schools."
+            "After seeing Izumi Sano at a high jump competition, Mizuki Ashiya became completely enamored by him—even moving from the United States to Japan and enrolling in the same institute as him. However, Sano's academy is an all-boys school!\n\n...\n\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school.\n\n...\n\nOur protagonist, Kei Saeba, ends up enrolling in this veritable garden of blooming amateurs due to her mother's guile. Now she must pretend she's a boy for three years or she \"will be erased\"!"
           ]
         },
         {
-          "title": "\nSchool - Manga - MyAnimeList.net\n",
-          "url": "https://myanimelist.net/manga/genre/23/School",
+          "title": "\nSayonara Football (Sayonara, Football) | Manga - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/26491",
           "excerpts": [
-            "Therefore, she starts acting unfeminine and indifferent to boys, allowing her to make some \"friends\" along the way.\n\n...\n\nAdd to My List\n\nKaichou wa Maid-sama!\n\nManga, 2005 Finished 18 vol, 98 chp\nComedy Romance\n Kaichou wa Maid-sama!\nSeika High School was an all-boys school, but it has since turned co-ed.\n\n...\n\nAs Naho continues to read the letter, her future self mentions several regrets, urging Naho to take the right decisions now.\n\n...\n\nUsing erotic thoughts of his female classmates as stimulus, he locks himself daily in a seldom-used girl's bathroom at school to do his dirty deed.\n\n...\n\nFeeling troubled due to their lack of female interaction, the five boys embark on a dangerous mission to peek on several girls while they are bathing."
+            "Synonyms: She is a cute footballer!\nJapanese: さよならフットボール\nEnglish: Sayonara, Football\nMore titles\n\nInformation\n\nType: Manga\nVolumes: 2\nChapters: 8\nStatus: Finished\n\n...\n\nOnda Nozomi is in her second year on the middle school soccer team but has yet to play a single game because she is a girl. Growing up playing soccer, she has the technical skills, endurance and the elegance. However, as a girl, she can't overcome the physical difference and she can see all her male teammates that she grew up playing soccer with get further and further away from her. Even her younger brother, Junpei, who is also on the team, is starting to rise above her. Coach Samejima sees that Nozomi is an amazing player but because soccer is such a physical sport, he can't let her play. Nozomi isn't the kind of girl that just gives up so she practices harder than anyone and drives the team in the hopes of one day playing in a game."
           ]
         },
         {
-          "title": "Prison School (Manga) - TV Tropes",
-          "url": "https://tvtropes.org/pmwiki/pmwiki.php/Manga/PrisonSchool",
+          "title": "Shishunki to Danshikou!? to Nakano-kun",
+          "url": "https://anilist.co/manga/130894/Shishunki-to-Danshikou-to-Nakanokun",
           "excerpts": [
-            "Being one of the few boys in a female-majority school is surely a paradise... right?\nPrison School (監獄学園 / \"Kangoku Gakuen\") is a 2011-2017 seinen sex comedy series by Akira Hiramoto (of Me and the Devil Blues fame).\nAdvertisement:\nTired of seeing ads? Subscribe!\nHachimitsu Private Academy is an elite all-girls boarding school infamous for its draconian rules and harsh penal code. When five boys — Kiyoshi Fujino, Takehito \"Gakuto\" Morokuzu, Shingo Wakamoto, Jouji \"Joe\" Nezo and Reiji \"Andre\" Andou — are admitted as part of a new co-ed program, the girls seem to give them the cold shoulder.\n\n...\n\nSoon enough, the boys find themselves in trouble when they are caught peeping on the girls' baths.\n\n...\n\nBy the most recent chapters, Kiyoshi and Shingo are both Bishōnen and Gakuto only becomes weird looking for gags."
+            "Add to List\n\nShishunki to Danshikou!? to Nakano-kun\n\nHajime Nakano is forced by his mother to enroll at a newly opened all boys high school, and he laments over having to spend the next three years surrounded by other guys. However, he doesn't know that all of the other students are girls secretly pretending to be guys, and each of them think they are the only girl in the whole school.\n\n...\n\nGenres\nComedy\nRomaji\nShishunki to Danshikou!? to Nakano-kun\nNative\n思春期と男子校!?と中野くん\nSynonyms\nPuberty, an All Boys School!? and Nakano-kun Puberty & Boys' School!? Nakano-kun\n\nTags\n\nCrossdressing\n79%\n\n...\n\nHajime Nakano is forced by his mother to enroll at a newly opened all boys high school, and he laments over having to spend the next three years surrounded by other guys. However, he doesn't know that all of the other students are girls secretly pretending to be guys, and each of them think they are the only girl in the whole school."
           ]
         },
         {
-          "title": "Hakari Hanazono | 100Kanojo Wiki | Fandom",
-          "url": "https://100kanojo.fandom.com/wiki/Hakari_Hanazono",
+          "title": "\nUwasa no Midori-kun!! | Manga - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/619/Uwasa_no_Midori-kun",
           "excerpts": [
-            "School Uniform [  ]\n\nHakari is usually seen wearing the full Ohana High girl's uniform.\nShe usually wears it with both blazer buttons fastened, causing it to hug her figure and accentuate her bust.\n\n...\n\nHakari is also extremely perverted (a trait which runs in her family), and frequently fantasizes about being in erotic situations with Rentarou.\n\n...\n\nHakari performs well in school, with her grades being in the top 25 among all students in her year.\n\n...\n\nMany of her schemes involve initiating physical contact with Rentarou, or tempting him into doing erotic things to her and/or others.\n\nFamily Wealth [  ]\n\n...\n\nUpon their first meeting, Hakari pretends to have twisted her ankle as an excuse to get closer to Rentarou, and has Rentarou help her to the school infirmary."
+            "Genres: Drama , Romance , Sports\nThemes: Crossdressing , Team Sports\nDemographic: Shoujo\nSerialization: Sho-Comi\nAuthors: Ikeyamada, Go (Story & Art)\n\nStatistics\n\n...\n\nYamate Midori is a 15 year-old girl and is very much a tomboy. One day Midori meets a boy called Hino Tsukasa, who came to the island she lives on for a holiday. He teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school.\n(Source: Tenshi-Tachi)\nIncluded one-shots: Volume 8: Shounen x Cinderella Volume 9: Shounen x Cinderella II"
           ]
         },
         {
-          "title": "Hitoha Marui | Mitsudomoe Wiki | Fandom",
-          "url": "https://mitsudomoe.fandom.com/wiki/Hitoha_Marui",
+          "title": "The Beautiful Skies of Houou High Manga | Anime-Planet",
+          "url": "https://www.anime-planet.com/manga/the-beautiful-skies-of-houou-high",
           "excerpts": [
-            "It appears to be the same book all the time, but it is actually a cover which she puts on books to hide their true nature. The books that she reads have been shown to be very erotic, including erotic fiction and pornographic magazines.\n\n...\n\nShe spends much of her time in school under Yabe's desk, both in the classroom and in the teachers' room; she finds it comforting and relaxing, although apparently only when he is sitting at the desk.\n\n...\n\nHitoha in the manga \nHitoha in the manga\nHitoha debuted in Chapter 1 of the published manga. Yabe decides to play the game of musical chairs with his students, while Hitoha refuses to play and simply reads her book away from her classmates.\n\n...\n\nSince Futaba accidentally hurt Mitsuba , Yabe decides to go for Hitoha’s chair as she slowly walked towards it, which resulted in him getting owned by her book, revealed to be an erotic one."
+            "The Beautiful Skies of Houou High\n\nAlt title: Houou Gakuen Misoragumi\n\n* overview\n* recommendations\n* characters\n* staff\n* reviews\n* custom lists\nVol: 4; Ch: 22\n2008 - 2010\n3.738 out of 5 from 586 votes\nRank #17,802\nThe Beautiful Skies of Houou High\nKei Saeba isn't your typical girl – she's manly and is in love with the fairer sex, much to her mother's dismay. And so, now that Kei is ready to begin high school, her mother secretly enrolls the girl into an all-boys school in hopes of changing her sexuality – an action that Kei is less than thrilled with once she discovers the truth. Now, for the next three years, Kei must pretend to be a boy and keep her secret safe, lest the school get a bad reputation from its wealthy benefactors. How will Kei cope with being surrounded by men, when all she wants is a lovely lady by her side?\n\nTags\n\n* Comedy\n* Reverse Harem\n* Romance\n* Shoujo\n* All-Boys School\n* Boarding School\n* Crossdressing"
           ]
         }
       ]
@@ -2453,63 +2453,102 @@
           ]
         }
       ]
+    },
+    "hentai manga girl pretends to be boy soccer team all boys school": {
+      "results": [
+        {
+          "title": "\nCrossdressing - Manga - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/genre/44/Crossdressing",
+          "excerpts": [
+            "After seeing Izumi Sano at a high jump competition, Mizuki Ashiya became completely enamored by him—even moving from the United States to Japan and enrolling in the same institute as him. However, Sano's academy is an all-boys school!\n\n...\n\nWill Kyou be able to live in close quarters with someone so annoying and thrive on the basketball team, all while hiding her true gender from everyone? [Written by MAL Rewrite]\nAuthor Seino, Shizuru\n\n...\n\nFrom an outsider's perspective, what they are seeing is a normal meetup between three girls. However, these \"girls\" are meeting for the first time because of one commonality: they were born as males, but crossdress for various reasons.\n\n...\n\nHe teaches her to play soccer and she falls in love with the sport. Midori is inspired by Tsukasa and continues to play soccer in hopes that they would meet again someday. When they do meet again Tsukasa does something unforgivable. Determined to defeat Tsukasa on the soccer field Midori enrolls in an all boy high school."
+          ]
+        },
+        {
+          "title": "\nSayonara Football (Sayonara, Football) | Manga - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/manga/26491",
+          "excerpts": [
+            "Synonyms: She is a cute footballer!\nJapanese: さよならフットボール\nEnglish: Sayonara, Football\nMore titles\n\nInformation\n\nType: Manga\nVolumes: 2\nChapters: 8\nStatus: Finished\n\n...\n\nOnda Nozomi is in her second year on the middle school soccer team but has yet to play a single game because she is a girl. Growing up playing soccer, she has the technical skills, endurance and the elegance. However, as a girl, she can't overcome the physical difference and she can see all her male teammates that she grew up playing soccer with get further and further away from her. Even her younger brother, Junpei, who is also on the team, is starting to rise above her. Coach Samejima sees that Nozomi is an amazing player but because soccer is such a physical sport, he can't let her play. Nozomi isn't the kind of girl that just gives up so she practices harder than anyone and drives the team in the hopes of one day playing in a game."
+          ]
+        },
+        {
+          "title": "Shishunki to Danshikou!? to Nakano-kun",
+          "url": "https://anilist.co/manga/130894/Shishunki-to-Danshikou-to-Nakanokun",
+          "excerpts": [
+            "Add to List\n\nShishunki to Danshikou!? to Nakano-kun\n\nHajime Nakano is forced by his mother to enroll at a newly opened all boys high school, and he laments over having to spend the next three years surrounded by other guys. However, he doesn't know that all of the other students are girls secretly pretending to be guys, and each of them think they are the only girl in the whole school.\n\n...\n\nGenres\nComedy\nRomaji\nShishunki to Danshikou!? to Nakano-kun\nNative\n思春期と男子校!?と中野くん\nSynonyms\nPuberty, an All Boys School!? and Nakano-kun Puberty & Boys' School!? Nakano-kun\n\nTags\n\nCrossdressing\n79%\n\n...\n\nHajime Nakano is forced by his mother to enroll at a newly opened all boys high school, and he laments over having to spend the next three years surrounded by other guys. However, he doesn't know that all of the other students are girls secretly pretending to be guys, and each of them think they are the only girl in the whole school."
+          ]
+        },
+        {
+          "title": "Haru no Regista",
+          "url": "https://anilist.co/manga/181157/Haru-no-Regista",
+          "excerpts": [
+            "Add to List\n\nHaru no Regista\n\nOnce hailed as a soccer prodigy, high school girl Arai Haru transferred to a school far from her hometown, hoping to start a new life away from soccer. However, a new student, Osanai Satsuki, who admired Haru's past glory, appeared before her and declared her intention to join the Soccer Club, which is on the verge of disbandment. This is a girls' soccer story about a girl who gave up her dream and a girl who chases after it!\nOverview Staff Stats Social\nFormat\nManga\nStatus\nReleasing\nStart Date\nJul 24, 2024\nAverage Score\n58%\n\n...\n\nOnce hailed as a soccer prodigy, high school girl Arai Haru transferred to a school far from her hometown, hoping to start a new life away from soccer. However, a new student, Osanai Satsuki, who admired Haru's past glory, appeared before her and declared her intention to join the Soccer Club, which is on the verge of disbandment."
+          ]
+        },
+        {
+          "title": "Girls & Football/Soccer - Interest Stacks - MyAnimeList.net\n",
+          "url": "https://myanimelist.net/stacks/3610",
+          "excerpts": [
+            "Add to My List\nSayonara Football\nManga, 2 vol, 2009 Me: - Author: -\n\"Onda Nozomi is in her second year on the middle school soccer team but has yet to play a single game because she is a girl. Growing up playing soccer, she has the technical skills, endurance and the elegance. However, as a girl, she can't overcome the physical difference and she can see all her male teammates that she grew up playing soccer with get further and further away from her.\n\n...\n\nInvolving with soccer and love. The main guy and main girl shares the same name, Makoto, but with different kanji.\"\n\nGirl Girl Ball Shoot Girl\n\nAdd to My List\nGirl Girl Ball Shoot Girl\nManga, 3 vol, 2004 Me: - Author: -\n\"Mizuno Kaori attends an all-girls high school and likes to spend time with her friends after class playing football. They'd like to create a club, but they're one member short of creating a team and people think it's foolish for girls to play football."
+          ]
+        }
+      ]
     }
   },
   "calls": {
-    "2a5f517ed9f3ff9133255f2c13d90c34f164cc7c9930ca9ac30357d74c99bf69": {
+    "ba44c1d8c2e3af2973f91ba499f0a39327eac0e3dfe2462930f5087cb5f0cdac": {
       "kind": "router",
       "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\": \"The user is looking for a specific manga with a detailed plot description. I need to search the web to identify the title.\", \"action\": \"web_search\", \"goal\": \"\", \"mode\": \"plan\", \"queries\": [\"manga girl disguises as boy soccer all boys school island childhood friend\", \"erotic manga girl pretends to be boy soccer team all boys school island\", \"manga female disguised male soccer island childhood friend asshole romance\"], \"grep\": null}"
+      "content": "\n\n{\"reasoning\": \"The user is looking for a specific manga with detailed plot elements (girl disguised as boy, soccer, all-boys school, island childhood, childhood friend, smut). This requires searching the web to identify the title.\", \"action\": \"web_search\", \"goal\": \"\", \"mode\": \"plan\", \"queries\": [\"manga girl disguised as boy soccer all-boys school island childhood friend smut\", \"hentai manga girl pretends to be boy soccer team all boys school\", \"manga female disguised male soccer island childhood friend asshole romance\"], \"grep\": null}"
     },
-    "b3b7bb4d5494ff2b64cb252e36e68de8a79d0b6276162bfcff90a9748040b449": {
+    "99925c45258756ff06193680f5ef9c721a8e0a0f226641b063911f52aacaf3c3": {
       "kind": "generator",
       "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\": \"The first search result is a near-perfect match for every plot point the user described: girl on an island, learns soccer from a boy who betrays her, disguises as a boy, infiltrates an all-boys school, joins the soccer team. The manga is 'Uwasa no Midori-kun!!' (2006, 10 volumes). It's a shoujo romance/drama/sports manga. It's not explicit smut, but it does have romantic and sexual tension. The user said 'I think it was smut/sexual' which suggests uncertainty. I'll identify it and note the tone.\", \"response\": \"It's Uwasa no Midori-kun!! (2006, 10 volumes, by Aya Takano).\\n\\nYamate Midori grows up on a remote island. A boy named Hino Tsukasa visits, teaches her soccer, then betrays her trust. She disguises herself as a boy and enrolls at Aoba 3rd High School (all-boys) to join their soccer team and get revenge.\\n\\nOne caveat: it's a shoujo romance/drama, not explicit smut. There's sexual tension and some fan service, but it's not a hentai or ecchi title. If you're sure it was explicit, it might be a different manga. But every other detail you listed matches this one exactly.\"}"
+      "content": "\n\n{\"reasoning\": \"All the plot elements the user described match Uwasa no Midori-kun!! perfectly: girl on an island, childhood friend teaches her soccer, he does something unforgivable (the 'asshole' part), she enrolls in an all-boys school to play soccer, and the Patreon review confirms it has sexual content. It's a shoujo manga serialized in Sho-Comi, a mature shoujo magazine known for including explicit scenes.\", \"response\": \"That's Uwasa no Midori-kun!! by Ikeyamada Go.\\n\\n10 volumes, serialized in Sho-Comi (a mature shoujo magazine, so yes it has explicit scenes). Midori lives on a remote island, her childhood friend Tsukasa teaches her soccer, then does something unforgivable when they reunite. She enrolls in an all-boys school in Tokyo to play soccer and confront him. They end up together.\\n\\nIt's completed, so you can read the whole thing.\"}"
     },
-    "de6059d7c5e191b8aed3a1d1480ea12d5fa735adc756ce78bd57143a547ca6f7": {
+    "31ce42fb2511eb2b5e794158408f6eebdb856abd4637d731d712f606654dfd36": {
       "kind": "router",
       "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\": \"The search results clearly identify the manga as 'Uwasa no Midori-kun!!' which matches every detail the user described: girl from an island, disguises as a boy, infiltrates all-boys school, joins soccer team, childhood friend who is an asshole (Tsukasa betrays her trust and is crude about it), and they end up together. The user's recollection of it being smut/sexual aligns with the intimate content mentioned in the results.\", \"action\": \"direct_answer\", \"goal\": \"\", \"mode\": \"plan\", \"queries\": [], \"grep\": null}"
+      "content": "\n\n{\"reasoning\": \"The search results clearly identify the manga as 'Uwasa no Midori-kun!!' by Ikeyamada Go. All plot details match: girl on an island, childhood friend teaches her soccer, he does something unforgivable (the 'asshole' part), she enrolls in an all-boys school to play soccer, and it has sexual/scandalous content. This is a complete answer.\", \"action\": \"direct_answer\", \"goal\": \"\", \"mode\": \"plan\", \"queries\": [], \"grep\": null}"
     },
-    "a5bfffacfc82914bb4ddc034c682b43b9d767236c9b8031a54615cf20a6b8ab2": {
+    "7bf0941ee6a8094c39e51faac5c1291d6f50a6c5f2b763f3b9146281f0354ca3": {
       "kind": "router",
       "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\": \"The user is asking me to identify a specific manga based on plot details. This requires a web search to find the title.\", \"action\": \"web_search\", \"goal\": \"\", \"mode\": \"plan\", \"queries\": [\"manga loser protagonist wakes up island naked women enslaves becomes god hentai\", \"hentai manga island naked people protagonist enslaves everyone becomes god\", \"manga chud protagonist island beautiful naked women men enslaves god\"], \"grep\": null}"
+      "content": "\n\n{\"reasoning\": \"The user is asking me to identify a specific manga based on plot details. This requires a web search to find the title.\", \"action\": \"web_search\", \"goal\": \"\", \"mode\": \"execute\", \"queries\": [\"hentai manga loser protagonist island naked women enslaves becomes god\", \"manga chud wakes up island beautiful naked people enslaves everyone god\", \"hentai manga island of naked women man becomes god enslaves\"], \"grep\": null}"
     },
-    "5f993f7933475c71e9143557fd419a9c1f70d726cba38d735ba069bf5d16941c": {
-      "kind": "generator",
-      "model": "qwen-3.8-27b",
-      "content": null
-    },
-    "e536f9439da2a1968f584bc8b8f46a8501487c800cd24cef62f646978026d61c": {
-      "kind": "router",
-      "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\": \"The initial searches didn't surface a match for this specific combination: loser protagonist, island of naked people (both genders), enslavement, becoming a god, highly explicit. Need to try different search angles.\", \"action\": \"web_search\", \"goal\": \"\", \"mode\": \"plan\", \"queries\": [\"hentai manga island naked people slave god protagonist\", \"manga protagonist becomes god island slaves naked people explicit\", \"hentai manga loser wakes up paradise island enslaves everyone god\"], \"grep\": null}"
-    },
-    "c99243e60622f66adea70281c5588975b784167e2b6f20453e00baa9119a9aa6": {
+    "f312c4f5cb69c671e95e9c724e01e85dd0a014d9b223502a5b2ed8259afc8566": {
       "kind": "generator",
       "model": "qwen-3.8-27b",
       "content": null
     },
-    "94c5aee4518076005c61f9770d5a1e4c5f74379dfcdf3bea8242dba13c7c6af3": {
+    "fe3397122400e5bdcb7a3218e74a71207fd5477bf461647f5b7f1d6b383f78e5": {
       "kind": "router",
       "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\": \"Multiple web searches with various phrasings have all returned the same irrelevant results. The user is looking for a highly explicit manga with a very specific plot (loser protagonist, island of naked people of both genders, enslavement, becoming a god). This is likely a niche doujinshi or hentai title that requires more creative search strategies including Japanese terms, niche databases, and community forums. Escalating to an agent that can try more angles.\", \"action\": \"start_superintelligence\", \"goal\": \"Identify a specific hentai/explicit manga based on the user's plot description: a loser/chud protagonist who wakes up on an island populated by beautiful naked women and men, enslaves everyone on the island, and becomes a god. The user describes it as highly smut/sexual content. Try searching with Japanese terms (e.g., 島, 裸, 奴隷, 神, 転生, 異世界), search hentai databases (HentaiFox, MangaDex hentai tags, E-Hentai tags), Reddit threads (r/mangarecs, r/hentaifoundit, r/whatisthisanime), and niche manga identification forums. The key distinguishing elements are: (1) island setting, (2) both men AND women are naked, (3) protagonist enslaves everyone, (4) protagonist becomes a god, (5) protagonist is characterized as a loser/chud. Report the title, author, and where to find it.\", \"mode\": \"execute\", \"queries\": [], \"grep\": null}"
+      "content": "\n\n{\"reasoning\": \"The search results returned generic harem/isekai manga but none match the specific combination: island of naked people, enslavement, becoming a god. Need to try different search angles to find this specific hentai title.\", \"action\": \"web_search\", \"goal\": \"\", \"mode\": \"plan\", \"queries\": [\"hentai manga island naked people protagonist enslaves becomes god\", \"hentai manga wakes up island all naked slaves god power\", \"hentai manga island paradise naked inhabitants protagonist dominates becomes deity\"], \"grep\": null}"
     },
-    "13c9537647ba2e26e072bf6c65fa418d3b79efbdb5358da6d889960f493ddceb": {
-      "kind": "router",
-      "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\": \"The user is asking for current weather in two specific cities (Paris and Tokyo). This requires up-to-date factual information that I don't have in context, so I need to search the web for both.\", \"action\": \"web_search\", \"goal\": \"\", \"mode\": \"execute\", \"queries\": [\"weather in Paris today October 16 2026\", \"weather in Tokyo today October 16 2026\"], \"grep\": null}"
-    },
-    "63c09f300ce03971b0598fdb1c23164742d059a3afc0df8bf27460b2081e73ed": {
+    "ea2b79f033b1ca94c4b1ba2d45e1ec5bcce1fe6f427099342a8b9f5a20804dd8": {
       "kind": "generator",
       "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\":\"I have search results for both cities. Paris: high 20°C, low 15°C, morning fog clearing to sun, light rain in evening. Tokyo: high 26°C, low 17°C, sunny with occasional clouds, no rain. I'll present both clearly and concisely.\",\"response\":\"Paris today (Fri Oct 16):\\n- High 20°C (68°F), low 15°C (59°F)\\n- Morning fog, clearing to sun by afternoon\\n- Light rain expected in the evening\\n- Wind around 17 km/h from the west\\n\\nTokyo today (Fri Oct 16):\\n- High 26°C (79°F), low 17°C (63°F)\\n- Sunny with occasional clouds\\n- No rain expected (0% precipitation chance)\\n- Light wind, around 1 m/s\\n\\nTokyo is warmer and drier. Paris kicks off cool but warms up nicely through the day.\"}"
+      "content": null
     },
-    "a94f63e7efb6ebf3035be708ec76eae0b87f7d1575e32e638907b75c6787c59e": {
+    "fb9796437c05d7e19b91cb59b2bfaa74ad8ec6c9455f77e0751089ed29f6b4d9": {
       "kind": "router",
       "model": "qwen-3.8-27b",
-      "content": "\n\n{\"reasoning\": \"Search results provide complete weather data for both Paris and Tokyo on October 16, 2026. I can deliver a full answer.\", \"action\": \"direct_answer\", \"goal\": \"\", \"mode\": \"execute\", \"queries\": [], \"grep\": null}"
+      "content": "\n\n{\"reasoning\": \"Multiple web searches have failed to identify this specific hentai manga. The plot is very specific (loser protagonist, island of naked people, enslavement, becomes a god) and likely a doujinshi or lesser-known hentai title that won't surface in general web searches. Need to escalate to an agent that can try more targeted searches on hentai-specific databases, forums, and Japanese-language sources.\", \"action\": \"start_superintelligence\", \"goal\": \"Identify a specific hentai manga with the following plot: a loser/chud male protagonist wakes up on an island populated by beautiful naked women and/or men, he enslaves all the inhabitants, and becomes a god. The user describes it as highly sexual/smut content. Search hentai-specific databases (HentaiForge, MangaUpdates hentai section, nhentai, etc.), Japanese-language sources, and forums (Reddit r/hentaifoundit, r/manga, etc.) to identify the exact title. Try Japanese search terms as well (e.g., 島, 全裸, 神, 奴隷, 主人公). Report the title, author, and where to find it.\", \"mode\": \"execute\", \"queries\": [], \"grep\": null}"
+    },
+    "afe2ec83869d16b4afbc5b7e2713d0a9c5d46de01c2e007967788bdcab3c2dbd": {
+      "kind": "router",
+      "model": "qwen-3.8-27b",
+      "content": "\n\n{\"reasoning\": \"The user is asking for current weather in two specific cities. This requires up-to-date factual information that I don't have in context, so I need to search the web for both cities in parallel.\", \"action\": \"web_search\", \"goal\": \"\", \"mode\": \"execute\", \"queries\": [\"weather in Paris today October 16 2026\", \"weather in Tokyo today October 16 2026\"], \"grep\": null}"
+    },
+    "80648f5f5f8d183f6db3eeb9bc69209572160bfffb5a114ffa554e8f791e8381": {
+      "kind": "generator",
+      "model": "qwen-3.8-27b",
+      "content": "\n\n{\"reasoning\":\"I have weather data for both cities from the search results. Paris: high 20°C, low ~13°C, mostly clear morning with light rain in the evening, wind ~17 km/h. Tokyo: high 25°C, low 17°C, sunny with occasional clouds, 20% precip chance, light wind. I'll present this concisely.\",\"response\":\"Paris today (Fri Oct 16): High 20°C, low 13°C. Mostly clear in the morning, light rain arriving in the evening. Wind around 17 km/h. A mild, pleasant start to the day.\\n\\nTokyo today (Fri Oct 16): High 25°C, low 17°C. Sunny with occasional clouds. Precipitation chance around 20%, no rain expected. Light winds. A warm, dry day.\\n\\nTokyo is about 5 degrees warmer and drier than Paris right now.\"}"
+    },
+    "07b5fe597e707e74fac4d0aa86885c444c408e29d6eed48fd36dcc4bebf37d70": {
+      "kind": "router",
+      "model": "qwen-3.8-27b",
+      "content": "\n\n{\"reasoning\": \"Search results contain complete weather data for both Paris and Tokyo on October 16, 2026. I can deliver a full answer.\", \"action\": \"direct_answer\", \"goal\": \"\", \"mode\": \"execute\", \"queries\": [], \"grep\": null}"
     }
   },
   "clockInstant": "2026-10-16T20:35:23.000Z"

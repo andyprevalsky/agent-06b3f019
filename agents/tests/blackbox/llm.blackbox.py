@@ -5629,6 +5629,16 @@ def test_filter_context_for_execute_verifier_uses_execute_boundary():
     assert "Beginning execute" not in text
     assert "late plan row" not in text
     assert "execute spawn result" in text
+    # set_plan can finish before more unphased planning work. Without an
+    # explicit execution transition, a later EXECUTE tag remains authoritative.
+    no_transition = context[:3] + [
+        {"role": "ASSISTANT", "text": "unphased planning draft", "timestamp": "2024-01-01T00:00:03Z",
+         "metadata": {"plannedToolName": "reasoning"}},
+        {**context[4], "metadata": {**context[4]["metadata"], "phase": "EXECUTE"}},
+    ]
+    scoped = _filter_context_for_execute_verifier(no_transition)
+    assert no_transition[3] not in scoped
+    assert no_transition[4] in scoped and context[0] in scoped
 
 
 async def test_check_progress_execute_filters_plan_context_before_llm():
@@ -5677,6 +5687,45 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert "original goal" in rendered
     assert "plan explore result" not in rendered
     assert "set_plan" not in rendered
+
+
+async def test_check_progress_keeps_completed_reasoning_before_completion_chip():
+    """A late EXECUTE status chip must not erase work after the phase transition."""
+    from helpers.llm import check_progress
+    from utils.prompts import build_verifier_prompt
+
+    captured = []
+
+    async def judge(messages, *_args, **_kwargs):
+        captured.extend(messages)
+        # Retain the captured rejection; this check proves request construction,
+        # not a model verdict. The paired live replay proves verdict behavior.
+        return {"task_completed": False, "score": 1.0, "reasoning": "missing reply"}, {}
+
+    context = [
+        {"role": "USER", "text": "Reply with the single word OK and finish. Do not use any tools.",
+         "timestamp": "2026-11-14T19:55:00Z"},
+        {"role": "TOOL", "text": "planning evidence", "timestamp": "2026-11-14T19:56:00Z",
+         "metadata": {"toolName": "set_plan", "toolStatus": "FINISHED", "phase": "PLAN"}},
+        {"role": "TOOL", "text": "", "timestamp": "2026-11-14T19:56:17Z",
+         "metadata": {"toolName": "attempt_completion", "title": "Beginning Execute Phase", "phase": "PLAN"}},
+        {"role": "ASSISTANT", "text": "OK", "timestamp": "2026-11-14T19:56:21Z",
+         "metadata": {"plannedToolName": "reasoning", "dagTaskIndex": 0}},
+        {"role": "TOOL", "text": "", "timestamp": "2026-11-14T19:56:22Z",
+         "metadata": {"toolName": "attempt_completion", "toolStatus": "IN_PROGRESS", "phase": "EXECUTE"}},
+        {"role": "TOOL", "text": "late planning evidence", "timestamp": "2026-11-14T19:56:23Z",
+         "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED", "phase": "PLAN"}},
+    ]
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", judge):
+        result = await check_progress(context, build_verifier_prompt(), call_site="verifier_execute")
+
+    assert result["score"] < 1.0, "Retaining evidence must not override an independent rejection"
+    evidence = "\n".join(m["content"] for m in captured if m["role"] != "system")
+    assert 'AUTHORED_RESULT {"source": "reasoning", "result": "OK"' in evidence, evidence
+    assert 'TOOL_RESULT {"tool_name": "reasoning"' not in evidence
+    assert "Do not use any tools" in evidence
+    assert "planning evidence" not in evidence
+    assert "Beginning Execute Phase" not in evidence
 
 
 async def test_check_progress_execute_verifier_keeps_original_goal():
@@ -6248,7 +6297,7 @@ async def test_check_progress_judges_completed_code_task_structured_response():
 
 def test_completed_code_task_rejects_failed_placeholder_structured_response():
     """A failed code child cannot satisfy the parent with empty schema defaults."""
-    from helpers.llm import _completed_child_task_structured_response, _structured_response_satisfies_schema
+    from helpers.llm import _structured_response_satisfies_schema
 
     schema = {
         "fields": [
@@ -6264,111 +6313,68 @@ def test_completed_code_task_rejects_failed_placeholder_structured_response():
         "collatz_step_count": 0,
         "collatz_sequence_from_27": [],
     }
-    # Required object/string/list outputs must carry useful values.  The
-    # success-metadata checks below remain a separate defense for schemas whose
-    # legitimate output can contain zero-valued primitives.
+    # Required object/string/list outputs must carry useful values.
     assert _structured_response_satisfies_schema(placeholder, schema) is False
 
-    for success_value in (False, None):
-        metadata = {
-            "toolName": "spawn_claude_code_agent",
-            "toolStatus": "FINISHED",
-            "action_type": "task_complete",
-            "structured_response": placeholder,
+
+async def test_check_progress_runs_the_llm_verifier_for_a_completed_child():
+    """Owner decision 2026-11-09: no deterministic accept of a completed child's output.
+
+    A finished browser child returned structured output covering every parent field;
+    the parent execute verifier still runs its normal LLM judgement.
+    """
+    from helpers.llm import check_progress
+
+    verifier_calls = []
+
+    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
+        verifier_calls.append(messages)
+        return {"score": 0.5, "reasoning": "needs the visible verdict"}, {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
         }
-        if success_value is not None:
-            metadata["success"] = success_value
-        assert _completed_child_task_structured_response([{"role": "TOOL", "metadata": metadata}], schema) is None
 
-
-def test_rejected_completed_child_handoff_is_scoped_to_source_child():
-    """A verifier rejection skips its child, without hiding an older valid one."""
-    from helpers.llm import (
-        _completed_child_handoff_identity,
-        _completed_child_task_structured_handoff,
-    )
-
-    schema = {"fields": [{"name": "answer", "type": "str", "required": True}]}
-
-    def completed_child(tool_call_id, answer):
-        return {
+    structured_response = {
+        "fcaptcha_risk_score_display": "0.16",
+        "checkbox_mode_passed": True,
+        "invisible_form_submitted": True,
+        "visible_verdict_text": "Verified!; Form submission allowed!",
+    }
+    context = [
+        {"role": "USER", "text": "check the FCaptcha demo"},
+        {
             "role": "TOOL",
+            "text": "",
             "metadata": {
-                "toolCallId": tool_call_id,
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
                 "action_type": "task_complete",
                 "success": True,
-                "structured_response": {"answer": answer},
+                "title": "Browser automation complete",
+                "structured_response": structured_response,
             },
-        }
-
-    newer_child_id = "browser-newer"
-    synthetic_id = f"completed-child-attempt-completion-{_completed_child_handoff_identity(newer_child_id)}-synthetic"
-    synthetic_marker = {
-        "role": "ASSISTANT",
-        "metadata": {
-            "tool_calls": [
-                {
-                    "tool": "attempt_completion",
-                    "tool_call_id": synthetic_id,
-                }
-            ]
         },
-    }
-    base_context = [
-        completed_child("browser-older", "older valid answer"),
-        completed_child(newer_child_id, "newer rejected answer"),
-        synthetic_marker,
     ]
 
-    # While that synthetic completion is being verified, its declaration is
-    # present but no verifier feedback exists yet. It must still fast-accept
-    # the newest child rather than call the verifier model unnecessarily.
-    assert _completed_child_task_structured_handoff(base_context, schema) == (
-        {"answer": "newer rejected answer"},
-        newer_child_id,
-    )
+    with patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier), patch("temporalio.activity.heartbeat"):
+        result = await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            response_schema={
+                "fields": [
+                    {"name": "fcaptcha_risk_score_display", "type": "str"},
+                    {"name": "checkbox_mode_passed", "type": "bool"},
+                    {"name": "invisible_form_submitted", "type": "bool"},
+                    {"name": "visible_verdict_text", "type": "str"},
+                ]
+            },
+            call_site="verifier_execute",
+        )
 
-    rejected_feedback = {
-        "role": "TOOL",
-        "metadata": {
-            "toolCallId": synthetic_id,
-            "toolName": "attempt_completion",
-            "toolStatus": "FINISHED",
-            "title": "⚖️ Verifier rejected (40%) — continue task",
-            "verifierMessage": True,
-        },
-    }
-    assert _completed_child_task_structured_handoff([*base_context, rejected_feedback], schema) == (
-        {"answer": "older valid answer"},
-        "browser-older",
-    )
-
-    # Non-polling loops append the same verifier result locally without the
-    # persistence-only verifierMessage marker. Its score title still scopes the
-    # rejection to this synthetic handoff.
-    local_rejected_feedback = {
-        "role": "TOOL",
-        "metadata": {
-            "toolCallId": synthetic_id,
-            "toolName": "attempt_completion",
-            "toolStatus": "FINISHED",
-            "title": "Progress: 40%",
-        },
-    }
-    assert _completed_child_task_structured_handoff([*base_context, local_rejected_feedback], schema) == (
-        {"answer": "older valid answer"},
-        "browser-older",
-    )
-
-    for legacy_success in (False, None):
-        old_result = completed_child("browser-unverified", "looks complete")
-        if legacy_success is None:
-            old_result["metadata"].pop("success")
-        else:
-            old_result["metadata"]["success"] = legacy_success
-        assert _completed_child_task_structured_handoff([old_result], schema) is None
+    assert len(verifier_calls) == 1, "the normal LLM verifier must run"
+    assert result["score"] == 0.5
+    assert (result.get("usage") or {}).get("actual_model") != "structured_response"
 
 
 async def test_check_progress_judges_completed_browser_task_structured_response():
@@ -6723,9 +6729,10 @@ async def test_call_planner_llm_activity_happy_path():
     # Planner always uses rose-1-ultra, even when the caller passed "rose".
     assert planner_body["model"] == "claude-opus-5-5"
     assert planner_body["stream"] is True
-    # Anthropic's literal "max" stalls — we normalize to "xhigh" (the highest
-    # reliably-streaming level, mirroring gpt_auth which maps "max" → "xhigh").
-    assert planner_body["output_config"]["effort"] == "xhigh"
+    # The planner's "max" sentinel resolves to its deadline-fit tier: at xhigh
+    # Opus 5.5 emitted nothing before the planner's fixed 220s deadline on the
+    # raise-5m planner request (set_plan RoseDeadlineError); high finished in 83s.
+    assert planner_body["output_config"]["effort"] == "high"
 
 
 async def test_call_llm_activity_happy_path_with_messages_list():
@@ -7653,7 +7660,7 @@ def test_build_verifier_context_messages_no_screenshot_stays_text():
     msgs = build_verifier_context_messages(ctx, "system")
     # No multimodal messages
     assert all(isinstance(m["content"], str) for m in msgs)
-    assert 'TOOL_RESULT {"tool_name": "search"' in msgs[-1]["content"]
+    assert '"tool_name":"search"' in msgs[-1]["content"] or '"tool_name": "search"' in msgs[-1]["content"]
 
 
 def test_build_verifier_context_messages_formats_tool_result_payload():
@@ -7681,10 +7688,9 @@ def test_build_verifier_context_messages_formats_tool_result_payload():
     msgs = build_verifier_context_messages(ctx, "system")
     content = msgs[-1]["content"]
 
-    assert '"tool_name": "spawn_general_purpose_agent"' in content
-    assert '"tool_call_id": "tc-1"' in content
-    assert '"title": "Spawning sub-agent"' in content
-    assert '"result": {"entity_name": "Opticality Ventures", "source_url": "https://example.com"}' in content
+    payload = json.loads(content.split("TOOL_RESULT ", 1)[1].splitlines()[0])
+    assert payload == {"tool_name": "spawn_general_purpose_agent", "tool_call_id": "tc-1",
+                       "title": "Spawning sub-agent", "result": {"entity_name": "Opticality Ventures", "source_url": "https://example.com"}}
     assert "structured_response" not in content
     assert "toolStatus" not in content
     assert "status" not in content
@@ -7709,7 +7715,7 @@ def test_build_verifier_context_messages_formats_camelcase_structured_response()
     msgs = build_verifier_context_messages(ctx, "system")
     content = msgs[-1]["content"]
 
-    assert '"result": {"answer": "from persisted metadata"}' in content
+    assert json.loads(content.split("TOOL_RESULT ", 1)[1].splitlines()[0])["result"] == {"answer": "from persisted metadata"}
     assert "structuredResponse" not in content
     assert "fallback text" not in content
 
@@ -7735,12 +7741,21 @@ def test_build_verifier_context_messages_includes_only_dag_reasoning_assistant_r
             },
             "timestamp": "2026-07-08T00:00:01Z",
         },
+        {
+            "role": "TOOL",
+            "text": "Bug report submitted",
+            "metadata": {"toolName": "report_bug", "toolStatus": "FINISHED", "toolCallId": "bug-1"},
+            "timestamp": "2026-07-08T00:00:02Z",
+        },
     ]
 
     msgs = build_verifier_context_messages(ctx, "system")
     content = msgs[-1]["content"]
 
-    assert '"tool_name": "reasoning"' in content
+    assert 'AUTHORED_RESULT {"source": "reasoning"' in content
+    assert 'TOOL_RESULT {"tool_name": "reasoning"' not in content
+    tool_payloads = [json.loads(line[len("TOOL_RESULT "):]) for line in content.splitlines() if line.startswith("TOOL_RESULT ")]
+    assert {"tool_name": "report_bug", "tool_call_id": "bug-1", "result": "Bug report submitted"} in tool_payloads
     assert '"result": "thirty hook-tested openings"' in content
     assert '"dag_task_index": 4' in content
     assert "ordinary assistant narration should stay hidden" not in content
@@ -7783,7 +7798,7 @@ def test_build_verifier_context_messages_includes_assistant_file_evidence_withou
     msgs = build_verifier_context_messages(ctx, "system", verifier_file_evidence_by_message=evidence)
     content = msgs[-1]["content"]
 
-    assert '"tool_name": "artifact_file"' in content
+    assert '"tool_name":"artifact_file"' in content or '"tool_name": "artifact_file"' in content
     assert "calendar.csv" in content
     assert "2026-07-06,YouTube" in content
     assert "ordinary assistant narration should stay hidden" not in content
@@ -7970,6 +7985,34 @@ def test_verifier_file_evidence_keeps_full_top100_deliverable_json():
     assert '"rank": 1' in kept or '"rank":1' in kept
     assert '"rank": 50' in kept or '"rank":50' in kept
     assert '"rank": 100' in kept or '"rank":100' in kept
+
+
+def test_verifier_compact_json_preserves_decoded_values_and_bounds():
+    from datetime import datetime, timezone
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOOL_RESULT_CHARS, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    value = {"items": [{"id": number, "value": number} for number in range(450)],
+             "text": "  Unicode 雪, colon: comma,\n\ttwo  spaces  ",
+             "observed_at": datetime(2026, 11, 16, tzinfo=timezone.utc),
+             "failed": False, "unknown": None}
+    context = [{"role": "TOOL", "metadata": {"toolName": "capture", "toolCallId": "exact-call",
+                "structured_response": value, "toolStatus": "ERROR"}, "text": "ignored summary"},
+               {"role": "TOOL", "text": "hidden-secret", "metadata": {"excludeFromModel": True}}]
+    def lines(messages):
+        return [line for message in messages if isinstance(message.get("content"), str)
+                for line in message["content"].splitlines() if line.startswith("TOOL_RESULT ")]
+    rendered = lines(build_verifier_context_messages(context, "Verify"))
+    expected = {"tool_name": "capture", "tool_call_id": "exact-call", "result": value}
+    assert len(json.dumps(expected, ensure_ascii=False, default=str)) > VERIFIER_MAX_TOOL_RESULT_CHARS
+    assert len(json.dumps(expected, ensure_ascii=False, default=str, separators=(",", ":"))) < VERIFIER_MAX_TOOL_RESULT_CHARS
+    assert len(rendered) == 1
+    assert json.loads(rendered[0][len("TOOL_RESULT "):]) == json.loads(json.dumps(expected, default=str))
+    assert len(rendered[0]) <= VERIFIER_MAX_TOOL_RESULT_CHARS
+    assert "hidden-secret" not in rendered[0]
+    full = lines(build_verifier_context_messages(context * 40, "Verify"))
+    assert sum(map(len, full)) <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+    declared = lines(build_verifier_context_messages(context, "Verify", call_site="benchmark_declared_evaluator"))
+    assert json.loads(declared[0][len("TOOL_RESULT "):]) == json.loads(json.dumps(expected, default=str))
 
 
 def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent():
@@ -8191,8 +8234,11 @@ def test_build_verifier_context_messages_filters_subagent_tree_rows():
     content = "\n".join(str(m["content"]) for m in msgs)
 
     assert "child UI summary should be hidden" not in content
-    assert '"tool_name": "spawn_general_purpose_agent_for_each"' in content
-    assert '"items": [{"index": 0, "agent_id": "child-1", "status": "completed"' in content
+    assert '"tool_name":"spawn_general_purpose_agent_for_each"' in content or '"tool_name": "spawn_general_purpose_agent_for_each"' in content
+    payloads = [json.loads(line[len("TOOL_RESULT "):]) for line in content.splitlines() if line.startswith("TOOL_RESULT ")]
+    assert {"tool_name": "spawn_general_purpose_agent_for_each", "tool_call_id": "tc-1",
+            "result": {"items": [{"index": 0, "agent_id": "child-1", "status": "completed",
+                                  "structured_response": {"answer": "done"}}]}} in payloads
 
 
 def test_build_verifier_context_messages_prunes_superseded_browser_protocol_failure():
@@ -8240,8 +8286,10 @@ def test_build_verifier_context_messages_prunes_superseded_browser_protocol_fail
     content = "\n".join(str(m["content"]) for m in messages)
 
     assert "unsupported protocol" not in content
-    assert '"fcaptcha_risk_score_display": "0.16"' in content
-    assert '"checkbox_mode_passed": true' in content
+    payloads = [json.loads(line[len("TOOL_RESULT "):]) for line in content.splitlines() if line.startswith("TOOL_RESULT ")]
+    assert any(payload.get("result") == {"fcaptcha_risk_score_display": "0.16",
+               "checkbox_mode_passed": True, "invisible_form_submitted": True,
+               "visible_verdict_text": "Verified! / Form submission allowed!"} for payload in payloads)
 
 
 async def test_build_llm_messages_prunes_superseded_browser_protocol_failure():
@@ -11716,6 +11764,9 @@ async def run_all_tests():
         "filter_context_for_execute_verifier_boundary", test_filter_context_for_execute_verifier_uses_execute_boundary
     )
     await r.record_async(
+        "execute_verifier_keeps_completed_reasoning", test_check_progress_keeps_completed_reasoning_before_completion_chip
+    )
+    await r.record_async(
         "check_progress_execute_filters_plan_context",
         test_check_progress_execute_filters_plan_context_before_llm,
     )
@@ -11863,9 +11914,9 @@ async def run_all_tests():
         "completed_code_task_rejects_failed_placeholder_structured_response",
         test_completed_code_task_rejects_failed_placeholder_structured_response,
     )
-    r.record(
-        "rejected_completed_child_handoff_is_scoped_to_source_child",
-        test_rejected_completed_child_handoff_is_scoped_to_source_child,
+    await r.record_async(
+        "check_progress_runs_the_llm_verifier_for_a_completed_child",
+        test_check_progress_runs_the_llm_verifier_for_a_completed_child,
     )
     await r.record_async(
         "check_progress_judges_completed_browser_task_structured_response",
@@ -11974,6 +12025,7 @@ async def run_all_tests():
         "verifier_file_evidence_budget_prefers_deliverable",
         test_resolve_verifier_file_evidence_budget_prefers_deliverable,
     )
+    r.record("verifier_compact_json_preserves_decoded_values_and_bounds", test_verifier_compact_json_preserves_decoded_values_and_bounds)
     r.record(
         "verifier_ctx_tool_result_budget_truncates_spawn_agent",
         test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent,

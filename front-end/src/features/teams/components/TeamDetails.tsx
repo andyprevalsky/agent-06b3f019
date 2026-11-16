@@ -6,6 +6,8 @@
  * Invite email: FAILED/UNAVAILABLE/PENDING → Retry; UNKNOWN → explicit Resend (may duplicate).
  * Members/opt-ins reflect refetched server state. Remove requires confirmation;
  * shares are changed one account/project and one team at a time.
+ * "Your shared accounts" lists every shareable connected account (everything except
+ * iPhone, browser cookies, passwords and Pebble Index 01) by integration name + label.
  */
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -204,8 +206,8 @@ export default function TeamDetails({ team }: { team: Team }) {
           <Mail size={17} /> Your shared accounts
         </h3>
         <p className="my-2 text-sm text-muted-foreground">
-          Opt in per account. Only email and iMessage data can be shared. iPhone access, passwords,
-          and credentials stay private.
+          Opt in per account. Every connected integration can be shared except iPhone, browser
+          cookies, passwords, and Pebble Index 01. Credentials stay private.
         </p>
         {accounts.isPending && <p role="status">Loading accounts…</p>}
         {accounts.isError && (
@@ -223,15 +225,14 @@ export default function TeamDetails({ team }: { team: Team }) {
         ))}
         {accounts.data?.integrations.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            Connect an email or iMessage account in Integrations to share it here.
+            Connect an integration in Integrations to share it here.
           </p>
         )}
         {team.integrationShares
           .filter((share) => share.ownerUserId !== userId)
           .map((share) => (
             <p key={share.id} className="mt-2 text-sm text-muted-foreground">
-              {share.ownerName ?? 'Team member'} shares {share.provider} ·{' '}
-              {share.accountEmail || share.accountId}
+              {share.ownerName ?? 'Team member'} shares {integrationLabel(share)}
             </p>
           ))}
       </section>

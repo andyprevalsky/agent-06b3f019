@@ -3,6 +3,7 @@ export {
   privacyState,
   rememberPrivate,
   resumedPrivacy,
+  expiredPrivacy,
   isModelMedia,
   privateResult,
   internalPhoneObservation,

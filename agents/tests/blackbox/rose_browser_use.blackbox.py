@@ -230,6 +230,58 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     assert "poisoning" in preserve_flag["description"]
 
 
+# Captured browser_use_step_5/6 call of browser-hotel-booking agent
+# 917bf579-a615-4264-a637-024e706ae301 (descend H-31, 2026-11-07): the exact
+# available_actions and the root's delegated failure clause the browser saw
+# when it chose wait/evaluate/attempt_completion over recover_from_challenge on
+# a hotels.com DataDome "Bot or Not?" page.
+H31_CAPTURED_AVAILABLE_ACTIONS = [
+    "read_browser_state", "read_tool_output", "screenshot", "read_logs", "read_network_requests",
+    "click", "input_text", "press_key", "click_coordinates", "drag", "hover", "dropdown_options",
+    "select_dropdown", "evaluate", "goto", "navback", "scroll", "wait", "switch_tab", "close_tab",
+    "open_new_tab", "upload_file", "attempt_completion", "request_user_assistance_for_authentication",
+    "recover_from_challenge", "request_payment_card", "generate_write_lock_notification",
+]
+H31_DELEGATED_CLAUSE = (
+    "If blocked, diagnose within this browser session and report the failure; do not spawn a "
+    "replacement browser."
+)
+
+
+def test_recover_from_challenge_contract_stays_in_the_delegated_browser_session():
+    """H-31: the provider tool contract must say recovery is in-session.
+
+    The captured delegation limited the browser to this one session and told it
+    to report failure rather than spawn a replacement browser. The old contract
+    described recovery as moving to a "replacement machine" / exploring
+    "machines", so the browser read the in-session recovery tool as the
+    forbidden replacement and reported the challenge instead (1/8 replays chose
+    recovery; 8/8 with this contract, delegation unchanged).
+    """
+    tools = {tool["name"]: tool for tool in build_browser_use_tools(H31_CAPTURED_AVAILABLE_ACTIONS)}
+    assert "recover_from_challenge" in tools, sorted(tools)
+    recover = tools["recover_from_challenge"]
+    description = recover["description"]
+    assert (
+        "Recovery replaces this browser's machine in place: you stay the same browser agent on the same "
+        "task, with no new browser agent and no second session."
+    ) in description, description
+    assert "same browser agent on the same task" in description, description
+    assert "with no new browser agent and no second session" in description, description
+    assert "Successful recovery returns this session to the current URL" in description, description
+    sent_text = [description] + [
+        str(prop.get("description") or "")
+        for prop in (recover["input_schema"].get("properties") or {}).values()
+        if isinstance(prop, dict)
+    ]
+    for text in sent_text:
+        for colliding in ("replacement machine", "new machine", "explore machines"):
+            assert colliding not in text, (colliding, text, H31_DELEGATED_CLAUSE)
+    preserve = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["auth_cookies_are_preserved"]["description"]
+    for colliding in ("replacement machine", "new machine", "explore machines"):
+        assert colliding not in preserve, (colliding, preserve)
+
+
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     prompt = build_browser_use_system_prompt(["click", "goto"])
     assert "# Role" in prompt
@@ -476,6 +528,42 @@ def test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_r
         assert "username/password or code entry" not in prompt
 
 
+def test_dismissible_sign_in_prompt_is_not_an_authentication_blocker():
+    """H-74: a closable sign-in/sign-up prompt is not an auth wall.
+
+    DoorDash shows guests a closable "Sign in or Sign up" modal (it has its own
+    Close button) on the home page. In descend epoch 24 the browser agent read that
+    modal as "DoorDash requires login", never closed it, and called
+    request_user_assistance_for_authentication before it shopped (agents da6804c7 and
+    ac41b31f). The ladder said to try guest completion first but never said whether
+    closing an optional prompt is a login attempt or leaves the guest path open. The
+    rule must reach the actor in both challenge-recovery modes, come before the
+    step-8 handoff rule, and defer to ladder steps 1-5 and the member-price sign-up
+    rule (golden review of 18050349: an unconditional "continue as a guest" broke
+    browser-auth-member-discount-purchase).
+    """
+    rule = (
+        "- A sign-in or sign-up prompt you can close or skip does not block the task, and closing it is not a "
+        "login attempt. Unless you are signing in through steps 1-5 or signing up under the member-price rule "
+        "below, close it and continue as a guest. Authentication blocks the task only when the step you need "
+        "still requires signing in after that.\n"
+    )
+    handoff = "- When authentication still blocks the task after steps 1-7 are exhausted or unavailable"
+    for disable_recover in ("", "1"):
+        with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": disable_recover}):
+            prompt = build_browser_use_system_prompt(
+                ["request_user_assistance_for_authentication", "recover_from_challenge"]
+            )
+        auth = prompt[prompt.index("# Authentication") :]
+        assert rule in auth, f"actor Authentication contract missing dismissible-prompt rule (disable={disable_recover!r})"
+        assert auth.index(rule) < auth.index(handoff), "the rule must precede the step-8 handoff rule"
+        # The guest instruction must not outrank the ladder's sign-in steps or the
+        # member-price sign-up rule it names ("below"): browser-auth-member-discount-purchase
+        # skips a closable sign-in/sign-up gate only by signing up.
+        member = "- If members pay less than guests and membership is free, sign up with the minted account"
+        assert auth.index(rule) < auth.index(member), "the member-price rule the guest instruction defers to must follow it"
+
+
 def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
     prompt = build_browser_use_system_prompt([])
 
@@ -548,14 +636,13 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert auth_help["input_schema"]["required"] == []
 
     payment = tools[3]
-    assert "only if checkout requires you to enter new card details" in payment["description"]
+    assert "when checkout requires you to enter new card details" in payment["description"]
+    assert "told you not to use a saved payment method" in payment["description"]
     assert "valid saved payment method is already selected" in payment["description"]
     line_items = payment["input_schema"]["properties"]["line_items"]
+    # Product URL, rating and review count are optional per line item (owner decisions 2026-11-08).
     assert line_items["items"]["required"] == [
         "name",
-        "product_url",
-        "rating",
-        "review_count",
         "unit_price_cents",
         "quantity",
         "line_total_cents",
@@ -564,7 +651,7 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
 
     write_lock = tools[4]
     purchase_item = write_lock["input_schema"]["properties"]["purchase"]["properties"]["items"]["items"]
-    assert purchase_item["required"] == ["title", "rating", "review_count", "product_url"]
+    assert purchase_item["required"] == ["title"]
     review_count_description = purchase_item["properties"]["review_count"]["description"]
     assert "followed by 'reviews' or 'ratings'" in review_count_description
     assert "312 reviews" in review_count_description
@@ -798,31 +885,34 @@ def test_write_lock_notification_schema_normalizes_nested_total_aliases():
 
 
 def test_write_lock_purchase_schema_rejects_missing_product_context():
+    """Owner decisions 2026-11-08: product URL, rating and review count are optional;
+    an item still needs its title."""
     from pydantic import ValidationError
 
     from browser_tools.schemas import GenerateWriteLockNotificationTool
 
+    def notification(items):
+        return {
+            "tool": "generate_write_lock_notification",
+            "trigger_type": "purchase",
+            "action": "buy item",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "url": "https://www.amazon.com/checkout",
+            },
+            "purchase": {"items": items},
+        }
+
+    parsed = GenerateWriteLockNotificationTool.model_validate(notification([{"title": "Beanie"}]))
+    item = parsed.purchase.items[0]
+    assert item.product_url is None and item.rating is None and item.review_count is None
     try:
-        GenerateWriteLockNotificationTool.model_validate(
-            {
-                "tool": "generate_write_lock_notification",
-                "trigger_type": "purchase",
-                "action": "buy item",
-                "service": {
-                    "name": "Amazon",
-                    "domain": "amazon.com",
-                    "url": "https://www.amazon.com/checkout",
-                },
-                "purchase": {"items": [{"title": "Beanie"}]},
-            }
-        )
+        GenerateWriteLockNotificationTool.model_validate(notification([{"product_url": "https://www.amazon.com/dp/B1"}]))
     except ValidationError as error:
-        message = str(error)
-        assert "rating" in message
-        assert "review_count" in message
-        assert "product_url" in message
+        assert "title" in str(error)
     else:
-        raise AssertionError("purchase approval accepted an item without reviews and a product URL")
+        raise AssertionError("purchase approval accepted an item without a title")
 
 
 def test_write_lock_purchase_schema_accepts_current_page_as_product_link():
@@ -2024,6 +2114,54 @@ async def test_complete_browser_use_recovers_a_step_cut_off_before_its_action():
     assert result["actual_model"] == "google/gemini-3.8-flash", result["actual_model"]
 
 
+async def test_complete_browser_use_recovers_an_action_cut_off_mid_arguments():
+    """A tool call cut off at the output limit is not a model decision.
+
+    Repro of PR #2099's native AutoFill FLAKY f48b6ecc: the reply streamed a
+    phone call whose nested args stopped at the 2048-token limit
+    (`{"min_confidence": 0`, finish=length). Because a tool call had been seen,
+    the shared cut-off recovery skipped it and validation rejected the step.
+    A collected browser step discards the cut-off attempt and retries.
+    """
+    def tool_reply(arguments, finish, tokens):
+        return _openai_sse(
+            [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_phone", "type": "function",
+                                                          "function": {"name": "phone", "arguments": arguments}}]},
+                              "finish_reason": finish}]},
+                {"usage": {"prompt_tokens": 12, "completion_tokens": tokens, "total_tokens": tokens + 12}},
+            ]
+        )
+    cut_off = tool_reply(json.dumps({"mode": "operation", "operation": "screen.text", "args": "{\"min_confidence\": 0"}), "length", 2048)
+    acted = tool_reply(json.dumps({"mode": "operation", "operation": "screen.text", "args": {"min_confidence": 0.3}}), "tool_calls", 40)
+    seen: list[tuple[str, int]] = []
+
+    def handler(req):
+        if "openrouter.ai" not in str(req.url):
+            return httpx.Response(500, text="unexpected route")
+        body = json.loads(req.content.decode())
+        seen.append((body["model"], body["max_tokens"]))
+        text = cut_off if len(seen) == 1 else acted
+        return httpx.Response(200, text=text, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
+                task="Continue my authorized Apple Account sign-in.",
+                browser_state={**_browser_state(), "phone": _native_autofill_control_state("Apple Account. Password field is masked.")},
+                action_history=[],
+                available_actions=["phone", "request_user_assistance_for_authentication"],
+                include_screenshot=False,
+                call_site="test-bu-cut-off-mid-arguments",
+            )
+    finally:
+        teardown_mock()
+    assert seen == [("qwen/qwen3.8-27b", 2048), ("qwen/qwen3.8-27b", 16000)], seen
+    assert result["action"]["action"] == "phone", result["action"]
+    assert result["action"]["params"]["args"] == {"min_confidence": 0.3}, result["action"]
+
+
 async def test_complete_browser_use_preserves_printable_native_tool_batch():
     """A provider turn that types several characters must not discard calls 2..N."""
     tool_calls = [
@@ -2172,7 +2310,8 @@ async def test_complete_browser_use_dumps_cerebras_context():
 
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
-    dump_root = ROOT.parent / ".llm-dumps" / "unbound"
+    # Dumps need a bound agent: unbound records are refused (llm_archive blackbox).
+    dump_root = ROOT.parent / ".llm-dumps" / "bu-cerebras-dump-agent"
     for path in dump_root.glob("*test-bu-cerebras-dump.json"):
         path.unlink()
 
@@ -2184,6 +2323,7 @@ async def test_complete_browser_use_dumps_cerebras_context():
             available_actions=["click", "click_coordinates"],
             include_screenshot=False,
             gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
+            agent_id="bu-cerebras-dump-agent",
             call_site="test-bu-cerebras-dump",
             dump_extra={
                 "browser_recording_manifest_path": "/tmp/browser-recording/manifest.json",
@@ -2236,7 +2376,7 @@ async def _assert_failed_browser_context_capture(*, dump_unavailable=False, canc
             patch.object(observability, "_IS_PRODUCTION", False),
             patch.object(observability, "archive_json", return_value=None),
             patch.object(observability, "current_span_id", return_value="offline-browser-span"),
-            patch.object(observability, "current_root_agent_id", return_value=root_id),
+            patch.object(observability, "current_bound_root_agent_id", return_value=root_id),
             patch.object(
                 observability,
                 "dump_llm_context",
@@ -2509,7 +2649,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
         return httpx.Response(500, text="ultra must not reach Cerebras or OpenRouter")
 
     set_mock_handler(handler)
-    dump_root = ROOT.parent / ".llm-dumps" / "unbound"
+    dump_root = ROOT.parent / ".llm-dumps" / "bu-spawning-pool-agent"
     for path in dump_root.glob("*write_lock_notification_fork_3.json"):
         path.unlink()
     token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
@@ -2538,6 +2678,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
                     },
                 ],
                 claude_auth=claude_auth_from_token("good-token"),
+                agent_id="bu-spawning-pool-agent",
                 call_site="write_lock_notification_fork_3",
                 pool="rose-1-ultra",
             )
@@ -2735,8 +2876,9 @@ async def run_all_tests():
         "normalize_provider_input_text_batch_mixed_indexes",
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
-    from benchmarks.browser_action_batch_test import form_chain, observe_chain, full_activity_batch
+    from benchmarks.browser_action_batch_test import form_chain, observe_chain, full_activity_batch, phone_batch_contract
     await r.record_async("ordered native batch uses one model decision", form_chain)
+    await r.record_async("phone calls share one model turn in order with per-call fences", phone_batch_contract)
     await r.record_async("same-turn observed target binds before click", observe_chain)
     await r.record_async("actual browser activity consumes ordered batch", full_activity_batch)
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
@@ -2790,6 +2932,10 @@ async def run_all_tests():
         "recover_from_challenge_stages",
         test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages,
     )
+    r.record(
+        "recover_from_challenge_contract_stays_in_delegated_session",
+        test_recover_from_challenge_contract_stays_in_the_delegated_browser_session,
+    )
 
     r.record("params_seconds_to_time_ms", test_params_seconds_to_time_ms)
     r.record("params_down_true_direction", test_params_down_true_to_direction_and_amount)
@@ -2811,6 +2957,10 @@ async def run_all_tests():
     await r.record_async(
         "complete_browser_use_recovers_cut_off_step",
         test_complete_browser_use_recovers_a_step_cut_off_before_its_action,
+    )
+    await r.record_async(
+        "complete_browser_use_recovers_cut_off_arguments",
+        test_complete_browser_use_recovers_an_action_cut_off_mid_arguments,
     )
     await r.record_async(
         "complete_browser_use_printable_native_tool_batch",
@@ -2852,6 +3002,14 @@ async def run_all_tests():
     r.record(
         "auth_assistance_requires_sign_in_form_open",
         test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery,
+    )
+    r.record(
+        "dismissible_sign_in_prompt_is_not_an_authentication_blocker",
+        test_dismissible_sign_in_prompt_is_not_an_authentication_blocker,
+    )
+    await r.record_async(
+        "browser_request_asserts_no_auth_state_its_inventory_contradicts",
+        test_browser_request_asserts_no_auth_state_its_inventory_contradicts,
     )
     r.record(
         "build_browser_use_system_prompt_reuses_main_grading_prompt",
@@ -3043,22 +3201,66 @@ def test_phone_off_matches_prephone_bytes():
     Re-pinned for the approved read_tool_output browser action (Polar item 16, approved
     by Andy 2026-10-26): only the tools hash changed in both modes, and excluding that
     one action reproduces the previous tools hash exactly; system/messages are unchanged.
+    Re-pinned for the webdecoy pointer contract (2026-11-06 RCA
+    browser-pointer-move-intent-had-no-tool): the hover action plus truthful
+    click/click_coordinates/drag/evaluate descriptions changed only the tools hash
+    in both modes; system/messages hashes are unchanged.
+    Re-pinned for H-49 (rca/h-49-20261107): the request_payment_card description now
+    states the user one-time-card exception before the saved-method default. Only the
+    tools hash changed in both modes; 7555a20d05 reproduces the previous tools hash
+    exactly; system/messages are unchanged.
+    Re-pinned after H-38 was dropped (owner review, 2026-11-08): the request_payment_card,
+    line_items and write-lock purchase product_url descriptions are main's text again, with
+    H-49's one-time-card opening kept. Only the tools hashes changed in both modes;
+    system/messages are unchanged.
+    Re-pinned for H-57 (rca/h-57-20261107): the static Browser Rules line "Browser
+    cookies have been injected - assume the user is logged in until proven otherwise."
+    was deleted because it was emitted for sessions with no cookies; the per-realm
+    Auth Options inventory states the real auth state. Only system/messages changed in
+    both modes; tools are unchanged; 4c9636f84d reproduces the previous system/messages
+    hashes exactly.
+    Re-pinned for H-31 (rca/h-31-20261107): the recover_from_challenge description and
+    auth_cookies_are_preserved schema now state that recovery stays inside the current
+    browser session instead of describing a "replacement machine". Only the
+    recovery-enabled ('0') tools hash changed; the recovery-disabled ('1') hashes and
+    every system/messages hash are unchanged; 268e9550b0 reproduces the previous tools
+    hash exactly.
+    Re-pinned for H-74 (rca/h-74-20261108): the shared Authentication contract now
+    states that a sign-in or sign-up prompt the agent can close or skip does not block
+    the task, deferring to ladder steps 1-5 and the member-price sign-up rule. Only the
+    system/messages hashes changed in both modes; both tools hashes are unchanged;
+    d49ef3c511 reproduces the previous system/messages hashes exactly.
+    Re-pinned for the approved H-31 sentence (owner review, 2026-11-08): the
+    recover_from_challenge description now says "Recovery replaces this browser's machine
+    in place: you stay the same browser agent on the same task, with no new browser agent
+    and no second session." Only the recovery-enabled ('0') tools hash changed.
+    Re-pinned for optional rating and review count (owner decision, 2026-11-08): the
+    request_payment_card and write-lock purchase item schemas no longer require them and
+    their descriptions say to include them when the page shows them. Only the tools
+    hashes changed in both modes.
+    Re-pinned for optional product URL (owner decision, 2026-11-08): the line-item and
+    write-lock product_url descriptions ask for the item's own product page when it has
+    one, and neither schema requires it. Only the tools hashes changed in both modes.
     Merge reconciliation: branch 50169458861b1e9b5461d723da99fec348d8198e
     and main 5807c0edf19ab7fe7fda9b059701426872e18d0c. Both original
     builders reproduced their recorded hashes exactly before this combined pin.
     Main's hover action and four pointer descriptions change only the tools hash;
     branch CAPTCHA/batch/observation contracts keep system/messages unchanged.
     Full deterministic payloads and parent diffs are retained in the sync packet.
+    Re-pinned for the main sync on 2026-11-14 (merge base 4bc487357e): the branch builder
+    (HEAD) and main builder each reproduced their recorded hashes exactly; the combined
+    hashes cover main's challenge-recovery scope/batch-action prompt changes plus the
+    branch's H-57/H-31/H-74/optional-item-field prompt changes above.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('f92e8a403224b2f0b96ab6a7438a1314e9a647ed8f02bf1f216dc8b1405f4942', 'e46e91fd54170ef1cc5cb00bef0ebbf4e4446447005d9287d6f0d0f4ad455b1d', '62626a38cbbc18d38081798bb33fc33ba33960d7b0fa8a30b75e55e9c62d5d9d'), '1': ('c228748d6aeea6ef51c1b2812cb8cae52bb3599f6f06f721aa3e4b2514d58c54', 'f304359dd340ba5945d2430237f884708698f7add337fda59ea220453e54fa78', 'b6680960025afe45387e9a390eadff21206ff23e3d3ded2227326958ac0b2835')}
+    expected = {'0': ('3356c1dab5088ad9dab0b5e79cf9102ef9321c7b4155dc2d050a8605ecc51af3', '62a6a7a1a5605e823174b918c55391d3971a0ddc2ab5c34c10fcc4c57931f350', '53b71a5419b2ed489938fa7212f4f98f0eae09f287e5d82e9016cf184c35c3bb'), '1': ('451ba9272d16f2ed316743bc868df142ed54de54f94523efe06ea243d3e38b32', 'c449c94b26277e35fbef69af4948649592a1778df3a1640dcb73ead3da51977f', 'f62ba5c2f46b628ac499884dfe3e5badca3b30cfc03b58c70697bafefa4d0558')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from reviewed c28f801be+a05e1beb7+R2c"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from reviewed c28f801be+a05e1beb7+R2c+H-57+H-31+H-74"
 
 
 async def test_phone_off_actual_rose_request():
@@ -3572,10 +3774,12 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Do not disable iCloud" in wire and "Historical download completion" in wire
         assert "Do not wait for configurationReady to sign in" in wire
         assert "latest successful operation is screen.text for the current interaction" in wire
+        assert "never tap the suggestion rows" in wire and "try input.keys escape" in wire
+        assert "If all three fail, report that blocker without retrying" in wire
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "6a78e021c2d39d5705d64157531c0090244212a02d3020913120478d78ce941c", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "cfe6a3a8e74c7b125168e1e2bf1a9b169d1cb830f43c0fcd39b215d5f03c4b20", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:
@@ -3644,3 +3848,58 @@ async def test_declared_tool_admission_keeps_aliases_and_batch_semantics():
         result = await complete(RoseResponse(tool_calls=[{"id": "key-" + key, "name": "press_key", "arguments": json.dumps({"key": key})} for key in "ab"]), ["press_key"])
         assert result["action"]["action"] == "input_text"
         assert result["action"]["params"]["text"] == "ab"
+
+
+async def test_browser_request_asserts_no_auth_state_its_inventory_contradicts():
+    """H-57: the actual browser request must not claim cookies were injected.
+
+    OpenTable epoch18 r1/r2 (agents aef03f00, 7fee52e3) started with
+    `[Steel] Cookies: none` and `cookie_source: none, cookies_injected: false`.
+    Their per-realm Auth Options inventory said "Steel session: none" and
+    "Cookie bundles: none", yet the static system prompt said "Browser cookies
+    have been injected - assume the user is logged in until proven otherwise."
+    After a fresh-cookie recovery r2 reasoned "It looks like I lost the cookie".
+    Auth state is per session and realm; only that observed inventory may state it.
+    """
+    import re
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from domains.spawn_browser_agent_v3.service import build_browser_dynamic_system_context
+    from domains.spawn_browser_agent_v3.service_crypto import build_auth_options_prompt_section
+    from helpers import observability
+    from providers.rose.types import RoseResponse
+
+    inventory, *_ = build_auth_options_prompt_section({"realm": "opentable.com"})
+    assert "  - Steel session: none\n  - Cookie bundles:\n    - none\n" in inventory
+    observation = {
+        "success": True,
+        "current_url": "https://www.opentable.com/prospect",
+        "auth_context": {"auth_realm": "opentable.com", "inventory_status": "available", "auth_options": inventory},
+    }
+    turn_messages = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "state-1", "type": "function", "function": {"name": "read_browser_state", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "state-1", "content": json.dumps(observation)},
+    ]
+    client = RoseClient(openrouter_key="offline-unused")
+    client.collect = AsyncMock(return_value=RoseResponse(tool_calls=[{"id": "wait-1", "name": "wait", "arguments": '{"time_ms": 1}'}]))
+    with patch.object(observability, "dump_llm_context"):
+        await client.complete_browser_use(
+            task="# Current Goal\nReserve Prospect for two",
+            browser_state=_browser_state(url="https://www.opentable.com/prospect"),
+            action_history=[],
+            available_actions=[a for a in AVAILABLE_ACTIONS if a != "phone"],
+            dynamic_system_context=build_browser_dynamic_system_context(),
+            turn_messages=turn_messages,
+        )
+    sent = client.collect.await_args.kwargs["messages"]
+    system = "\n".join(str(m.get("content")) for m in sent if m.get("role") == "system")
+    observed = [json.loads(m["content"]) for m in sent if m.get("role") == "tool" and m.get("tool_call_id") == "state-1"]
+    assert [o["auth_context"]["auth_options"] for o in observed] == [inventory], "the no-cookie inventory observation must reach the model"
+    unverified_auth_claim = re.compile(
+        r"cookies? (?:have|has) been injected|cookies (?:are|were) injected|assume the user is (?:already )?(?:logged|signed) in",
+        re.I,
+    )
+    claim = unverified_auth_claim.search(system)
+    assert claim is None, f"system prompt asserts auth state the session inventory contradicts: {claim.group(0)!r}"
+    # The truthful, session-independent auth contract stays.
+    assert "Cookie-based and existing Steel-session auth are applied automatically before you start." in system
+    assert "Avoid login flows unless the site forces you to login to complete your directed goal." in system

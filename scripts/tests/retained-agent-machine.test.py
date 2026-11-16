@@ -6,13 +6,17 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.client import IncompleteRead
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("retained_agent_machine", ROOT / "scripts/retained_agent_machine.py")
@@ -79,6 +83,7 @@ class NativeHTTP:
         self.leased = False
         self.lose_update_ack = False
         self.update_count = 0
+        self.refreshes = 0
         self.on_lease = None
         self.app = app
         self.token = token
@@ -97,6 +102,11 @@ class NativeHTTP:
         assert request.get_header("Authorization") == "Bearer " + self.token
         assert timeout == 30
         data = self.requests[-1][2]
+        if suffix == "/lease?ttl=500" and request.method == "POST":
+            # fly-go RefreshLease: the holder's nonce extends its own lease.
+            assert self.leased and request.get_header("Fly-machine-lease-nonce") == "owned-native-nonce"
+            self.refreshes += 1
+            return io.BytesIO(json.dumps({"data": {"nonce": "owned-native-nonce"}}).encode())
         if suffix == "/lease" and request.method == "POST":
             assert not self.leased
             self.leased = True
@@ -180,11 +190,63 @@ class CapturedReplacingHTTP(NativeHTTP):
         self.requests.append((request.method, request.full_url, None))
 
 
+def http_error(code):
+    return HTTPError("https://api.machines.dev/v1/apps/prod/machines/1234", code, "fixture", {}, io.BytesIO(b""))
+
+
+class ScriptedHTTP:
+    """Native Fly answers in order: an exception is raised, anything else is the JSON body."""
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+
+    def __call__(self, request, timeout):
+        assert timeout == 30
+        self.calls.append((request.method, request.full_url.split("/machines/1234", 1)[1]))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return io.BytesIO(json.dumps(outcome).encode())
+
+
+class SlowReplacementHTTP(CapturedReplacingHTTP):
+    """2026-11-15 run 43666358952: an update at 02:13:59 reached stopped at 02:22:08 (489s)."""
+
+    def __init__(self, value, clock, settles_after):
+        super().__init__(value)
+        self.clock = clock
+        self.settles_after = settles_after
+        self.updated_at = None
+        self.lease_expires = None
+        self.waits = 0
+
+    def __call__(self, request, timeout):
+        suffix = request.full_url.split("/machines/1234", 1)[1]
+        if self.leased and self.clock[0] > self.lease_expires:
+            raise http_error(409)
+        if suffix.startswith("/wait?") and self.clock[0] - self.updated_at < self.settles_after:
+            self.assert_wait(request, suffix)
+            self.waits += 1
+            self.clock[0] += int(suffix.rsplit("timeout=", 1)[1])
+            raise http_error(408)
+        response = super().__call__(request, timeout)
+        if request.method == "POST" and suffix.startswith("/lease"):
+            self.lease_expires = self.clock[0] + 500
+        if request.method == "POST" and not suffix:
+            self.updated_at = self.clock[0]
+        return response
+
+
 class RetainedWorkerTests(unittest.TestCase):
     def setUp(self):
         self.env = patch.dict(os.environ, {"FLY_API_TOKEN": "fixture-token"})
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.pauses = []
+        pause = patch.object(pool, "sleep", self.pauses.append, create=True)
+        pause.start()
+        self.addCleanup(pause.stop)
 
     def run_operation(self, native, parameters, expected):
         class OwnedFixtureFly(pool.Fly):
@@ -405,33 +467,27 @@ class RetainedWorkerTests(unittest.TestCase):
         """2026-10-18: a new-image reuse took ~20s; one 10s wait failed the cutover."""
         from urllib.error import HTTPError
 
-        for pending, succeeds in ((2, True), (pool.STOPPED_WAIT_ATTEMPTS, False)):
-            with self.subTest(pending=pending):
-                value = self.released()
-                waits = []
+        value = self.released()
+        waits = []
 
-                class SlowStopHTTP(CapturedReplacingHTTP):
-                    def __call__(self, request, timeout):
-                        suffix = request.full_url.split("/machines/1234", 1)[1]
-                        if suffix.startswith("/wait?") and len(waits) < pending:
-                            self.assert_wait(request, suffix)
-                            waits.append(suffix)
-                            raise HTTPError(request.full_url, 408, "Request Timeout", {}, io.BytesIO(b""))
-                        return super().__call__(request, timeout)
+        class SlowStopHTTP(CapturedReplacingHTTP):
+            def __call__(self, request, timeout):
+                suffix = request.full_url.split("/machines/1234", 1)[1]
+                if suffix.startswith("/wait?") and len(waits) < 2:
+                    self.assert_wait(request, suffix)
+                    waits.append(suffix)
+                    raise HTTPError(request.full_url, 408, "Request Timeout", {}, io.BytesIO(b""))
+                return super().__call__(request, timeout)
 
-                native = SlowStopHTTP(value)
-                if succeeds:
-                    self.run_operation(native, args("reuse"), value)
-                    self.assertTrue(native.waited)
-                else:
-                    with self.assertRaises(HTTPError):
-                        self.run_operation(native, args("reuse"), value)
-                    self.assertEqual(len(waits), pool.STOPPED_WAIT_ATTEMPTS)
-                self.assertFalse(native.leased)
-                self.assertEqual(
-                    sum(method == "POST" and url.endswith("/machines/1234") for method, url, _ in native.requests),
-                    1,
-                )
+        native = SlowStopHTTP(value)
+        self.run_operation(native, args("reuse"), value)
+        self.assertTrue(native.waited)
+        self.assertEqual(len(waits), 2)
+        self.assertFalse(native.leased)
+        self.assertEqual(
+            sum(method == "POST" and url.endswith("/machines/1234") for method, url, _ in native.requests),
+            1,
+        )
         # Any other native error is not a wait result and still fails closed at once.
         value = self.released()
         calls = []
@@ -447,6 +503,315 @@ class RetainedWorkerTests(unittest.TestCase):
         with self.assertRaises(HTTPError):
             self.run_operation(ForbiddenWaitHTTP(value), args("reuse"), value)
         self.assertEqual(len(calls), 1)
+
+    def test_slow_native_replacement_is_awaited_under_a_refreshed_lease_until_the_deadline(self):
+        """2026-11-15 run 43666358952: a 489s new-image update outlived the 180s wait and failed the cutover."""
+        for settles_after, succeeds in ((489, True), (float("inf"), False)):
+            with self.subTest(settles_after=settles_after):
+                value = self.released()
+                clock = [0.0]
+
+                def pause(seconds):
+                    self.pauses.append(seconds)
+                    clock[0] += seconds
+
+                native = SlowReplacementHTTP(value, clock, settles_after)
+                with (
+                    patch.object(pool, "monotonic", lambda: clock[0], create=True),
+                    patch.object(pool, "sleep", pause, create=True),
+                ):
+                    if succeeds:
+                        self.run_operation(native, args("reuse"), value)
+                    else:
+                        with self.assertRaises(HTTPError) as raised:
+                            self.run_operation(native, args("reuse"), value)
+                        self.assertEqual(raised.exception.code, 408)
+                self.assertEqual(native.waited, succeeds)
+                self.assertFalse(native.leased)
+                self.assertGreaterEqual(native.refreshes, 1)
+                self.assertEqual(
+                    sum(method == "POST" and url.endswith("/machines/1234") for method, url, _ in native.requests),
+                    1,
+                )
+                if succeeds:
+                    self.assertGreaterEqual(clock[0], 489)
+                else:
+                    # Bounded: gives up at the deadline, never holding the lease past its TTL.
+                    self.assertGreaterEqual(clock[0], 900)
+                    self.assertLessEqual(clock[0], 960)
+                    self.assertLessEqual(native.waits, 900 // 20 + 2)
+
+        # A refresh granting a new nonce means ours lapsed: fail closed and release that new lease too.
+        value = self.released()
+        released = []
+
+        class LostLeaseHTTP(CapturedReplacingHTTP):
+            def __call__(self, request, timeout):
+                suffix = request.full_url.split("/machines/1234", 1)[1]
+                if suffix == "/lease?ttl=500":
+                    return io.BytesIO(json.dumps({"data": {"nonce": "replacement-nonce"}}).encode())
+                if suffix == "/lease" and request.method == "DELETE":
+                    released.append(request.get_header("Fly-machine-lease-nonce"))
+                    self.leased = False
+                    return io.BytesIO(b"{}")
+                if suffix.startswith("/wait?"):
+                    self.assert_wait(request, suffix)
+                    clock[0] += 20
+                    raise http_error(408)
+                return super().__call__(request, timeout)
+
+        clock = [0.0]
+        native = LostLeaseHTTP(value)
+        with patch.object(pool, "monotonic", lambda: clock[0], create=True):
+            with self.assertRaisesRegex(ValueError, "lease"):
+                self.run_operation(native, args("reuse"), value)
+        self.assertFalse(native.waited)
+        self.assertEqual(released, ["replacement-nonce"])
+
+    def test_stopped_wait_refreshes_an_aged_lease_before_post_wait_verification(self):
+        clock = [0.0]
+        calls = []
+
+        def native(request, timeout):
+            suffix = request.full_url.split("/machines/1234", 1)[1]
+            calls.append((request.get_method(), suffix.split("?", 1)[0] if suffix.startswith("/wait") else suffix))
+            assert request.get_header("Fly-machine-lease-nonce") == "owned-native-nonce"
+            if suffix.startswith("/wait?"):
+                clock[0] += 250  # a slow final /wait leaves the lease older than the refresh threshold
+                return io.BytesIO(b'{"ok":true}')
+            return io.BytesIO(json.dumps({"data": {"nonce": "owned-native-nonce"}}).encode())
+
+        fly = pool.Fly("prod", "1234")
+        fly.nonce, fly.leased_at = "owned-native-nonce", 0.0
+        with patch.object(pool, "urlopen", native), patch.object(pool, "monotonic", lambda: clock[0]):
+            self.assertEqual(pool.wait_stopped(fly, "native-version-2"), {"ok": True})
+        self.assertEqual(calls, [("GET", "/wait"), ("POST", "/lease?ttl=500")])
+        self.assertEqual(fly.leased_at, 250)
+        # CodeRabbit 4576849794: a wait succeeding just below the threshold (239s) still renews.
+        clock[0], calls[:] = 0.0, []
+        fly.leased_at = 0.0
+
+        def young(request, timeout):
+            suffix = request.full_url.split("/machines/1234", 1)[1]
+            calls.append((request.get_method(), suffix.split("?", 1)[0] if suffix.startswith("/wait") else suffix))
+            if suffix.startswith("/wait?"):
+                clock[0] += 239
+                return io.BytesIO(b'{"ok":true}')
+            return io.BytesIO(json.dumps({"data": {"nonce": "owned-native-nonce"}}).encode())
+
+        with patch.object(pool, "urlopen", young), patch.object(pool, "monotonic", lambda: clock[0]):
+            self.assertEqual(pool.wait_stopped(fly, "native-version-2"), {"ok": True})
+        self.assertEqual(calls, [("GET", "/wait"), ("POST", "/lease?ttl=500")])
+        self.assertEqual(fly.leased_at, 239)
+
+    def test_native_reads_replay_transient_fly_failures_but_writes_do_not(self):
+        """2026-10-20 reset and 2026-10-26 read timeout each killed a production cutover on one read."""
+        for failure in (
+            http_error(408),
+            http_error(429),
+            http_error(502),
+            ConnectionResetError("Connection reset by peer"),
+            TimeoutError("The read operation timed out"),
+            URLError("fixture unreachable"),
+            IncompleteRead(b"{"),
+        ):
+            with self.subTest(failure=repr(failure)):
+                native = ScriptedHTTP(failure, {"id": "1234"})
+                with patch.object(pool, "urlopen", native):
+                    self.assertEqual(pool.Fly("prod", "1234").request("GET"), {"id": "1234"})
+                self.assertEqual(native.calls, [("GET", "")] * 2)
+        # Bounded: the last transient answer is raised after three attempts.
+        native = ScriptedHTTP(*[http_error(503)] * 4)
+        with patch.object(pool, "urlopen", native), self.assertRaises(HTTPError):
+            pool.Fly("prod", "1234").request("GET")
+        self.assertEqual(len(native.calls), 3)
+        # A definitive native answer is not transient.
+        native = ScriptedHTTP(http_error(404), {"id": "1234"})
+        with patch.object(pool, "urlopen", native), self.assertRaises(HTTPError):
+            pool.Fly("prod", "1234").request("GET")
+        self.assertEqual(len(native.calls), 1)
+        # A write's outcome after 408/reset is unknown: never replay it blindly.
+        for method, suffix in (
+            ("POST", ""),
+            ("POST", "/metadata/" + pool.POOL_KEY),
+            ("POST", "/start"),
+            ("POST", "/stop"),
+            ("POST", "/lease"),
+            ("DELETE", "/lease"),
+        ):
+            for failure in (http_error(408), ConnectionResetError("reset")):
+                with self.subTest(method=method, suffix=suffix, failure=repr(failure)):
+                    native = ScriptedHTTP(failure, {})
+                    with patch.object(pool, "urlopen", native), self.assertRaises(type(failure)):
+                        pool.Fly("prod", "1234").request(method, suffix, {"value": "x"})
+                    self.assertEqual(len(native.calls), 1)
+        self.assertTrue(self.pauses)
+        self.assertTrue(all(0 < seconds <= 8 for seconds in self.pauses))
+
+    def test_connect_phase_failure_replays_a_write_that_never_left(self):
+        """2026-11-15 run 43669103359: the retirement metadata POST died in connect() (Errno 101)."""
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path.endswith("/redirect"):
+                    self.send_response(303)
+                    self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if self.path.endswith("/lost-response"):
+                    self.close_connection = True
+                    return  # the write landed but no response comes back
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        real_connect = socket.create_connection
+        connects = []
+
+        def unreachable_once(address, *rest, **options):
+            connects.append(address)
+            if len(connects) == 1:
+                raise OSError(101, "Network is unreachable")
+            return real_connect(address, *rest, **options)
+
+        api = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        suffix = "/metadata/" + pool.POOL_KEY
+        checks = []
+
+        class Owned(pool.Fly):
+            def assert_request_allowed(self, *request):
+                checks.append(request)
+
+        with patch.object(pool, "API", api), patch("socket.create_connection", unreachable_once):
+            self.assertEqual(Owned("prod", "1234").request("POST", suffix, {"value": "idle"}), {})
+        self.assertEqual(received, [b'{"value": "idle"}'])
+        self.assertEqual(len(connects), 2)
+        # The replay re-checked managed ownership first (CodeRabbit 4577478879).
+        self.assertEqual(checks, [("POST", suffix, {"value": "idle"})])
+        self.assertEqual(self.pauses, [1])
+        # Negative control: a write that reached Fly and lost its answer is never replayed.
+        received.clear()
+        with patch.object(pool, "API", api), self.assertRaises(Exception) as caught:
+            pool.Fly("prod", "1234").request("POST", "/lost-response", {"value": "idle"})
+        self.assertFalse(pool.not_sent(caught.exception))
+        self.assertEqual(received, [b'{"value": "idle"}'])
+        # A redirected POST whose second hop cannot connect was still delivered once: no replay.
+        received.clear()
+        with patch.object(pool, "API", api):
+            try:
+                pool.Fly("prod", "1234").request("POST", "/redirect", {"value": "idle"})
+                self.fail("a redirected write to an unreachable hop must fail")
+            except URLError as error:  # assertRaises strips __traceback__, which not_sent reads
+                self.assertFalse(pool.not_sent(error))
+        self.assertEqual(received, [b'{"value": "idle"}'])
+        # Bounded: a connect that never succeeds raises after three attempts.
+        connects.clear()
+
+        def unreachable(address, *rest, **options):
+            connects.append(address)
+            raise OSError(101, "Network is unreachable")
+
+        with (
+            patch.object(pool, "API", api),
+            patch("socket.create_connection", unreachable),
+            self.assertRaises(URLError) as caught,
+        ):
+            pool.Fly("prod", "1234").request("POST", suffix, {"value": "idle"})
+        self.assertTrue(pool.not_sent(caught.exception))
+        self.assertEqual(len(connects), pool.TRANSIENT_ATTEMPTS)
+        self.assertEqual(received, [b'{"value": "idle"}'])
+
+    def test_lease_waits_out_an_orphaned_pool_lease_but_not_a_foreign_holder(self):
+        """2026-11-15 run 43669305097: recovery 3s after a dead controller hit 409 on its unreleased lease."""
+        orphan = {"data": {"description": "cooperative-worker-pool", "owner": "rose", "expires_at": 1}}
+        native = ScriptedHTTP(
+            http_error(409), orphan, http_error(409), orphan, {"data": {"nonce": "n-1"}}, {}
+        )
+        with patch.object(pool, "urlopen", native):
+            fly = pool.Fly("prod", "1234")
+            with fly.lease():
+                self.assertEqual(fly.nonce, "n-1")
+        self.assertEqual(
+            native.calls,
+            [("POST", "/lease"), ("GET", "/lease")] * 2 + [("POST", "/lease"), ("DELETE", "/lease")],
+        )
+        self.assertEqual(self.pauses, [pool.LEASE_ORPHAN_POLL_SECONDS] * 2)
+        # Every re-acquire re-checks ownership; a controller that lost it sends nothing more.
+        class LostOwnership(pool.Fly):
+            def assert_request_allowed(self, method, suffix, data):
+                if method != "GET":
+                    raise ValueError("Deployment lease lost")
+
+        native = ScriptedHTTP(http_error(409), orphan, {"data": {"nonce": "never"}})
+        with patch.object(pool, "urlopen", native), self.assertRaisesRegex(ValueError, "Deployment lease lost"):
+            with LostOwnership("prod", "1234").lease():
+                self.fail("a controller without ownership must not hold the lease")
+        self.assertEqual(native.calls, [("POST", "/lease"), ("GET", "/lease")])
+        self.pauses.clear()
+        # The orphan lapses between the 409 and the holder read (404): acquire again at once.
+        self.pauses.clear()
+        native = ScriptedHTTP(http_error(409), http_error(404), {"data": {"nonce": "n-2"}}, {})
+        with patch.object(pool, "urlopen", native):
+            with pool.Fly("prod", "1234").lease():
+                pass
+        self.assertEqual(
+            native.calls, [("POST", "/lease"), ("GET", "/lease"), ("POST", "/lease"), ("DELETE", "/lease")]
+        )
+        self.assertEqual(self.pauses, [])
+        # Negative control: another holder (flyctl, a human) is never waited out.
+        self.pauses.clear()
+        foreign = {"data": {"description": "flyctl deploy", "owner": "andy", "expires_at": 9}}
+        native = ScriptedHTTP(http_error(409), foreign)
+        with patch.object(pool, "urlopen", native), self.assertRaisesRegex(ValueError, "flyctl deploy"):
+            with pool.Fly("prod", "1234").lease():
+                self.fail("a foreign lease must not be entered")
+        self.assertEqual(native.calls, [("POST", "/lease"), ("GET", "/lease")])
+        self.assertEqual(self.pauses, [])
+        # Bounded: an orphan that never lapses fails once the TTL plus margin has passed.
+        clock = [0]
+        native = ScriptedHTTP(*[http_error(409), orphan] * 100)
+
+        def pause(seconds):
+            clock[0] += seconds
+
+        with (
+            patch.object(pool, "urlopen", native),
+            patch.object(pool, "monotonic", lambda: clock[0]),
+            patch.object(pool, "sleep", pause),
+            self.assertRaisesRegex(ValueError, "cooperative-worker-pool"),
+        ):
+            with pool.Fly("prod", "1234").lease():
+                self.fail("an unexpired lease must not be entered")
+        self.assertGreaterEqual(clock[0], pool.LEASE_TTL_SECONDS)
+        self.assertLessEqual(clock[0], pool.LEASE_TTL_SECONDS + pool.LEASE_ORPHAN_MARGIN_SECONDS)
+        # Bounded too when holders keep changing between the 409 and the read (CodeRabbit 4577478883).
+        clock = [0]
+
+        def advancing():
+            clock[0] += 7
+            return clock[0]
+
+        native = ScriptedHTTP(*[http_error(409), http_error(404)] * 100)
+        with (
+            patch.object(pool, "urlopen", native),
+            patch.object(pool, "monotonic", advancing),
+            self.assertRaisesRegex(ValueError, "kept changing holders"),
+        ):
+            with pool.Fly("prod", "1234").lease():
+                self.fail("an ever-changing holder must not be entered")
+        self.assertLess(len(native.calls), 200)
+        self.assertGreaterEqual(clock[0], pool.LEASE_TTL_SECONDS + pool.LEASE_ORPHAN_MARGIN_SECONDS)
 
     def test_lost_ack_retry_rejects_empty_or_nonstring_version_before_wait(self):
         for version in ("", None, 7):

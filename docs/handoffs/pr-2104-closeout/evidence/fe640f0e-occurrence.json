@@ -1,0 +1,20 @@
+{
+  "id": "fe640f0e71f84ed0b3a7c9857f01ce76",
+  "gate": "backend-coverage-blackbox",
+  "unit": "send-sms",
+  "check": "backend-coverage-blackbox/blackbox:send-sms",
+  "native_result": "FLAKY",
+  "attempts": 2,
+  "detail": "",
+  "evidence": null,
+  "source": {
+    "head": "64ea62ef9b85119a40f0084a3a74ab5f5c24c56d",
+    "digest": "661eb9a0f0f69eaf1e1629f24dfb7c62ed103e0c57d7f6e2f5e679c13ae89fa4"
+  },
+  "phase": "final",
+  "round": 8,
+  "detected_at": 1794716736.9228866,
+  "unit_finished_at": 1794716730.377,
+  "attribution": null,
+  "instruction": "/RCA: this unit FAILED and passed its single rerun on the same source (FLAKY). Return the evidence-backed INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. INTRODUCED: fix before merge, no quarantine. NOT_INTRODUCED: add the quarantine marker with its repair link (.claude/commands/deploy.md). UNKNOWN blocks the merge. Do not weaken assertions/timeouts."
+}

@@ -9,6 +9,11 @@ import type { MeetingNotesProvider } from '../types';
  * addresses and Plaid institutions keep listing several, as the stock page
  * does. Compute rows render through DesktopComputeRow (they own a hook); this
  * file only contributes Compute's static Gemini row.
+ *
+ * Team sharing: every shareable account (iMessage, Gmail addresses, WhatsApp,
+ * Plaid institutions, LinkedIn, Granola, Fireflies) carries its `share` caption
+ * from shareTarget; Browser Cookies, Passwords, File System and Pebble Index 01
+ * rows never ask for one.
  */
 
 import { INTEGRATION_CATALOG } from '../config';
@@ -53,6 +58,8 @@ import {
   dropdownIconImageClassName,
   DropdownIconPreset,
 } from './DropdownIconFrame';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import type { AccountShareLookup, AccountShareTarget } from '@/hooks/useTeams';
 import { FileSystemIcon } from './FileSystemSection';
 import { PebbleIndexIcon } from './PebbleIndexSection';
 import {
@@ -97,6 +104,9 @@ export interface DesktopSectionView {
   description?: string;
   rows: DesktopIntegrationView[];
 }
+
+const shareCaption = (target: AccountShareTarget | undefined) =>
+  target && <AccountTeamShare {...target} />;
 
 const tile = (preset: DesktopIcon['preset'], glyph: JSX.Element): DesktopIcon => ({
   preset,
@@ -234,7 +244,10 @@ function passwordRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   return views;
 }
 
-function gmailRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
+function gmailRow(
+  p: DesktopIntegrationsProps,
+  shareTarget: AccountShareLookup,
+): DesktopIntegrationView {
   const rows = p.data.connectedIntegrations;
   const row = rows.find((i) => i.name === 'gmail');
   const accounts = gmailAccountViews(rows, {
@@ -242,7 +255,7 @@ function gmailRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
     resyncingEmail: p.gmail.resyncingEmail,
     onDisconnect: (email) => void p.actions.onGmailDisconnect(email),
     onResync: (email) => void p.actions.onGmailResync(email),
-  });
+  }).map((account) => ({ ...account, share: shareCaption(shareTarget('gmail', account.label)) }));
   const ownIds = gmailAccounts(row).map((account) => [account.email]);
   return {
     key: 'gmail',
@@ -257,7 +270,11 @@ function gmailRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
   };
 }
 
-function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
+function messageRows(
+  p: DesktopIntegrationsProps,
+  removal: RemovalPort,
+  shareTarget: AccountShareLookup,
+) {
   const rows = p.data.connectedIntegrations;
   const find = (name: string) => rows.find((i) => i.name === name);
   const loading = p.messages.messageSyncLoading;
@@ -271,7 +288,7 @@ function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       localSyncing: loading === 'imessage',
     },
     removal,
-  );
+  ).map((account) => ({ ...account, share: shareCaption(shareTarget('imessage')) }));
   const whatsappRow = find('whatsapp');
   const whatsapp = singleAccount(
     whatsappRow,
@@ -281,7 +298,7 @@ function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       localSyncing: loading === 'whatsapp',
     },
     removal,
-  );
+  ).map((account) => ({ ...account, share: shareCaption(shareTarget('whatsapp')) }));
   const views: DesktopIntegrationView[] = [
     {
       key: 'imessage',
@@ -292,7 +309,7 @@ function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       onConnect: p.isIMessageAvailable ? () => void p.actions.onIMessageSync() : undefined,
       connecting: loading === 'imessage',
     },
-    gmailRow(p),
+    gmailRow(p, shareTarget),
     {
       key: 'whatsapp',
       name: 'WhatsApp',
@@ -308,9 +325,14 @@ function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   return views;
 }
 
-function plaidRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
+function plaidRow(
+  p: DesktopIntegrationsProps,
+  shareTarget: AccountShareLookup,
+): DesktopIntegrationView {
   const rows = p.data.connectedIntegrations;
-  const accounts = plaidAccountViews(rows, p.plaid);
+  const accounts = plaidAccountViews(rows, p.plaid, (itemId) =>
+    shareCaption(shareTarget('plaid', itemId)),
+  );
   const ownIds = visibleInstitutionItems(p.plaid.items).map(plaidItemIds);
   return {
     key: 'plaid',
@@ -332,13 +354,17 @@ function plaidRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
   };
 }
 
-function socialRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
+function socialRows(
+  p: DesktopIntegrationsProps,
+  removal: RemovalPort,
+  shareTarget: AccountShareLookup,
+) {
   const linkedinRow = p.data.connectedIntegrations.find((i) => i.name === 'linkedin');
   const accounts = singleAccount(
     linkedinRow,
     { displayName: 'LinkedIn', label: stringConfig(linkedinRow, 'name') ?? 'LinkedIn account' },
     removal,
-  );
+  ).map((account) => ({ ...account, share: shareCaption(shareTarget('linkedin')) }));
   const views: DesktopIntegrationView[] = [
     comingSoon('x', 'X', tile(DropdownIconPreset.x, <XIcon />)),
     {
@@ -359,6 +385,7 @@ function meetingNotesRow(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
   provider: MeetingNotesProvider,
+  shareTarget: AccountShareLookup,
 ): DesktopIntegrationView {
   const row = p.data.connectedIntegrations.find((i) => i.name === provider);
   const connection = p.meetingNotes[provider];
@@ -379,6 +406,7 @@ function meetingNotesRow(
     onResync: () => void (expired ? connection.connect() : connection.sync()),
     resyncLabel: expired ? `Reconnect ${name}` : `Sync ${name} now`,
     resyncing: connection.busy === 'sync' || connection.busy === 'connect',
+    share: shareCaption(shareTarget(provider, connection.status?.accountEmail)),
   }));
   return {
     key: provider,
@@ -423,10 +451,11 @@ function pebbleIndexRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
 }
 
 /** Sections in the stock order; Compute and Banks need a fully signed-in account.
- * Meeting note taker groups providers; "Other" is last with Pebble Index 01. */
+ * Meeting note taker groups providers; "Wearables" is last with Pebble Index 01. */
 export function desktopSectionViews(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
+  shareTarget: AccountShareLookup,
 ): DesktopSectionView[] {
   const sections: DesktopSectionView[] = [
     {
@@ -442,7 +471,7 @@ export function desktopSectionViews(
     {
       catalogKey: 'messages',
       title: INTEGRATION_CATALOG.messages.title,
-      rows: messageRows(p, removal),
+      rows: messageRows(p, removal, shareTarget),
     },
   ];
   if (p.isFullySignedIn) {
@@ -460,13 +489,13 @@ export function desktopSectionViews(
     sections.push({
       catalogKey: 'banks',
       title: INTEGRATION_CATALOG.banks.title,
-      rows: [plaidRow(p)],
+      rows: [plaidRow(p, shareTarget)],
     });
   }
   sections.push({
     catalogKey: 'socials',
     title: INTEGRATION_CATALOG.socials.title,
-    rows: socialRows(p, removal),
+    rows: socialRows(p, removal, shareTarget),
   });
   sections.push({
     catalogKey: 'files',
@@ -477,7 +506,9 @@ export function desktopSectionViews(
     sections.push({
       catalogKey: 'meetingNotes',
       title: INTEGRATION_CATALOG.meetingNotes.title,
-      rows: MEETING_NOTES_PROVIDERS.map((provider) => meetingNotesRow(p, removal, provider)),
+      rows: MEETING_NOTES_PROVIDERS.map((provider) =>
+        meetingNotesRow(p, removal, provider, shareTarget),
+      ),
     });
   }
   sections.push({

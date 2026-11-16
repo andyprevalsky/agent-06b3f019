@@ -5,10 +5,12 @@ import { encryptProjectSecret, decryptProjectSecret } from '../projects/secrets'
 import { getCheckpointObject, putCheckpointObject } from '../codeSessions/artifactStore';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
 import type { HydrationTarget } from './resumeLifecycle';
 import type { SteelLifecycleMutation } from '../steel/lifecycleClaim';
 import { captureFrameIndexedDB, restoreFrameIndexedDB } from './checkpointIndexedDB';
+import { checkpointCaptureOwner, type CapturePages } from './checkpointCapture';
 
 const log = createLogger('BrowserCheckpoint');
 
@@ -128,8 +130,10 @@ export async function emptyBrowserCheckpoint(_userId: string): Promise<string> {
 /** Called before provider release; failure must prevent a successful pause. */
 export async function checkpointLogicalBrowser(
   nativeId: string,
-  mutateOwned?: SteelLifecycleMutation
+  mutateOwned?: SteelLifecycleMutation,
+  signal?: AbortSignal
 ): Promise<void> {
+  signal?.throwIfAborted();
   const row = await prisma.browserSession.findUnique({
     where: { sessionId: nativeId },
     include: { context: true },
@@ -143,7 +147,11 @@ export async function checkpointLogicalBrowser(
   if (!row.wsUrl) throw new Error('Browser checkpoint requires a live binding');
   const browser = await connectValidatedBrowser(row.wsUrl);
   if (!browser) throw new Error('Browser checkpoint connection failed');
+  const capture = checkpointCaptureOwner(browser, signal);
+  const { pages } = capture;
   try {
+    signal?.throwIfAborted();
+    log.info('Browser checkpoint capture phase', { task_id: row.id, phase: 'capture_started' });
     const context = browser.contexts()[0];
     if (!context) throw new Error('Browser checkpoint context missing');
     const previous = row.checkpointRef
@@ -164,13 +172,13 @@ export async function checkpointLogicalBrowser(
           const frames = new Map<string, FrameStorage>();
           const origin = new URL(page.url()).origin;
           for (const frame of page.frames()) {
-            const captured = await readFrameStorage(frame, origin, knownOrigins);
+            const captured = await readFrameStorage(frame, origin, knownOrigins, pages);
             if (captured && captured.origin !== origin) frames.set(captured.origin, captured);
           }
           const missing = [...knownOrigins].filter(
             (value) => value !== origin && !frames.has(value)
           );
-          for (const [key, values] of await detachedTabStorage(page, missing)) {
+          for (const [key, values] of await detachedTabStorage(page, missing, pages)) {
             if (values.sessionStorage.length || values.localStorage?.length || values.indexedDB)
               frames.set(key, values);
           }
@@ -196,6 +204,7 @@ export async function checkpointLogicalBrowser(
       if (capture.status === 'rejected') throw capture.reason;
       return capture.value;
     });
+    log.info('Browser checkpoint capture phase', { task_id: row.id, phase: 'tabs_completed' });
     // A fresh CDP connection has no visited-origin history. Register the
     // existing origins on a private, locally fulfilled page for first-party
     // localStorage/IndexedDB. Frame DOM storage is captured in its partition above.
@@ -204,12 +213,12 @@ export async function checkpointLogicalBrowser(
       tabs.flatMap((tab) => [new URL(tab.url).origin, ...tab.frames.map((frame) => frame.origin)])
     );
     for (const origin of knownOrigins) origins.add(origin);
-    const capturePage = origins.size ? await context.newPage() : null;
+    const capturePage = origins.size ? await pages.create(() => context.newPage()) : null;
     let captureCdp: Awaited<ReturnType<typeof context.newCDPSession>> | null = null;
     let storage: Storage;
     try {
       if (capturePage) {
-        captureCdp = await context.newCDPSession(capturePage);
+        captureCdp = await pages.session(() => context.newCDPSession(capturePage));
         // Routing does not intercept service-worker responses. Scope bypass to
         // this disposable target so capture cannot execute the site's worker.
         await captureCdp!.send('Network.enable');
@@ -223,14 +232,18 @@ export async function checkpointLogicalBrowser(
           });
         }
       }
-      storage = await context.storageState({ indexedDB: true });
+      log.info('Browser checkpoint capture phase', { task_id: row.id, phase: 'storage_started' });
+      signal?.throwIfAborted();
+      storage = await capture.storage(() => context.storageState({ indexedDB: true }));
+      log.info('Browser checkpoint capture phase', { task_id: row.id, phase: 'storage_completed' });
     } finally {
       try {
-        await captureCdp?.detach();
+        if (captureCdp) await pages.detach(captureCdp);
       } finally {
-        await capturePage?.close();
+        if (capturePage) await pages.close(capturePage);
       }
     }
+    signal?.throwIfAborted();
     const empty = storage.cookies.length === 0 && storage.origins.length === 0 && tabs.length === 0;
     const ref = empty
       ? EMPTY_BROWSER_BASELINE
@@ -243,8 +256,11 @@ export async function checkpointLogicalBrowser(
           tabs,
           limitations: ['no_external_action_replay', 'no_websocket_or_heap_state'],
         });
-    const publish = (database: typeof prisma | import('@prisma/client').Prisma.TransactionClient) =>
-      database.browserSession.updateMany({
+    const publish = (
+      database: typeof prisma | import('@prisma/client').Prisma.TransactionClient
+    ) => {
+      signal?.throwIfAborted();
+      return database.browserSession.updateMany({
         where: {
           id: row.id,
           contextId: row.contextId,
@@ -255,10 +271,11 @@ export async function checkpointLogicalBrowser(
         },
         data: { checkpointRef: ref, checkpointRevision: { increment: 1 } },
       });
+    };
     const changed = mutateOwned ? await mutateOwned(publish) : await publish(prisma);
     if (changed.count !== 1) throw new Error('Browser checkpoint binding changed');
   } finally {
-    await browser.close();
+    await capture.dispose();
   }
 }
 
@@ -381,10 +398,25 @@ export async function restoreLogicalBrowserCheckpoint(
   }
   log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'navigation_started' });
   for (const { page, url } of prepared) {
-    await assertRestoreBinding();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await retryWithBackoff(
+      async () => {
+        await assertRestoreBinding();
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      },
+      {
+        maxRetries: 3,
+        fixedDelays: [500, 1_500],
+        isRetryable: isProxyTunnelFailure,
+        component: 'browser-checkpoint:restore-navigation',
+      }
+    );
   }
   log.info('Logical browser tabs restored', { taskId, tabs: prepared.length });
+}
+
+/** The proxy never opened a tunnel, so the site saw nothing and reloading repeats no request. */
+function isProxyTunnelFailure(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('net::ERR_TUNNEL_CONNECTION_FAILED');
 }
 
 /** Seed each origin in the destination tab's storage namespace, including late-created frames. */
@@ -455,11 +487,11 @@ async function seedTabSessionStorage(page: Page, target: BrowserCheckpoint['tabs
 }
 
 /** A popup clones its opener's whole session namespace, including currently unloaded origins. */
-async function detachedTabStorage(page: Page, origins: string[]) {
+async function detachedTabStorage(page: Page, origins: string[], pages: CapturePages) {
   const result = new Map<string, FrameStorage>();
   if (!origins.length) return result;
   const topOrigin = new URL(page.url()).origin;
-  const cdp = await page.context().newCDPSession(page);
+  const cdp = await pages.session(() => page.context().newCDPSession(page));
   let popup: Page | undefined;
   let popupPending: Promise<Page> | undefined;
   let popupCdp: CDPSession | undefined;
@@ -471,18 +503,20 @@ async function detachedTabStorage(page: Page, origins: string[]) {
     });
     // Isolated-world builtins avoid any merchant override of window.open.
     const marker = `about:blank#rose-checkpoint-${randomUUID()}`;
-    popupPending = page.waitForEvent('popup', {
-      timeout: 30_000,
-      predicate: async (candidate) =>
-        candidate.url() === marker && (await candidate.opener()) === page,
-    });
+    popupPending = pages.create(() =>
+      page.waitForEvent('popup', {
+        timeout: 30_000,
+        predicate: async (candidate) =>
+          candidate.url() === marker && (await candidate.opener()) === page,
+      })
+    );
     await cdp.send('Runtime.evaluate', {
       expression: `window.open(${JSON.stringify(marker)}, "_blank")`,
       contextId: executionContextId,
       userGesture: true,
     });
     popup = await popupPending;
-    popupCdp = await page.context().newCDPSession(popup);
+    popupCdp = await pages.session(() => page.context().newCDPSession(popup!));
     await popupCdp.send('Network.enable');
     await popupCdp.send('Network.setBypassServiceWorker', { bypass: true });
     await popup.route('**/*', (route) => route.fulfill({ body: '<!doctype html>' }));
@@ -494,19 +528,20 @@ async function detachedTabStorage(page: Page, origins: string[]) {
     });
     for (const origin of origins) {
       const saved = await withOriginFrame(popup, origin, (frame) =>
-        readFrameStorage(frame, topOrigin)
+        readFrameStorage(frame, topOrigin, undefined, pages)
       );
       if (saved) result.set(origin, saved);
     }
     return result;
   } finally {
     try {
-      await popupCdp?.detach();
+      if (popupCdp) await pages.detach(popupCdp);
     } finally {
       try {
-        await (popup ?? (await popupPending?.catch(() => undefined)))?.close();
+        const created = popup ?? (await popupPending?.catch(() => undefined));
+        if (created) await pages.close(created);
       } finally {
-        await cdp.detach();
+        await pages.detach(cdp);
       }
     }
   }
@@ -516,7 +551,8 @@ async function detachedTabStorage(page: Page, origins: string[]) {
 async function readFrameStorage(
   frame: Frame,
   topOrigin: string,
-  observedOrigins?: Set<string>
+  observedOrigins?: Set<string>,
+  pages?: CapturePages
 ): Promise<FrameStorage | null> {
   let originConfirmed = false;
   try {
@@ -541,7 +577,7 @@ async function readFrameStorage(
       // frame leaves during IndexedDB capture, the existing popup fallback
       // must still recover its complete namespace, including sessionStorage.
       observedOrigins?.add(state.origin);
-      state.indexedDB = await captureFrameIndexedDB(frame);
+      state.indexedDB = await captureFrameIndexedDB(frame, pages);
     }
     return state;
   } catch (error) {

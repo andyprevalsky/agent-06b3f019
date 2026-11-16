@@ -135,6 +135,25 @@ FINISHED_RECORD_KEYS = (
 MAX_SEEN_AGENT_MESSAGE_IDS = 200
 
 
+def _finished_snapshot(record: Dict[str, Any]) -> Dict[str, Any]:
+    """A wake's base_goal is usually its spawn goal; the snapshot carries that text once."""
+    snapshot = dict(record)
+    wake = record.get("wake")
+    if isinstance(wake, dict) and wake.get("base_goal") == (wake.get("tool_args") or {}).get("goal"):
+        snapshot["wake"] = {key: value for key, value in wake.items() if key != "base_goal"}
+    return snapshot
+
+
+def _restored_finished(record: Dict[str, Any]) -> Dict[str, Any]:
+    restored = dict(record)
+    wake = record.get("wake")
+    if isinstance(wake, dict) and "base_goal" not in wake:
+        tool_args = wake.get("tool_args")
+        goal = tool_args.get("goal") if isinstance(tool_args, dict) else None
+        restored["wake"] = {**wake, "base_goal": goal if isinstance(goal, str) else ""}
+    return restored
+
+
 class BackgroundAgentsMixin:
     """Background-task state + behavior; AgentWorkflow calls these hooks."""
 
@@ -200,7 +219,7 @@ class BackgroundAgentsMixin:
     def _background_state_snapshot(self) -> Dict[str, Any]:
         return {
             "tasks": {key: dict(value) for key, value in self._background_tasks.items()},
-            "finished": {key: dict(value) for key, value in self._background_finished.items()},
+            "finished": {key: _finished_snapshot(value) for key, value in self._background_finished.items()},
             "notified": sorted(self._background_notified),
             "retired_task_names": list(self._retired_task_names),
             "seen_agent_message_ids": list(self._seen_agent_message_ids),
@@ -243,7 +262,7 @@ class BackgroundAgentsMixin:
             self._background_tasks = {str(key): dict(value) for key, value in tasks.items() if isinstance(value, dict)}
         finished = snapshot.get("finished")
         if isinstance(finished, dict):
-            self._background_finished = {str(k): dict(v) for k, v in finished.items() if isinstance(v, dict)}
+            self._background_finished = {str(k): _restored_finished(v) for k, v in finished.items() if isinstance(v, dict)}
         retired = snapshot.get("retired_task_names")
         if isinstance(retired, list):
             self._retired_task_names = [value for value in retired if isinstance(value, str)][-MAX_RETIRED_TASK_NAMES:]

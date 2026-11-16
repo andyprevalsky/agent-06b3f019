@@ -10,7 +10,7 @@
  *   - idempotent per (agent, content hash): sequential, concurrent and in-call
  *     repeats never post twice; the same bytes in another agent post there once
  *   - caps: > 20 items → 400; type allowlist image/* video/* text/html (HTML only
- *     when declared .html; HTML renamed .png and SVG → 400), PDF, 3D models and
+ *     when declared .html; HTML renamed .png or .svg → 400; SVG is an image), PDF, 3D models and
  *     bundles (agent-tools-display.cases.ts); one bad item rejects the whole
  *     call; SSRF: non-public / non-http URLs refused before any fetch
  *   - the full inline renderer: pages, multi-file bundles, model and PDF viewers
@@ -94,6 +94,37 @@ const tests: BlackboxTest[] = [
     },
   },
   {
+    name: 'display shows an SVG as an image stored with image/svg+xml, never as a page',
+    fn: async () => {
+      const chart = Buffer.from(
+        `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><text>${RUN}</text></svg>`
+      );
+      const scripted = Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script><desc>${RUN}</desc></svg>`
+      );
+      const res = await display(
+        rootA,
+        { items: [b64(chart, 'revenue.svg'), b64(scripted, 'scripted.svg')] },
+        { apiKeyUser: userA }
+      );
+      expectStatus(res, 201, 'svg display');
+      for (const [item, bytes] of [
+        [items(res)[0], chart],
+        [items(res)[1], scripted],
+      ] as const) {
+        assert(item.mime_type === 'image/svg+xml', `svg mime: ${item.mime_type}`);
+        assert(item.kind === 'image', `svg is an image, not a page: ${item.kind}`);
+        assert(
+          item.file_pointer.storage_path === `${userA}/display/${item.sha256}.svg`,
+          `svg stored at a .svg path: ${item.file_pointer.storage_path}`
+        );
+        assert(!item.file_pointer.usercontent_url, 'an svg is never served as a page');
+        const stored = storedBytes(item.file_pointer.storage_path);
+        if (stored) assert(stored.equals(bytes), 'stored svg bytes equal the displayed bytes');
+      }
+    },
+  },
+  {
     name: 'same content is never posted twice (sequential, concurrent, in-call)',
     fn: async () => {
       const before = (await displayMessages(rootA)).length;
@@ -147,12 +178,12 @@ const tests: BlackboxTest[] = [
       );
       expectStatus(disguised, 400, 'html renamed png');
       assert(JSON.stringify(disguised.data).includes('is not a displayable file'), 'type detail');
-      const svg = await display(
+      const htmlAsSvg = await display(
         otherA,
-        { items: [b64(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), 'a.svg')] },
+        { items: [b64(Buffer.from('<html><script>alert(1)</script></html>'), 'a.svg')] },
         { apiKeyUser: userA }
       );
-      expectStatus(svg, 400, 'svg');
+      expectStatus(htmlAsSvg, 400, 'html renamed svg');
       const mixed = await display(
         otherA,
         { items: [b64(png()), b64(Buffer.from('plain text'), 'notes.png')] },

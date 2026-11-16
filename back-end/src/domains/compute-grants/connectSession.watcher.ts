@@ -11,7 +11,6 @@ import { getKernelCaptchaTelemetry } from '../../providers/browser/kernel';
 import { getSteelCaptchaTelemetry } from '../../providers/steel/sessionInspect';
 import { getTilionCaptchaTelemetry } from '../../providers/browser/tilion';
 import {
-  CAPTCHA_WIDGET_PRESENT_SCRIPT,
   captchaSolveIndicatorSetPhaseScript,
   emptyCaptchaIndicatorMemory,
   resolveCaptchaIndicatorPhase,
@@ -43,19 +42,8 @@ async function syncCaptchaSolveIndicator(entry: PendingConnect): Promise<void> {
               pages: [],
               latestOutcome: null,
             };
-  let kernelWidgets = false;
-  if (
-    telemetry.isSolving === null &&
-    (telemetry.provider === 'kernel' || telemetry.provider === 'tilion')
-  ) {
-    kernelWidgets = (await entry.cdp.evaluate<boolean>(CAPTCHA_WIDGET_PRESENT_SCRIPT)) === true;
-  }
   const memory = entry.captchaIndicatorMemory ?? emptyCaptchaIndicatorMemory();
-  const resolved = resolveCaptchaIndicatorPhase(
-    telemetry,
-    { kernelChallengeWidgetsPresent: kernelWidgets },
-    memory
-  );
+  const resolved = resolveCaptchaIndicatorPhase(telemetry, memory);
   entry.captchaIndicatorMemory = resolved.memory;
   await entry.cdp.evaluate(captchaSolveIndicatorSetPhaseScript(resolved.phase));
 }

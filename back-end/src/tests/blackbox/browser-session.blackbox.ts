@@ -41,13 +41,16 @@ import { prisma } from '../../providers/database';
 import { runBrowserColdImportCases } from './browser-session-cold-import.cases';
 import {
   testNavigationRouteGuards,
+  testConcurrency_parallelAuthChecks,
   testReproducibility_threeSequential,
 } from './browser-session-route-invariants.cases';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
+import { runBrowserCloseDisconnectCases } from './browser-session-close-disconnect.cases';
+import { runBrowserPauseAbortCases } from './browser-session-pause-abort.cases';
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
 import { runBrowserPrivateRestoreCases } from './browser-session-private-restore.cases';
 import { runBrowserApprovalE2ECases } from './browser-session-approval-e2e.cases';
-import { runQuarantinedProviderLifecycleCases } from './browser-session-provider-lifecycle.quarantine';
+import { runBrowserProviderLifecycleCases } from './browser-session-provider-lifecycle.cases';
 import {
   runBrowserRootTeardownSavesStateCases,
   runBrowserTerminalPauseCases,
@@ -556,22 +559,14 @@ async function testIdempotency_taskNotFound() {
   }
 }
 
-async function testConcurrency_parallelAuthChecks() {
-  const results = await Promise.all(
-    Array.from({ length: 10 }, () => request(`${BASE_URL}/api/browser-session/task/nonexistent`))
-  );
-  const statuses = new Set(results.map((r) => r.status));
-  if (statuses.size !== 1) {
-    throw new Error(`Expected uniform status, got: ${[...statuses].join(', ')}`);
-  }
-}
-
 // ==================== RUN ====================
 
 async function runAll() {
   const focusedCases = [
+    ['--close-disconnect-only', runBrowserCloseDisconnectCases],
+    ['--pause-abort-only', runBrowserPauseAbortCases],
     ['--cold-import-only', runBrowserColdImportCases],
-    ['--provider-lifecycle-only', runQuarantinedProviderLifecycleCases],
+    ['--provider-lifecycle-only', runBrowserProviderLifecycleCases],
     ['--approval-e2e-only', runBrowserApprovalE2ECases],
     ['--private-restore-only', runBrowserPrivateRestoreCases],
     ['--logical-browser-only', runLogicalBrowserCases],
@@ -597,11 +592,13 @@ async function runAll() {
   await runBrowserColdImportCases();
   await runBrowserInitDisconnectCases();
   if (process.argv.includes('--init-disconnect-only')) return;
+  await runBrowserCloseDisconnectCases();
+  await runBrowserPauseAbortCases();
   await runBrowserPauseCheckpointCases();
   await runBrowserPrivateRestoreCases();
   await runBrowserApprovalE2ECases();
   await runBrowserTerminalPauseCases();
-  await runQuarantinedProviderLifecycleCases();
+  await runBrowserProviderLifecycleCases();
   await runBrowserRootTeardownSavesStateCases();
   await runBrowserResumeCustodyCases();
   await runLogicalBrowserCases();
@@ -696,7 +693,7 @@ async function runAll() {
     { name: 'idempotency -- task not found same on repeat', fn: testIdempotency_taskNotFound },
     {
       name: 'concurrency -- 10 parallel auth checks consistent',
-      fn: testConcurrency_parallelAuthChecks,
+      fn: () => testConcurrency_parallelAuthChecks(BASE_URL),
     },
     {
       name: 'reproducibility -- 3 sequential identical status',

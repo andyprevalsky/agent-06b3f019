@@ -821,8 +821,37 @@ def cmd_deletion_check(args: argparse.Namespace) -> int:
 
 # --- finish ----------------------------------------------------------------
 
+def completed_timing_run() -> str | None:
+    """This deploy's timing run when an earlier `finish` already closed it, else None.
+
+    `run-deploy-stage --finish` closes the run and removes its `current` pointer before the
+    outcome and ledger steps run, so a transient failure in a later step left every retry
+    failing on "no active deploy timing run". Only a completed run of this merged PR's own
+    branch qualifies; an active pointer or another deploy's run is never treated as closed.
+    """
+    runs = CONTEXT / 'deploy-runs'
+    if (runs / 'current').exists() or not (PR_FILE.is_file() and MERGED_FILE.is_file() and runs.is_dir()):
+        return None
+    pr, merged = json.loads(PR_FILE.read_text()), json.loads(MERGED_FILE.read_text())
+    if not pr.get('branch') or merged.get('pr') != pr.get('pr'):
+        return None
+    for run_dir in sorted((path for path in runs.iterdir() if path.is_dir()), reverse=True):
+        try:
+            metadata = json.loads((run_dir / 'metadata.json').read_text())
+        except (OSError, ValueError):
+            continue
+        if metadata.get('branch') == pr['branch']:
+            done = metadata.get('status') == 'completed' and metadata.get('finished_at')
+            return run_dir.name if done else None
+    return None
+
+
 def cmd_finish(args: argparse.Namespace) -> int:
-    status = run(['bash', 'scripts/run-deploy-stage', '--finish'])
+    if closed := completed_timing_run():
+        print(f'DEPLOY_FINISH timing run {closed} already completed; not re-finishing it')
+        status = 0
+    else:
+        status = run(['bash', 'scripts/run-deploy-stage', '--finish'])
     factory('outcome', args.outcome)
     status |= run([sys.executable, 'scripts/factory_ledger.py', 'publish'])
     print(f'DEPLOY_FINISH {"PASS" if status == 0 else "FAIL"} outcome={args.outcome}')
@@ -872,6 +901,8 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser('merge', help='prove the merge is allowed, then merge and record the merge commit')
     sub.add_parser('production', help='verify every applicable production lane (scripts/deploy_prod.py)',
                    add_help=False)
+    sub.add_parser('scorecard', help='render the deploy-summary-v2 card from a JSON spec (scripts/deploy_scorecard.py)',
+                   add_help=False)
     checked = sub.add_parser('deletion-check', help='prove nothing needed lives only on this devbox')
     checked.add_argument('--manifest', type=Path, help='JSON {path-glob: disposition} for preserved records')
     checked.add_argument('--receipt', type=Path, help='receipt path (default: docs/handoffs/pr-<N>-closeout/ after merge)')
@@ -888,8 +919,9 @@ COMMANDS = {'sync': cmd_sync, 'collect': cmd_collect, 'fix': cmd_fix, 'freeze': 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in {'gates', 'production'}:
-        return delegate({'gates': 'deploy_gates', 'production': 'deploy_prod'}[argv[0]], argv[1:])
+    if argv and argv[0] in {'gates', 'production', 'scorecard'}:
+        return delegate({'gates': 'deploy_gates', 'production': 'deploy_prod', 'scorecard': 'deploy_scorecard'}[argv[0]],
+                        argv[1:])
     top = parser()
     args = top.parse_args(argv)
     if args.command == 'approval' and args.action == 'decide' and not (args.decision and args.evidence):

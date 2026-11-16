@@ -99,9 +99,12 @@ export class TilionSessionBusyError extends TilionApiError {
   }
 }
 
-/** 429 throttle or concurrency cap, typed as the provider-neutral rate-limit error. */
+/**
+ * 429 throttle or concurrency cap, or 503 `capacity_unavailable`: definite "nothing
+ * allocated, retry later" answers, typed as the provider-neutral rate-limit error.
+ */
 export class TilionRateLimitError extends BrowserProviderRateLimitError {
-  readonly status = 429;
+  readonly status: number;
   readonly slug: string | null;
   readonly requestId: string | null;
   readonly retryAfterMs: number | null;
@@ -109,6 +112,7 @@ export class TilionRateLimitError extends BrowserProviderRateLimitError {
 
   constructor(init: TilionErrorInit) {
     super('tilion', new TilionApiError(init).message);
+    this.status = init.status;
     this.slug = init.slug;
     this.requestId = init.requestId;
     this.retryAfterMs = init.retryAfterMs;
@@ -249,7 +253,9 @@ export function tilionErrorFromResponse(
     method: meta.method,
     path: meta.path,
   };
-  if (status === 429) return new TilionRateLimitError(init);
+  // No capacity in the region: Tilion allocated nothing (Retry-After: 5).
+  if (status === 429 || (status === 503 && parsed.slug === 'capacity_unavailable'))
+    return new TilionRateLimitError(init);
   if (status === 402) return new TilionInsufficientCreditsError(init);
   const cause = isRecord(body) && isRecord(body.detail) ? body.detail.cause : undefined;
   if (
@@ -410,6 +416,73 @@ export async function tilionRequest<T>(
   options: TilionRequestOptions = {}
 ): Promise<T> {
   return (await tilionRequestWithMeta<T>(path, options)).data;
+}
+
+/**
+ * Keyed POST /v1/session. Capacity rejections (503 capacity_unavailable, Retry-After 5,
+ * each answered after ~5 s) must not use up the attempts that settle a lost reply
+ * (2026-11-15 PR #2110 smoke: capacity ×2, then a 15 s timeout on the last of 3
+ * attempts latched browser init). Retries start within 45 s while every answer was a
+ * definite rejection, and within 90 s once an attempt is unsettled; with the 15 s
+ * request timeout one call ends within ~105 s.
+ */
+export const TILION_SESSION_CREATE_MAX_ATTEMPTS = 8;
+const CREATE_REJECTION_WINDOW_MS = 45_000;
+const CREATE_SETTLE_WINDOW_MS = 90_000;
+
+/** A lost reply, or a create still running under this key: either may own a browser. */
+function unsettledCreate(error: unknown): boolean {
+  return (
+    error instanceof TilionTimeoutError ||
+    error instanceof TilionNetworkError ||
+    (error instanceof TilionApiError && error.slug === 'idempotency_key_in_use')
+  );
+}
+
+/**
+ * Create a session under one Idempotency-Key. Tilion replays a settled key's session
+ * (or answers 409 while it is still starting), so retrying the key never allocates
+ * twice. Once any attempt is unsettled, no later answer proves nothing was allocated:
+ * the call then fails untyped, so callers keep the allocation ambiguous.
+ */
+export async function postTilionSession<T>(idempotencyKey: string, body: unknown): Promise<T> {
+  const startedAt = Date.now();
+  let attempt = 0;
+  let unsettled = false;
+  try {
+    return await retryWithBackoff(
+      () => {
+        attempt += 1;
+        return tilionRequest<T>('/v1/session', {
+          method: 'POST',
+          idempotencyKey,
+          body,
+          maxAttempts: 1,
+        });
+      },
+      {
+        maxRetries: TILION_SESSION_CREATE_MAX_ATTEMPTS,
+        component: `Tilion POST /v1/session (${idempotencyKey})`,
+        getBackoffDelayMs: retryDelayMs,
+        isRetryable: (error) => {
+          unsettled ||= unsettledCreate(error);
+          const window = unsettled ? CREATE_SETTLE_WINDOW_MS : CREATE_REJECTION_WINDOW_MS;
+          const retryable =
+            unsettledCreate(error) ||
+            ((error instanceof TilionApiError || error instanceof TilionRateLimitError) &&
+              defaultShouldRetry(error));
+          return retryable && Date.now() - startedAt + retryDelayMs(error, attempt) < window;
+        },
+      }
+    );
+  } catch (error) {
+    if (!unsettled && !unsettledCreate(error)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${message}; Tilion create ${idempotencyKey} is unsettled and may own a browser`,
+      { cause: error }
+    );
+  }
 }
 
 export function tilionSessionPath(sessionId: string, suffix = ''): string {

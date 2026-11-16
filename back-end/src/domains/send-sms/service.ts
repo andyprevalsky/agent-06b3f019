@@ -152,10 +152,10 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
   const finalAnswer = data.event_type === 'completion' ? completionAnswerText(payload) : undefined;
 
   // Benchmark/eval runs create real root agents under the operator's own phone.
-  // Lifecycle SMS (agent_started, write_lock, completion, …) fire on any source
-  // now, so without this central gate every benchmark run would text the
-  // operator. Completion still returns the production-formatted body so an eval
-  // can assert the full notification contract without crossing the SMS boundary.
+  // Relays (write_lock, sign-in, questions, …) fire on any source, so without
+  // this central gate every benchmark run would text the operator. Completion
+  // still returns the production-formatted body so an eval can assert the full
+  // notification contract without crossing the SMS boundary.
   if (agent.isBenchmark) {
     log.info('Agent is a benchmark run, skipping SMS', {
       agentId: data.agent_id,
@@ -171,6 +171,23 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
           )
         : undefined;
     return { success: true, skipped: true, reason: 'benchmark_agent', messagePreview };
+  }
+
+  // Kickoff and completion texts belong to the phone thread only when the user
+  // touched this agent from the phone: the SMS/WhatsApp agent created it,
+  // replied to it or raised its budget. A web or Mac agent the user never touched
+  // from the phone starts and finishes silently there (the web UI shows it).
+  // Relays that block the agent still go out, but delivering one is not a touch.
+  if (
+    (data.event_type === 'agent_started' || data.event_type === 'completion') &&
+    !(await hasMessagingAgentInteraction({ id: data.agent_id, source: agent.source }))
+  ) {
+    log.info('Lifecycle SMS skipped: messaging agent never interacted with this agent', {
+      agentId: data.agent_id,
+      eventType: data.event_type,
+      source: agent.source,
+    });
+    return { success: true, skipped: true, reason: 'no_messaging_agent_interaction' };
   }
 
   // Mirror lifecycle/onboarding notifications across every channel the user is
@@ -192,7 +209,7 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
   }
 
   if (data.event_type === 'completion') {
-    return dispatchCompletionOnce(data, payload, channels, agent.source, finalAnswer);
+    return dispatchCompletionOnce(data, payload, channels, finalAnswer);
   }
 
   const startNotification =
@@ -214,20 +231,8 @@ async function dispatchCompletionOnce(
   data: NotifyInput,
   payload: Record<string, unknown>,
   channels: SupervisorChannel[],
-  source: string,
   finalAnswer?: string
 ): Promise<NotifyResult> {
-  // Completion notices belong to the messaging thread only when the SMS/WhatsApp
-  // agent created, messaged or relayed for this agent; a web-started agent the
-  // user never touched over SMS finishes silently there (the web UI shows it).
-  if (!(await hasMessagingAgentInteraction({ id: data.agent_id, source }))) {
-    log.info('Completion skipped: messaging agent never interacted with this agent', {
-      agentId: data.agent_id,
-      source,
-    });
-    return { success: true, skipped: true, reason: 'no_messaging_agent_interaction' };
-  }
-
   const operationKey = `${COMPLETION_SMS_OPERATION_TYPE}:${data.agent_id}`;
   const claim = await claimToolSideEffect({
     operationKey,

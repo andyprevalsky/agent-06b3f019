@@ -3,6 +3,10 @@
  * The private artifact uses an explicit graph encoding, never executable saved code.
  */
 import type { CDPSession, Frame } from 'playwright';
+import { createLogger } from '../logger';
+
+const log = createLogger('BrowserCheckpoint');
+import type { CapturePages } from './checkpointCapture';
 
 const transfer = String.raw`
 async ({ mode, saved }) => {
@@ -34,7 +38,7 @@ async ({ mode, saved }) => {
           tx.error || new Error("Checkpoint IndexedDB transaction aborted"),
         );
     });
-  const encode = async (root) => {
+  const encoder = () => {
     const nodes = [],
       seen = new Map();
     const visit = async (value) => {
@@ -91,11 +95,32 @@ async ({ mode, saved }) => {
           value.lastModified,
         ];
       else
-        throw new Error("Unsupported checkpoint IndexedDB value type: " + tag);
+        throw Object.assign(
+          new Error("Unsupported checkpoint IndexedDB value type: " + tag),
+          { unsupportedType: tag },
+        );
       return id;
     };
-    const rootId = await visit(root);
-    return JSON.stringify({ version: 1, rootId, nodes });
+    return {
+      // Each record is its own structured clone. A host object that cannot
+      // leave this browser (for example a non-extractable CryptoKey) omits only
+      // its record and reports the type, instead of failing the checkpoint.
+      record: async (value) => {
+        if (value === null || typeof value !== "object") return undefined;
+        const mark = nodes.length;
+        try {
+          await visit(value);
+          return undefined;
+        } catch (error) {
+          if (!error?.unsupportedType) throw error;
+          nodes.length = mark;
+          for (const [object, id] of seen) if (id >= mark) seen.delete(object);
+          return error.unsupportedType;
+        }
+      },
+      finish: async (root) =>
+        JSON.stringify({ version: 1, rootId: await visit(root), nodes }),
+    };
   };
   const decode = (serialized) => {
     const graph = JSON.parse(serialized),
@@ -221,8 +246,24 @@ async ({ mode, saved }) => {
         db.close();
       }
     }
+    const encoding = encoder(),
+      omitted = [];
+    for (const db of databases)
+      for (const store of db.stores) {
+        const kept = [],
+          counts = new Map();
+        for (const record of store.records) {
+          const type = await encoding.record(record.value);
+          if (type === undefined) kept.push(record);
+          else counts.set(type, (counts.get(type) ?? 0) + 1);
+        }
+        store.records = kept;
+        for (const [type, count] of counts)
+          omitted.push({ database: db.name, store: store.name, type, count });
+      }
     return {
-      data: await encode(databases),
+      data: await encoding.finish(databases),
+      omitted,
       databaseCount: databases.length,
       autoStores: databases.flatMap((db) =>
         db.stores
@@ -295,11 +336,20 @@ async ({ mode, saved }) => {
 
 type AutoStore = { database: string; store: string };
 type Generator = AutoStore & { value: number };
+type Omitted = AutoStore & { type: string; count: number };
 
 /** Use the actual frame's native storage key, including its top-level-site partition. */
-async function storageSession(frame: Frame): Promise<{ client: CDPSession; storageKey: string }> {
+async function storageSession(
+  frame: Frame,
+  resources?: CapturePages
+): Promise<{ client: CDPSession; storageKey: string }> {
   const context = frame.page().context();
-  let client = await context.newCDPSession(frame.page());
+  const create = (target: Frame | ReturnType<Frame['page']>) =>
+    resources
+      ? resources.session(() => context.newCDPSession(target))
+      : context.newCDPSession(target);
+  const detach = (client: CDPSession) => (resources ? resources.detach(client) : client.detach());
+  let client = await create(frame.page());
   try {
     const { frameTree } = await client.send('Page.getFrameTree');
     const find = (node: typeof frameTree): string | undefined => {
@@ -311,28 +361,37 @@ async function storageSession(frame: Frame): Promise<{ client: CDPSession; stora
     };
     let id = find(frameTree);
     if (!id) {
-      await client.detach();
-      client = await context.newCDPSession(frame);
+      await detach(client);
+      client = await create(frame);
       id = (await client.send('Page.getFrameTree')).frameTree.frame.id;
     }
     const { storageKey } = await client.send('Storage.getStorageKeyForFrame', { frameId: id });
     return { client, storageKey };
   } catch (error) {
-    await client.detach();
+    await detach(client);
     throw error;
   }
 }
 
-export async function captureFrameIndexedDB(frame: Frame): Promise<string | undefined> {
+export async function captureFrameIndexedDB(
+  frame: Frame,
+  resources?: CapturePages
+): Promise<string | undefined> {
   const snapshot = await frame.evaluate<{
     data: string;
+    omitted: Omitted[];
     databaseCount: number;
     autoStores: AutoStore[];
   }>(`(${transfer})(${JSON.stringify({ mode: 'capture' })})`);
   if (!snapshot.databaseCount) return undefined;
+  if (snapshot.omitted.length)
+    log.warn('Browser checkpoint omitted non-transferable IndexedDB records', {
+      origin: new URL(frame.url()).origin,
+      omitted: snapshot.omitted,
+    });
   const generators: Generator[] = [];
   if (snapshot.autoStores.length) {
-    const { client, storageKey } = await storageSession(frame);
+    const { client, storageKey } = await storageSession(frame, resources);
     try {
       for (const store of snapshot.autoStores) {
         const metadata = await client.send('IndexedDB.getMetadata', {
@@ -343,10 +402,16 @@ export async function captureFrameIndexedDB(frame: Frame): Promise<string | unde
         generators.push({ ...store, value: metadata.keyGeneratorValue });
       }
     } finally {
-      await client.detach();
+      if (resources) await resources.detach(client);
+      else await client.detach();
     }
   }
-  return JSON.stringify({ version: 1, data: snapshot.data, generators });
+  return JSON.stringify({
+    version: 1,
+    data: snapshot.data,
+    generators,
+    ...(snapshot.omitted.length ? { omitted: snapshot.omitted } : {}),
+  });
 }
 
 export async function restoreFrameIndexedDB(frame: Frame, saved: string): Promise<void> {

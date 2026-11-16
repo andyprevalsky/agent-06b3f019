@@ -51,7 +51,18 @@ def for_each_machine(operation, records):
     errors = [future.exception() for future in futures if future.exception() is not None]
     hard = [error for error in errors if not isinstance(error, PoolCapacityPending)]
     if errors:
-        raise (hard or errors)[0]
+        raised = (hard or errors)[0]
+        # Only one error can be raised; a dropped one (2026-11-15: a failed lease
+        # release that orphaned a native lease) must still reach the log.
+        for record, future in zip(records, futures):
+            error = future.exception()
+            if error is not None and error is not raised:
+                print(
+                    f"Concurrent Machine operation also failed on {record.get('id')!r}: {error!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        raise raised
     return [future.result() for future in futures]
 
 
@@ -158,16 +169,25 @@ class NativePool(WorkerRuntime):
                 ledger.assert_owned()
                 ledger.assert_mutable(machine_id)
 
-            def request(self, method, suffix="", data=None):
+            @staticmethod
+            def is_probe(method, suffix, data):
+                return (
+                    method == "POST"
+                    and suffix == "/exec"
+                    and data == {"command": ["python", "-I", "-B", "-c", RUNTIME_QUEUE_PROBE], "timeout": 10}
+                )
+
+            def assert_request_allowed(self, method, suffix, data):
+                """Checked before every transmission, replays and re-acquires included."""
                 if method != "GET":
                     ledger.assert_owned()
-                    if not (
-                        method == "POST"
-                        and suffix == "/exec"
-                        and data == {"command": ["python", "-I", "-B", "-c", RUNTIME_QUEUE_PROBE], "timeout": 10}
-                    ):
+                    if not self.is_probe(method, suffix, data):
                         ledger.assert_mutable(machine_id)
-                return super().request(method, suffix, data)
+
+            def request(self, method, suffix="", data=None, *, replay=None):
+                # The exact runtime probe only reads, so it may replay transient failures.
+                self.assert_request_allowed(method, suffix, data)
+                return super().request(method, suffix, data, replay=True if self.is_probe(method, suffix, data) else replay)
 
         return OwnedFly(self.app, machine_id)
 
@@ -176,8 +196,12 @@ class NativePool(WorkerRuntime):
             f"{pool.API}/apps/{quote(self.app, safe='')}/machines",
             headers={"Authorization": "Bearer " + os.environ["FLY_API_TOKEN"]},
         )
-        with urlopen(request, timeout=30) as response:
-            values = json.load(response)
+
+        def read():
+            with urlopen(request, timeout=30) as response:
+                return json.load(response)
+
+        values = pool.replay_transient(read)
         if not isinstance(values, list) or len({m["id"] for m in values}) != len(values):
             raise ValueError("Native inventory is not a complete distinct Machine list")
         return values

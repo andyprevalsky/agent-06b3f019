@@ -23,6 +23,30 @@ def preserve_contract(old, new):
         raise ValueError('repair replaced an original case command or deadline')
 
 
+def aggregate_resplit(old, new):
+    """True when a planner re-split one legacy aggregate case into its per-check cases.
+
+    The old gate ran a single aggregate case named after the gate (one exit for every
+    constituent, so a failure was never attributable). The new gate keeps every other
+    contract field and setup/cleanup unchanged and lists one non-aggregate case per check.
+    No old PASS is carried for such a gate: it is a new inventory and must run again.
+    """
+    if not isinstance(new, dict) or 'worker_recipe' not in old or 'worker_recipe' not in new:
+        return False
+    before, after = old['worker_recipe'], new['worker_recipe']
+    cases, split = before.get('cases', {}), after.get('cases', {})
+    return (old.get('checks') == [old.get('name')] == list(cases) and new.get('name') == old.get('name')
+            and cases[old['name']].get('aggregate') is True
+            and isinstance(split, dict) and len(split) > 1 and set(split) == set(new.get('checks', []))
+            and old['name'] not in split
+            and all(isinstance(case, dict) and case.get('aggregate') is False for case in split.values())
+            and all(case.get(k) == cases[old['name']].get(k) for case in split.values() for k in ('cwd', 'env'))
+            and all({k: v for k, v in old.items() if k not in {'checks', 'worker_recipe'}}.get(k) == v
+                    for k, v in new.items() if k not in {'checks', 'worker_recipe'})
+            and set(old) == set(new)
+            and {k: v for k, v in before.items() if k != 'cases'} == {k: v for k, v in after.items() if k != 'cases'})
+
+
 def validate_recipe(recipe, checks):
     if not isinstance(recipe, dict) or set(recipe.get('cases', {})) != set(checks):
         raise ValueError('worker recipe must cover the full registered check inventory')

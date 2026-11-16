@@ -3349,7 +3349,7 @@ class CaptureReceiptAppendTests(unittest.TestCase):
 
 
 class BillingStopRetainTests(unittest.TestCase):
-    """Real helper/files/locks/timers; transport/PID mocked, deadline-only fsync isolated."""
+    """Real helper/files/locks/timers; transport/PID mocked; deadline-test storage latency isolated."""
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -3835,8 +3835,14 @@ class BillingStopRetainTests(unittest.TestCase):
         self.addCleanup(signal.signal,signal.SIGALRM,prior_handler)
         self.addCleanup(signal.setitimer,signal.ITIMER_REAL,*prior_timer)
         raw_publish=self.ns['publish_bytes']
+        post_deadline=[]
         def delayed_publish(path,data):
             if path.name=='owner-snapshot.private.json':time.sleep(.25)
+            if path.name=='failure.original.private.txt':
+                # The diagnostic is written after the alarm has expired, so no
+                # clock bounds its real file create. Publish it untimed below.
+                post_deadline.append((path,data))
+                return None
             return raw_publish(path,data)
         guest_limits=[]
         def blocking_guest(seconds,*args,**kwargs):
@@ -3856,9 +3862,14 @@ class BillingStopRetainTests(unittest.TestCase):
             elapsed=time.monotonic()-started
         finally:
             signal.setitimer(signal.ITIMER_REAL,0)
+        for path,data in post_deadline:
+            raw_publish(path,data)
         self.assertEqual(result['status'],'PENDING')
         self.assertEqual(self.fly.posts,[])
         self.assertTrue(guest_limits,'actual guest dispatch must be reached')
+        self.assertEqual([path.name for path,data in post_deadline],['failure.original.private.txt'])
+        self.assertEqual((self.receipts/self.mid/'failure.original.private.txt').read_bytes(),
+                         b'billing absolute deadline')
         self.assertLess(elapsed,1.62,'metadata publication was added back to whole-call deadline')
         self.assertEqual(guest_limits,[1],'integer guest timeout must fit remaining original clock')
 

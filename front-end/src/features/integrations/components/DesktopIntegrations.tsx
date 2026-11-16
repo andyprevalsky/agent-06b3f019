@@ -3,9 +3,11 @@
  *
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
- *     · Socials · File System · GitHub Repos (signed in; GithubReposSection: connect
- *     with an optional folder, disconnect) · Meeting note taker (Granola, Fireflies)
- *     · Other (Pebble Index 01, whose Connect opens its setup modal) · CLIs
+ *     · Socials · File System · GitHub Repos · CLIs · MCP servers (signed in; the
+ *     GitHub Repos card; CLIs and MCP servers are ordinary rows with account chips:
+ *     DesktopToolSections)
+ *     · Meeting note taker (Granola, Fireflies) · Wearables (Pebble Index 01, whose Connect opens its setup modal)
+ *     · Other (signed in: "An integration not listed here?" → texts the team; IntegrationRequestSection)
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -18,6 +20,12 @@
  *     /integrations/:name --> full list refetch (the delta poll cannot see
  *     deletes) | error → alert
  *   Gmail / Plaid / compute chips keep their existing disconnect / reconnect flows.
+ *   Every shareable account carries its team-sharing caption (useAccountShares →
+ *     AccountTeamShare; see TeamSharing for its states): beside the chip for iMessage,
+ *     Gmail addresses, WhatsApp, Plaid institutions, LinkedIn, Granola and Fireflies,
+ *     beside the label on each Claude / ChatGPT account line, and on each GitHub repo
+ *     and CLI in their shared cards. Browser Cookies, Passwords, File System, iPhone and
+ *     Pebble Index 01 never show one.
  *
  * System context:
  *   Integrations (flag) → DesktopIntegrations
@@ -27,6 +35,7 @@
  *   Connect / "+ Add account" call the same hooks/actions the stock sections use.
  */
 
+import { useAccountShares } from '@/hooks/useTeams';
 import { integrationMatchesSearch } from '../hooks/integrationSearch';
 import { Fragment, useMemo, type ReactNode } from 'react';
 
@@ -46,7 +55,8 @@ import DesktopIntegrationRow, {
   type DesktopIntegrationView,
 } from './DesktopIntegrationRow';
 import RemoveAccountDialog from './RemoveAccountDialog';
-import CliIntegrationsSection from './CliIntegrationsSection';
+import DesktopToolSections from './DesktopToolSections';
+import IntegrationRequestSection from './IntegrationRequestSection';
 
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
@@ -85,10 +95,12 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
     () => mergeAccountsByProvider(data.connectedIntegrations, progress.accountsByProvider),
     [data.connectedIntegrations, progress.accountsByProvider],
   );
+  const { shareTarget } = useAccountShares();
   const removalPort = { request: removal.request, removingName: removal.removingName };
   const sections = desktopSectionViews(
     { ...props, data: { ...data, connectedIntegrations: integrations } },
     removalPort,
+    shareTarget,
   );
   const anySyncing = sections.some(({ rows }) => rows.some(rowIsSyncing));
   useSyncRefresh(anySyncing, DESKTOP_SYNC_REFRESH_MS, progress.poll);
@@ -96,7 +108,8 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
 
   return (
     <SyncProgressContext.Provider value={{ integrations }}>
-      <div data-testid="rose-desktop-integrations">
+      {/* Every category header gets the same gap above it; only the first stays tight. */}
+      <div data-testid="rose-desktop-integrations" className="[&>section:first-of-type>h3]:mt-1">
         {removal.error !== null && (
           <p role="alert" className="mb-2 text-xs text-destructive">
             {removal.error}
@@ -105,11 +118,14 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
         {sections.map(({ catalogKey, title, description, rows }) => (
           <Fragment key={title}>
             {catalogKey === 'meetingNotes' && props.isFullySignedIn && (
-              <SearchGroup catalogKey="githubRepos" search={props.search}>
-                <div className="my-3">
-                  <GithubReposSection github={props.github} />
-                </div>
-              </SearchGroup>
+              <>
+                <SearchGroup catalogKey="githubRepos" search={props.search}>
+                  <div className="my-3">
+                    <GithubReposSection github={props.github} />
+                  </div>
+                </SearchGroup>
+                <DesktopToolSections search={props.search} />
+              </>
             )}
             <Section
               title={title}
@@ -140,7 +156,7 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
             </Section>
           </Fragment>
         ))}
-        {props.isFullySignedIn && <CliIntegrationsSection desktop />}
+        {props.isFullySignedIn && <IntegrationRequestSection search={props.search} />}
       </div>
       <RemoveAccountDialog
         pending={removal.pending}

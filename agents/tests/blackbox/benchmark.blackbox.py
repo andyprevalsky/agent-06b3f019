@@ -2861,6 +2861,148 @@ async def test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence():
     assert [row["agent_id"] for row in evidence["active_chain"]] == ["root", "out", "d1"]
 
 
+def _auto_reply_question_row(message_id: str, tool_call_id: str, text: str, *, waiting: bool, title: str, status: str):
+    """A send_message_to_user row exactly as the handler persists it (H-69 incident shape)."""
+    return {
+        "message_id": message_id,
+        "role": "TOOL",
+        "text": text,
+        "timestamp": f"2026-11-08T02:21:{55 + len(message_id) % 4}.000Z",
+        "metadata": {
+            "attentionMessage": text,
+            "isUserAttentionMessage": True,
+            "phase": "PLAN",
+            "sendMessageToUser": {"attentionKind": "question", "isQuestion": True, "isWaitingForUser": waiting},
+            "title": title,
+            "toolCallId": tool_call_id,
+            "toolName": "send_message_to_user",
+            "toolStatus": status,
+        },
+    }
+
+
+async def _poll_with_scripted_questions(script):
+    """Run the real _poll_agent against a scripted backend that stores harness posts.
+
+    ``script(rows, posts)`` returns the agent status after mutating the stored
+    rows for this poll; posts are the harness's auto-replies persisted the way
+    POST /api/agents/:id/messages persists them (text plus body metadata).
+    """
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("build-boxing-payment")
+    rows: list[dict] = [
+        {"message_id": "goal", "role": "USER", "text": "Build my dad's signup site", "metadata": {}, "timestamp": "2026-11-08T02:14:10.000Z"}
+    ]
+    posts: list[dict] = []
+
+    async def fake_get_agent(_base, _aid):
+        status = script(rows, posts)
+        return {"agent": {"agent_id": "root", "status": status}, "messages": copy.deepcopy(rows)}
+
+    async def fake_post(_base, _aid, message, metadata=None):
+        row = {
+            "message_id": f"reply-{len(posts) + 1}",
+            "role": "USER",
+            "text": message,
+            "metadata": copy.deepcopy(metadata) if metadata is not None else None,
+            "timestamp": f"2026-11-08T02:22:0{len(posts) * 5}.000Z",
+        }
+        posts.append(row)
+        rows.append(row)
+        return True
+
+    empty_stats = {
+        "agent_count": 0, "total_messages": 0, "total_cost_cents": 0, "active_count": 0, "failed_count": 0,
+        "tree_tokens_in": 0, "tree_tokens_out": 0, "error_agents": [], "all_agents": [],
+    }
+    with (
+        patch.object(bench, "get_agent", side_effect=fake_get_agent),
+        patch.object(bench, "get_attention_requests", AsyncMock(return_value=[])),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench, "post_message", side_effect=fake_post),
+        patch.object(bench, "POLL_INTERVAL", 0),
+        patch.object(bench, "_fetch_tree_stats", AsyncMock(return_value=empty_stats)),
+    ):
+        _data, _triggered, _resolved, failure = await bench._poll_agent("http://x", "root", task, None, {})
+    return rows, posts, failure
+
+
+async def test_auto_reply_to_two_distinct_questions_is_not_a_duplicate_message():
+    """H-69 (e22 build-boxing-payment r3): two questions → two harness replies, not a dual-write.
+
+    The root asked the user twice (distinct send_message_to_user toolCallIds).
+    The harness answered each with the same canned text and no provenance, so
+    no_duplicate_messages read its own second reply as a dual-write and failed
+    the run at 480 s of a 7,200 s budget. Each reply must identify the question
+    it answers; a genuinely double-persisted reply must still be flagged.
+    """
+    from benchmarks.context_validator import validate_context
+
+    q1 = "What discount should the Boxing and Muay Thai code apply?"
+    q2 = "Please specify the discount amount and its duration."
+
+    def script(rows, posts):
+        ids = {row["message_id"] for row in rows}
+        if "q1" not in ids:
+            rows.append(_auto_reply_question_row("q1", "tc-q1", q1, waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if len(posts) >= 1 and "q2" not in ids:
+            rows.append(_auto_reply_question_row("q1-done", "tc-q1", q1, waiting=False, title="User response received", status="FINISHED"))
+            rows.append(_auto_reply_question_row("q2", "tc-q2", q2, waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if len(posts) >= 2 and "q2-done" not in ids:
+            rows.append(_auto_reply_question_row("q2-done", "tc-q2", q2, waiting=False, title="User response received", status="FINISHED"))
+            return "ACTIVE"
+        return "COMPLETED" if "q2-done" in ids else "ACTIVE"
+
+    rows, posts, failure = await _poll_with_scripted_questions(script)
+
+    assert len(posts) == 2, f"one auto-reply per question expected, got {len(posts)}"
+    assert posts[0]["text"] == posts[1]["text"], "the canned reply text itself is unchanged"
+    assert failure is None or "no_duplicate_messages" not in failure, failure
+    duplicate_errors = [v for v in validate_context(rows) if v.rule == "no_duplicate_messages" and v.severity == "error"]
+    assert not duplicate_errors, duplicate_errors
+    # Each reply names the question it answers.
+    answered = [((p["metadata"] or {}).get("benchmarkAutoReply") or {}).get("toolCallId") for p in posts]
+    assert answered == ["tc-q1", "tc-q2"], answered
+    # The validator still catches a real dual-write of one reply.
+    dual_write = copy.deepcopy(posts[0]) | {"message_id": "reply-1-copy", "timestamp": "2026-11-08T02:22:30.000Z"}
+    flagged = [v for v in validate_context([*rows, dual_write]) if v.rule == "no_duplicate_messages" and v.severity == "error"]
+    assert flagged, "a double-persisted harness reply must still be a no_duplicate_messages error"
+
+
+async def test_auto_reply_answers_each_question_once_when_its_wait_is_re_emitted():
+    """The auto-reply is keyed by the question (toolCallId), not by the row id.
+
+    A question's waiting state can be persisted on more than one row (the
+    deploy-handoff 'Waiting for reply' row keeps isWaitingForUser=True for the
+    same toolCallId). Answering per row posted a second canned reply to one
+    question, leaving a stray user message for the next wait to consume.
+    """
+
+    def script(rows, posts):
+        ids = {row["message_id"] for row in rows}
+        if "q1" not in ids:
+            rows.append(_auto_reply_question_row("q1", "tc-q1", "Which plan?", waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if "q1-handoff" not in ids:
+            rows.append(
+                _auto_reply_question_row(
+                    "q1-handoff", "tc-q1", "new code version deployed, retry this tool",
+                    waiting=True, title="Waiting for reply", status="FINISHED",
+                )
+            )
+            return "ACTIVE"
+        return "COMPLETED"
+
+    _rows, posts, failure = await _poll_with_scripted_questions(script)
+
+    assert failure is None, failure
+    assert len(posts) == 1, f"one auto-reply per question expected, got {[p['message_id'] for p in posts]}"
+
+
 def test_tree_feedback_routing_static_checks_grade_routing_and_signatures():
     """Routing checks require outreach delivery, research precision, and corrected drafts."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -3830,6 +3972,77 @@ async def test_agentcard_setup_retries_transient_upstream_failure():
         assert calls == [409]
 
 
+async def test_agentcard_setup_retries_a_timed_out_idempotent_attempt():
+    """Regression (PR #2005 smoke round 4, 2026-11-13): agent-payment-idempotent-abandonment's second
+    setup POST rode out an AgentCard org 429/401 storm inside the backend (list_cardholders attempts
+    1..5) and answered after 31.5 s, past the client's unchanged 30 s request bound. The ReadTimeout
+    escaped the setup retry loop, the task ERRORed before any agent existed and the whole smoke
+    campaign INFRA-stopped. Every setup action is idempotent, so a timed-out attempt spends one of
+    the same scheduled retries as a 5xx; the request bound and the attempt count stay unchanged.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"status":"connected"}'
+
+        def json(self):
+            return {"status": "connected"}
+
+    def fake_client(outcomes):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, timeout):
+                assert timeout == 30, "the per-request bound is unchanged"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                outcome = outcomes[min(len(calls), len(outcomes) - 1)]
+                calls.append(outcome)
+                if outcome == "timeout":
+                    raise bench.httpx.ReadTimeout("")
+                return FakeResponse()
+
+        return FakeClient, calls
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with patch.object(bench, "_api_headers", fake_headers), patch.object(bench.asyncio, "sleep", fake_sleep):
+        client, calls = fake_client(["timeout", 200])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "complete") == {
+                "status": "connected"
+            }
+        assert calls == ["timeout", 200]
+        assert sleeps == [bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS[0]]
+
+        sleeps.clear()
+        client, calls = fake_client(["timeout"])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except bench.httpx.ReadTimeout:
+                pass
+            else:
+                raise AssertionError("a timeout on every attempt must still fail the setup")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+        assert sleeps == list(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+
 async def test_agentcard_setup_retries_only_the_structured_org_rate_limit():
     """2026-11-08 deploy smoke: prepare-residual returned the org-wide MCP throttle.
 
@@ -4195,57 +4408,45 @@ def test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_cust
         assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in task.environment["context_notes"]
 
 
-def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
-    """The PRODUCTION payment tasks must run on an identity that can satisfy their own contract.
+def test_production_payment_lifecycle_tasks_run_as_the_owner_identity():
+    """The PRODUCTION payment tasks run as the owner and can still satisfy their hold contract.
 
-    Only the NON-admin branch of `resolveAndIssuePurchaseCard` authorizes a personal Stripe hold;
-    the admin branch calls `issueAdminCompanyCard`, which never creates a payment intent. The
-    default benchmark user is a hardcoded ADMIN_USER_IDS entry, so leaving a hold-asserting task on
-    it makes the production gate unpassable by construction -- which is exactly how it broke.
-
-    The charge expectation itself is owned by the payment tasks, not by this guard: a task may
-    legitimately declare a personal hold (`stripeHold.status == succeeded`) or the admin no-charge
-    contract (`stripeHold: null`). Pinning one of those here made the guard disagree with a
-    definition that shipped separately. So assert the INVARIANT that actually matters -- a task that
-    expects a hold must not run as an admin -- and let the task own which contract it declares.
+    The admin branch of `resolveAndIssuePurchaseCard` never creates a payment intent. The owner is
+    an admin, so the back-end routes ONLY the owner's benchmark agents onto the charged path against
+    a dedicated live customer (providers/ownerLifecycleBilling.ts). This guard pins that the harness
+    identity and the back-end override key on the same id and stay scoped to benchmark agents.
     """
     import re
 
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
         AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID,
-        AGENT_PAYMENT_LIFECYCLE_USER_ID,
         AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES,
         USER_ID,
         benchmark_run_user_id_for_task,
     )
 
     repo_root = Path(__file__).resolve().parents[3]
-    # Canonical home is providers/: domains/test-payment needs this id too, and a
-    # cross-domain import (or a re-export from a `config` layer) is a structural
-    # violation. The drift guard below is unchanged -- only the path moved.
+    # 2026-11-14 (user directive): the live production probe runs as the OWNER account. The hold is
+    # satisfiable because the back-end scopes the owner's benchmark agents onto the charged path
+    # against a dedicated live customer (providers/ownerLifecycleBilling.ts), keyed on the same id.
     identity_ts = (repo_root / "back-end" / "src" / "providers" / "benchmarkPaymentIdentity.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", identity_ts)
-    assert match, "providers/benchmarkPaymentIdentity.ts must export BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
-    assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
-        "production payment identity drifted between the harness and the back-end: "
-        f"{AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} vs {match.group(1)}"
+    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID = '([^']+)'", identity_ts)
+    assert match, "providers/benchmarkPaymentIdentity.ts must export BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID"
+    assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID == USER_ID, (
+        "owner lifecycle probe identity drifted between the harness and the back-end"
     )
-
-    # Never the default (admin) user, never a hardcoded admin, and never shared with the sandbox
-    # identity: one user holds exactly one Subscription (stripeCustomerId) and one agentcard
-    # Integration (cardholderId), and production needs LIVE values where sandbox needs TEST ones.
-    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID != USER_ID
-    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID != AGENT_PAYMENT_LIFECYCLE_USER_ID
-    admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
-    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID not in admin_ts
+    owner_billing_ts = (
+        repo_root / "back-end" / "src" / "providers" / "ownerLifecycleBilling.ts"
+    ).read_text()
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID" in owner_billing_ts
+    assert "isBenchmarkAgent" in owner_billing_ts, "the override must stay scoped to benchmark agents"
 
     for name in sorted(AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES):
         task = get_task_by_name(name)
         assert task.production_only, f"{name} must stay production_only"
         assert benchmark_run_user_id_for_task(name) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
-            f"{name} must run as the non-admin production payment identity, otherwise a "
-            "stripeHold expectation cannot be satisfied"
+            f"{name} must run as the owner lifecycle identity"
         )
         # The task owns WHICH contract it declares; this guard owns that the declaration is
         # satisfiable by the identity it runs on. A declared hold requires the non-admin path,
@@ -5757,6 +5958,10 @@ async def _exercise_owned_payment_reconciliation_caller(
             clock += 70
             # Provider release is already visible; GET cannot run Rose's compensator.
             return httpx.Response(200, json=deepcopy(pending))
+        if request.method == "POST" and request.url.path == "/api/test-payment/lifecycle/purge":
+            # The owner production probe purges only after its lifecycle verified terminal.
+            assert json.loads(request.content) == {"agentId": agent_id}
+            return httpx.Response(200, json={"agentId": agent_id, "purged": 1})
         raise AssertionError("reconciliation must not create, fund, or issue another payment")
 
     def client(*args, **kwargs):
@@ -5817,7 +6022,14 @@ async def _exercise_owned_payment_reconciliation_caller(
         assert snapshot["messages"] == ready["messages"]
         assert snapshot["_benchmark"]["payment_lifecycle"]["purchase"]["id"] == purchase_id
     assert all(
-        path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"} for _, path, _ in requests
+        path
+        in {
+            "/api/test-payment/lifecycle",
+            "/api/test-payment/lifecycle/abandon",
+            # The owner production probe purges its settled records after a verified cleanup.
+            "/api/test-payment/lifecycle/purge",
+        }
+        for _, path, _ in requests
     )
     assert terminal["integrity"]["cardCount"] == 1
     assert terminal["integrity"]["purchaseCount"] == 1
@@ -6734,6 +6946,83 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
 
 
+async def test_owned_cleanup_abandon_retries_until_the_cleanup_deadline():
+    """Regression (PR #2005 smoke round 5, 2026-11-13): agent-payment-idempotent-abandonment timed
+    out under an AgentCard org throttle. Owned cleanup's abandonment start then gave up after its
+    separate 3-attempt cap (30 s waits on the org 401) about 120 s into the unchanged 180 s cleanup
+    deadline. The driver withheld its cleanup acknowledgement, and the campaign INFRA-stopped. The
+    cleanup deadline is now the one bound: a throttle that clears inside it completes cleanup, and
+    the attempt count can never end the drain before it.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    root, purchase = "00000000-0000-4000-8000-0000000c1ea0", "11111111-2222-4333-8444-555555555555"
+    row = {
+        "purchase_id": purchase,
+        "agent_id": root,
+        "status": "HELD",
+        "funding_status": "FUNDED",
+        "total_cents": 4396,
+        "card_id": "card_cleanup",
+        "stripe_payment_intent_id": "pi_cleanup",
+        "provider_transfer_id": "owt_cleanup",
+        "reclaim_provider_transfer_id": None,
+        "user_id": root,
+        "stripe_customer_id": "cus_cleanup",
+        "stripe_livemode": False,
+    }
+    throttled = Exception(
+        'Failed to abandon test payment: 401 {"error":"AgentCard Organization MCP list_transfers failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+    posts = []
+    refusals = 4  # one more refusal than the old 3-attempt cap allowed
+
+    async def abandon(_base_url, agent_id):
+        posts.append(agent_id)
+        if len(posts) <= refusals:
+            raise throttled
+        return {"purchase": {"status": "VOIDED"}}
+
+    async def lifecycle(_base_url, agent_id, **options):
+        if options == {"stripe_custody": True}:
+            # The drained purchase's read-only Stripe custody: an unspent, cancelled PaymentIntent.
+            return {"agentId": agent_id, "stripeCustody": [{
+                "purchaseId": purchase, "userId": root, "agentId": root, "purchaseStatus": "VOIDED",
+                "paymentIntentId": "pi_cleanup", "customerId": "cus_cleanup", "livemode": False,
+                "status": "canceled", "currency": "usd", "amountCents": 4396, "amountReceivedCents": 0,
+                "amountCapturableCents": 0, "refundedCents": 0, "outcome": "unspent"}]}
+        return {"purchase": {"status": "HELD"}, "walletFunding": {"status": "FUNDED"}}
+
+    def sessions(_base_url, _root, require_deleted=False):
+        released = len(posts) > refusals
+        current = dict(row, status="VOIDED", funding_status="RECLAIMED") if released else dict(row)
+        return {"tree_agent_ids": [root], "root_user_id": root, "purchase_cleanup": [current]}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with (
+        patch.object(bench.asyncio, "sleep", fake_sleep),
+        patch.object(bench, "abandon_test_payment", abandon),
+        patch.object(bench, "get_test_payment_lifecycle", lifecycle),
+        patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=sessions),
+    ):
+        evidence = {}
+        result = await bench._finalize_owned_root_payments("http://backend", root, evidence)
+    assert result["root_agent_id"] == root
+    assert len(posts) == 5, posts
+    assert evidence["payment_snapshot"]["purchase_cleanup"][0]["status"] == "VOIDED"
+
+    # A throttle that never clears is still bounded by the unchanged cleanup deadline, not by the count.
+    assert bench.PAYMENT_CLEANUP_TIMEOUT_SECONDS == 180
+    assert bench.PAYMENT_CLEANUP_ABANDON_ATTEMPTS * 2 > bench.PAYMENT_CLEANUP_TIMEOUT_SECONDS
+
+
 async def test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline():
     """Regression (smoke INFRA stop 2026-11-12, PRs #1975/#1981/#1983): a stalled release always
     runs the real owned payment drain to its deadline, and its stall proof was one provider-backed
@@ -7016,6 +7305,114 @@ async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_can
                 poll_interval_seconds=0,
                 recover_lifecycle=cancelled,
             )
+
+
+async def test_release_stall_survives_failed_final_reads_when_owned_ledger_holds_it():
+    """Regression (PR #2005 smoke round 2, 2026-11-13): agent-payment-abandonment observed the exact
+    release stall, then every later lifecycle read failed in an AgentCard org 401/429 storm. The
+    task-phase deadline refused the stall because its final read failed, so the row was a native
+    ERROR, the gate re-ran the task and would have minted a new card. The last successful in-window
+    observation now qualifies only while a DB-only read of the owned ledger still holds that exact
+    stall; a ledger that left it, a foreign card, or a run without an owned ledger stays strict.
+    """
+    import pytest
+    from copy import deepcopy
+
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("agent-payment-abandonment")
+    stalled = _agentcard_release_stall_lifecycle()
+    storm = RuntimeError(
+        'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP list_cards failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+
+    def ledger(lifecycle, **changes):
+        return {
+            "tree_agent_ids": [lifecycle["agentId"]],
+            "purchase_cleanup": [
+                {
+                    "purchase_id": lifecycle["purchase"]["id"],
+                    "agent_id": lifecycle["agentId"],
+                    "status": "HELD",
+                    "funding_status": "RECLAIMING",
+                    "card_id": lifecycle["purchase"]["cardId"],
+                    "stripe_payment_intent_id": lifecycle["purchase"]["stripePaymentIntentId"],
+                    "total_cents": lifecycle["purchase"]["totalCents"],
+                    "provider_transfer_id": lifecycle["orgTransfer"]["id"],
+                    "reclaim_provider_transfer_id": None,
+                    **changes,
+                }
+            ],
+        }
+
+    async def storm_reads(_base, _aid):
+        raise storm
+
+    async def wait(lifecycle, exact_root_sessions):
+        with (
+            patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=exact_root_sessions),
+        ):
+            return await bench._wait_for_expected_payment_lifecycle(
+                "http://benchmark.invalid",
+                lifecycle["agentId"],
+                task,
+                deepcopy(lifecycle),
+                timeout_seconds=0.05,
+                # The runner's own poll interval paces the failed reads toward the deadline.
+                poll_interval_seconds=0.01,
+                fetch_lifecycle=storm_reads,
+            )
+
+    with pytest.raises(bench.AgentCardReleaseStall) as caught:
+        await wait(stalled, lambda _base, _root: ledger(stalled))
+    assert caught.value.lifecycle["orgTransfer"]["releasedCents"] == 0
+
+    foreign = _agentcard_release_stall_lifecycle(cardId="card_someone_else")
+    for lifecycle, read in (
+        (stalled, lambda _base, _root: ledger(stalled, funding_status="RECLAIM_FAILED")),
+        (stalled, lambda _base, _root: ledger(stalled, card_id="card_other")),
+        (foreign, lambda _base, _root: ledger(foreign)),
+    ):
+        with pytest.raises(RuntimeError) as strict:
+            await wait(lifecycle, read)
+        assert not isinstance(strict.value, bench.AgentCardReleaseStall), lifecycle
+
+    # Round 2's exact exit: the deadline expires inside an owned recovery POST after a failed read.
+    calls = 0
+
+    async def storm_then_slow_recovery(_base, _aid):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise storm
+        await asyncio.Event().wait()  # the recovery never answers; only the owned deadline ends it
+        return deepcopy(stalled)
+
+    with (
+        patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}),
+        patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=lambda _b, _r: ledger(stalled)),
+        pytest.raises(bench.AgentCardReleaseStall),
+    ):
+        await bench._wait_for_expected_payment_lifecycle(
+            "http://benchmark.invalid",
+            stalled["agentId"],
+            task,
+            deepcopy(stalled),
+            timeout_seconds=0.2,
+            poll_interval_seconds=0,
+            recover_lifecycle=storm_then_slow_recovery,
+        )
+
+    def no_owned_ledger(_base, _root):
+        raise RuntimeError("provider verification requires an owned cloud stack")
+
+    with pytest.raises(RuntimeError) as local:
+        await wait(stalled, no_owned_ledger)
+    assert not isinstance(local.value, bench.AgentCardReleaseStall)
+    assert "remained unavailable" in str(local.value)
 
 
 async def test_abandonment_waits_for_cron_reconciliation():
@@ -7663,7 +8060,7 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
 
 
 async def test_production_payment_admission_requires_scoped_live_v2_readiness():
-    """Live billing plus a legacy connection must not admit a paid v2 probe."""
+    """Owner billing plus a legacy connection must not admit a paid v2 probe."""
     import httpx
     import pytest
 
@@ -7685,8 +8082,8 @@ async def test_production_payment_admission_requires_scoped_live_v2_readiness():
         def fixture(request):
             seen.append(request)
             assert request.method == "GET", "admission must never move money"
-            if request.url.path == "/api/credits/usage":
-                return httpx.Response(200, json={"tier": "pro", "remaining": 1000, "stripeLivemode": True})
+            if request.url.path == "/api/test-payment/lifecycle/owner-billing":
+                return httpx.Response(200, json={"configured": True})
             assert request.url.path == "/api/agentcard/status"
             assert request.headers["x-user-id"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
             return httpx.Response(200, json=status)
@@ -7699,14 +8096,13 @@ async def test_production_payment_admission_requires_scoped_live_v2_readiness():
             else:
                 with pytest.raises(RuntimeError, match="live v2"):
                     await bench._preflight_production_payment_identity("https://api.fixture.invalid")
-        assert [r.url.path for r in seen] == ["/api/credits/usage", "/api/agentcard/status"]
+        assert [r.url.path for r in seen] == [
+            "/api/test-payment/lifecycle/owner-billing", "/api/agentcard/status"]
 
 
 async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
-    """the former /deploy skill Step 13c (orig L3407-3434): when the non-admin
-    production identity is missing, `agent-payment-production-abandonment` stops before any live
-    spend and its own error carries the exact provisioning command, the credential source and the
-    guardrails, so the agent that hits it needs no other document and never asks the user."""
+    """Step 13c: when the owner probe's billing pointer is missing, the production abandonment task
+    stops before any live spend and its own error carries the exact setup command and guardrails."""
     import contextlib
     import io
 
@@ -7718,37 +8114,30 @@ async def test_production_payment_identity_gap_fails_closed_with_its_own_provisi
     original_client = httpx.AsyncClient
     seen = []
     printed = io.StringIO()
+    ready = {"connected": True, "apiVersion": 2, "status": "approved",
+             "livemode": True, "fundsSource": "company_flow"}
 
-    def missing_identity(request):
-        seen.append(request)
-        return httpx.Response(200, json={"tier": None, "remaining": 0})
+    def missing_billing(request):
+        seen.append(request.url.path)
+        if request.url.path == "/api/test-payment/lifecycle/owner-billing":
+            return httpx.Response(200, json={"configured": False})
+        return httpx.Response(200, json=ready)
 
     assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME == "agent-payment-production-abandonment"
     assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME in bench.AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES
     with patch.object(bench, "_api_headers", new=AsyncMock(return_value={})), \
          patch.object(bench.httpx, "AsyncClient",
-                      side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing_identity), **kw)):
+                      side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing_billing), **kw)):
         with pytest.raises(RuntimeError) as raised, contextlib.redirect_stdout(printed):
             await bench._preflight_production_payment_identity("https://api.fixture.invalid")
-    assert [(r.url.path, r.url.params.get("userId")) for r in seen] == [
-        ("/api/credits/usage", "00000000-0000-4000-8000-000000000107")]
+    assert seen == ["/api/test-payment/lifecycle/owner-billing", "/api/agentcard/status"]
     message = str(raised.value)
-    command = (
-        "  cd back-end && set -a && . ./.env && set +a && \\\n"
-        '    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
-        "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107\n"
-    )
-    assert command in message
     for rule in (
-        "is not provisioned: it has no Subscription row",
-        "Every credential it needs is already in back-end/.env; do not ask the user",
-        "the 6543 pooler fails",
-        "dedicated benchmark user's normal signed live v2 connection, consent and approved KYC first",
-        "A legacy cardholder is not a v2 connected user",
-        "never create an identity automatically or bypass pending KYC",
-        "never enter a card number",
-        "one-time hosted Stripe Checkout link: a human saves the live card there once",
+        "BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID is not configured on the backend",
+        "npx tsx scripts/setup-benchmark-payment.ts --owner-billing",
+        "normal signed live AgentCard v2 connection with consent and approved KYC",
+        "The owner's own Subscription and billing are never touched",
+        "never enter a card number from a script",
     ):
         assert rule in message, rule
     assert message in printed.getvalue()  # printed in full, not only raised
@@ -8236,6 +8625,153 @@ async def test_required_declared_evaluator_controls_pass_fail():
         ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
         ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
     ]
+
+
+DRIVE_LEASE_DISPLAY_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "benchmarks/fixtures/display_judge_evidence/google_drive_lease_recall_e4_r001_j0007.html"
+)
+
+
+def _drive_lease_displayed_run() -> dict:
+    """The /descend epoch-4 google-drive-lease-recall run (agent 987ebdab, job r001-j0007).
+
+    The agent showed the lease facts in an inline HTML card (`display`) and then
+    finished with a lossy schema card (notice_period_days: 60, pets_allowed: true).
+    """
+    usercontent = (
+        "http://localhost:3001/usercontent/display/987ebdab-28a8-46e7-99e1-c291ece49056/"
+        "47583a952e186f66307e37f9c039dbf1b8bebacdc4707bb2e477a41eee168e6c.html"
+    )
+    pointer = {
+        "id": "e25445ba-980c-894b-a77c-1d0320cc1731",
+        "kind": "page",
+        "mime_type": "text/html",
+        "original_filename": "display.html",
+        "usercontent_url": usercontent,
+    }
+    return {
+        "agent": {"agent_id": "987ebdab-28a8-46e7-99e1-c291ece49056", "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "ASSISTANT",
+                "message": "",
+                "file_pointer": pointer,
+                "metadata": {
+                    "source": "display",
+                    "excludeFromModel": True,
+                    "display": {
+                        "canonical_id": "dsp_711daa049039757caaf588aab65f4164",
+                        "kind": "media",
+                        "media_kind": "page",
+                        "mime_type": "text/html",
+                        "placement": "inline",
+                    },
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "Displayed 1 item(s) inline for the user; text/html.",
+                "metadata": {"toolName": "display", "toolStatus": "FINISHED", "title": "Displayed for the user"},
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "I found the current lease agreement in your Google Drive and extracted the "
+                        "monthly rent, lease end date, required move-out notice, and pet policy.",
+                        "outputs": [
+                            {"key": "monthly_rent", "value": 3450},
+                            {"key": "lease_end_date", "value": "2027-08-31"},
+                            {"key": "notice_period_days", "value": 60},
+                            {"key": "pets_allowed", "value": True},
+                        ],
+                    },
+                },
+            },
+        ],
+    }
+
+
+async def test_declared_judge_sees_the_item_displayed_to_the_user():
+    """A semantic judge reads the displayed answer, not the "Displayed 1 item(s)" stub.
+
+    /descend 2026-11-06 google-drive-lease-recall: the agent showed "Written notice"
+    and "Yes, one cat" in an inline HTML card. Display content was hydrated only for
+    tasks with display static checks, so the judge saw the stub plus the lossy schema
+    card and failed a correct answer.
+    """
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
+
+    task = get_task_by_name("google-drive-lease-recall")
+    judge = next(e for e in task.evaluators if e["method"] == "single_turn_llm_judge")
+    assert not any(
+        check.get("type") in {"display_media_shown", "display_artifact_figures"}
+        for evaluator in task.evaluators
+        for check in evaluator.get("checks", [])
+    ), "the regression is about judge-only tasks"
+    html = DRIVE_LEASE_DISPLAY_FIXTURE.read_bytes()
+    data = _drive_lease_displayed_run()
+    fetched: list[str] = []
+
+    class _Response:
+        status_code = 200
+        content = html
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, *args, **kwargs):
+            fetched.append(url)
+            return _Response()
+
+    captured: list[list[dict]] = []
+
+    async def fake_judge(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
+        if evaluator_arg["id"] == judge["id"]:
+            captured.append(evidence)
+        return {"score": 1.0, "reasoning": "captured"}
+
+    async def no_tree(data_arg, base_url):
+        data_arg.setdefault("_semantic_evaluator_tree", {})
+
+    with (
+        patch.object(bench, "_call_declared_llm_judge", fake_judge),
+        patch.object(bench, "_hydrate_semantic_evaluator_tree", no_tree),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+    ):
+        await bench._run_declared_evaluators(task, data, base_url="http://bench-backend:3001")
+
+    assert fetched and fetched[0].endswith(
+        "47583a952e186f66307e37f9c039dbf1b8bebacdc4707bb2e477a41eee168e6c.html"
+    ), f"displayed item was never fetched for the judge: {fetched}"
+    assert len(captured) == 1
+    shown = [row for row in captured[0] if row.get("metadata", {}).get("evidence_type") == "displayed_to_user"]
+    assert len(shown) == 1, [row.get("metadata") for row in captured[0]]
+    assert shown[0]["role"] == "ASSISTANT"
+    assert "Written notice" in shown[0]["text"] and "Yes, one cat" in shown[0]["text"]
+    assert shown[0]["metadata"]["mime_type"] == "text/html"
+    # The bounded row is the only copy; benchmark_state keeps the artifact's metadata.
+    state = next(row["benchmark_state"] for row in captured[0] if "benchmark_state" in row)
+    assert all("text" not in artifact for artifact in state["display_artifacts"])
+    agentic = build_agentic_evidence(data)
+    assert any(
+        row.get("metadata", {}).get("evidence_type") == "displayed_to_user" and "Yes, one cat" in row["text"]
+        for row in agentic["messages"]
+    )
 
 
 def test_declared_evaluator_evidence_includes_payment_approval_metadata():
@@ -9820,13 +10356,115 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert "Attention request (write_lock)" in supplemental
 
 
+def test_doordash_food_plan_cart_reauth_receives_pinned_manifest():
+    """Every task pinning the food-plan manifest gets it in its goal and judge checklist.
+
+    Regression (descend H-33, 2026-11-06): the manifest fixture, goal and judge
+    checklist were keyed to the grocery-order task name only. The cart-reauth
+    sibling pins the same ``manifest_source`` and asks for "every required
+    Safeway manifest line item", but its agent received no manifest (explore:
+    "manifest does NOT exist in any reachable local data source") and its judge
+    received no canonical checklist. The cart-reauth goal must keep its own
+    guest/stop-at-auth contract rather than the order task's checkout prompt.
+    """
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    cart = get_task_by_name("browser-doordash-food-plan-grocery-cart-reauth")
+    order = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    unrelated = get_task_by_name("browser-doordash-usb-c-cable")
+    assert cart.pinned_facts["manifest_source"] == order.pinned_facts["manifest_source"]
+
+    checkout_manifest = (
+        "Checkout-ready one-week manifest\n### Safeway — main grocery order\n"
+        "| 93/7 lean ground beef | 2.5 lb |\n| Kodiak Power Cakes mix | 1 |"
+    )
+    execute_prompt = "SAFEWAY MANIFEST: 93/7 lean ground beef 2.5 lb. Complete checkout at Safeway."
+    prior_cache = dict(bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE)
+    prior_goal_override = os.environ.pop("BENCHMARK_GOAL_OVERRIDE", None)
+    try:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE["apply"] = {
+            "benchmark_goal": execute_prompt,
+            "checkout_manifest": checkout_manifest,
+        }
+        goal = bench._benchmark_goal_for_task(cart, "http://localhost:3001")
+        # The agent receives the pinned manifest table it is told to fill ...
+        assert checkout_manifest in goal
+        # ... under its own guest / stop-at-auth contract, not the order checkout prompt.
+        assert goal.startswith(cart.prompt.rstrip())
+        assert "Complete checkout at Safeway" not in goal
+        judge_requirement = bench._doordash_food_plan_task_requirement_for_judge(cart)
+        assert judge_requirement == goal
+        judge_manifest = bench._doordash_food_plan_manifest_context_for_judge(cart)
+        assert checkout_manifest in judge_manifest
+        assert "authoritative checkout manifest table" in judge_manifest.lower()
+        # The judge sees only what this agent received: never the order task's
+        # execute prompt / checkout contract.
+        assert execute_prompt not in judge_manifest
+        assert "Complete checkout at Safeway" not in judge_manifest
+        assert "execute manifest text" not in judge_manifest.lower()
+
+        # The order task keeps its prod execute prompt override unchanged.
+        order_goal = bench._benchmark_goal_for_task(order, "http://localhost:3001")
+        assert order_goal.startswith(execute_prompt)
+        assert checkout_manifest in bench._doordash_food_plan_manifest_context_for_judge(order)
+
+        assert execute_prompt in bench._doordash_food_plan_manifest_context_for_judge(order)
+
+        # Unrelated DoorDash tasks never receive the food-plan manifest.
+        assert bench._doordash_food_plan_manifest_context_for_judge(unrelated) == ""
+        assert checkout_manifest not in bench._benchmark_goal_for_task(unrelated, "http://localhost:3001")
+
+        # A frozen fixture without the checkout table must fail closed for the
+        # sibling rather than silently sending the manifest-less task prompt.
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE["apply"] = {"benchmark_goal": execute_prompt}
+        original_frozen = bench._doordash_food_plan_frozen_fixture
+        bench._doordash_food_plan_frozen_fixture = lambda: {
+            "execute_prompt": execute_prompt,
+            "checkout_manifest": "",
+        }
+        try:
+            try:
+                bench._doordash_food_plan_prompt_override(cart)
+            except RuntimeError as exc:
+                assert "checkout_manifest" in str(exc)
+            else:
+                raise AssertionError("cart-reauth goal resolved without a checkout manifest")
+            # The judge falls back to the catalog prompt instead of raising.
+            assert bench._doordash_food_plan_task_requirement_for_judge(cart) == cart.prompt
+            assert bench._doordash_food_plan_manifest_context_for_judge(cart) == ""
+        finally:
+            bench._doordash_food_plan_frozen_fixture = original_frozen
+    finally:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.update(prior_cache)
+        if prior_goal_override is not None:
+            os.environ["BENCHMARK_GOAL_OVERRIDE"] = prior_goal_override
+
+    # The pre-run fixture apply covers every manifest-pinned task, not one name.
+    applied: list[str] = []
+    original_run = bench._run_doordash_food_plan_fixture
+    bench._run_doordash_food_plan_fixture = lambda action: applied.append(action) or {"execute_prompt_chars": 1}
+    try:
+        for task in (cart, order, unrelated):
+            bench._prepare_doordash_food_plan_fixture(task, "http://localhost:3001")
+    finally:
+        bench._run_doordash_food_plan_fixture = original_run
+    assert applied == ["apply", "apply"]
+    # Both tasks upsert the same shared user profile, so both run exclusively.
+    assert cart.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert order.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+
+
 def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():
     """Guest checkout domains stay scoped without requiring an injectable CookieBundle."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
+    # browser-opentable-reservation moved to the signed-in list by owner
+    # decision (2026-11-09).
     guest_checkout_tasks = (
         "browser-toast-nopa-write-lock",
-        "browser-opentable-reservation",
         "browser-alchemy-springs-sauna",
         "browser-hotel-booking",
         "browser-event-ticket",
@@ -9843,10 +10481,41 @@ def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_require
         "browser-agent-amazon-cookie-payment": "amazon.com",
         "browser-amazon-return": "amazon.com",
         "minted-agent-accounts-uber": "uber.com",
+        "browser-opentable-reservation": "opentable.com",
     }
     for task_name, domain in authenticated_tasks.items():
         env = get_task_by_name(task_name).environment
         assert env["required_injectable_cookie_domains"] == [domain]
+
+    # Tasks whose prompts or evaluators need a signed-in account are flagged
+    # needs_auth with their live cookie domains required (owner decision 2026-11-09).
+    for task_name in (
+        "browser-agent",
+        "browser-agent-amazon-cookie-payment",
+        "browser-opentable-reservation",
+        "browser-amazon-return",
+        "browser-agent-amazon-mx-buy-under-5-usd",
+        "anti-bot-doordash-store",
+        "anti-bot-amazon-beanie-cart",
+        "anti-bot-x-login-home",
+        "anti-bot-linkedin-data-export-page",
+        "browser-doordash-food-plan-grocery-order",
+    ):
+        env = get_task_by_name(task_name).environment
+        assert env.get("needs_auth") is True, task_name
+        assert env["required_injectable_cookie_domains"] == env["live_cookie_domains"], task_name
+    for task_name in (
+        "browser-agent-amazon-passkey",
+        "browser-toast-nopa-write-lock",
+        "browser-alchemy-springs-sauna",
+        "browser-hotel-booking",
+        "browser-event-ticket",
+        "browser-imax-group-tickets",
+        "browser-1015-eventim-request-card",
+        "minted-agent-accounts-uber",
+        "minted-agent-accounts-x",
+    ):
+        assert get_task_by_name(task_name).environment.get("needs_auth") is not True, task_name
 
     # The passkey task deliberately starts signed out and must not require a
     # CookieBundle merely because its passkey sync is scoped to amazon.com.
@@ -13673,6 +14342,32 @@ def test_tamy_identity_fixture_declaration_drives_the_run_user():
     ]
 
 
+async def test_owner_probe_purges_records_when_lifecycle_already_reconciled():
+    """Live owner run 2026-11-15 (agent 5728b052): the production probe passed through the
+    already-reconciled branch of ensure_payment_lifecycle_cleanup, which returned before the purge,
+    leaving the probe purchase on the owner account."""
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+
+    task = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    sandbox = bench.get_task_by_name("agent-payment-abandonment")
+    reconciled = {"purchase": {"status": "VOIDED"}}
+    for current, expected_purges in ((task, 1), (sandbox, 0)):
+        purge = AsyncMock()
+        with (
+            patch.object(bench, "_validate_payment_lifecycle", return_value=None),
+            patch.object(bench, "purge_owner_lifecycle_records", purge),
+        ):
+            result = await bench.ensure_payment_lifecycle_cleanup(
+                "https://benchmark.invalid", "agent-reconciled", current, current_lifecycle=reconciled
+            )
+        assert result is reconciled
+        assert purge.await_count == expected_purges, (current.name, purge.await_count)
+        if expected_purges:
+            purge.assert_awaited_once_with("https://benchmark.invalid", "agent-reconciled")
+
+
 async def test_parallel_tasks_keep_their_own_run_user():
     """A parallel sibling can neither borrow nor erase another task's run identity.
 
@@ -13693,6 +14388,11 @@ async def test_parallel_tasks_keep_their_own_run_user():
     base_url = "https://bench-run-user.invalid"
     sibling = bench.get_task_by_name("chat-mode")
     payer = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    # The production payer now runs as the owner (the default user); pin a distinct synthetic
+    # identity so this regression still exercises a non-default run user beside a default sibling.
+    distinct_payer = "00000000-0000-4000-8000-0000000000aa"
+    identity_patch = patch.object(bench, "AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID", distinct_payer)
+    identity_patch.start()
     payer_user = bench.benchmark_run_user_id_for_task(payer.name)
     assert payer_user and payer_user != bench.USER_ID
     assert bench.benchmark_run_user_id_for_task(sibling.name) is None
@@ -13740,6 +14440,7 @@ async def test_parallel_tasks_keep_their_own_run_user():
 
     assert sibling_result.status == "ERROR", sibling_result
     assert isinstance(payer_result, RuntimeError), payer_result
+    identity_patch.stop()
     assert seen == {"sibling": bench.USER_ID, "payer": payer_user}, seen
     assert leaked_user is None
     assert user_after_run == bench.USER_ID
@@ -26616,12 +27317,37 @@ def test_predeploy_selector_machine_formats_at_cap():
 
 def test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke():
     from benchmarks.select_predeploy_benches_test import (
-        test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures,
+        test_agentcard_sandbox_lifecycle_tasks_are_smoke_floor_only_on_agentcard_infra_change,
     )
 
     for surface in ("local", "cloud"):
         with tempfile.TemporaryDirectory() as folder:
-            test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(Path(folder), surface)
+            test_agentcard_sandbox_lifecycle_tasks_are_smoke_floor_only_on_agentcard_infra_change(Path(folder), surface)
+
+
+def test_predeploy_selector_gates_agentcard_tasks_on_agentcard_infra():
+    """Rule 5 (Andy 2026-11-15): AgentCard tasks run on /deploy only when AgentCard infra changed."""
+    from benchmarks.select_predeploy_benches_test import (
+        AGENTCARD_INFRA_DIFFS,
+        NON_AGENTCARD_DIFFS,
+        test_agentcard_infra_diff_keeps_hard_cap_scream,
+        test_agentcard_infra_diff_selects_every_agentcard_task,
+        test_catalog_agentcard_tasks_are_identified_from_catalog_fields,
+        test_deploy_prod_agentcard_lane_uses_selector_path_set,
+        test_non_agentcard_diff_selects_zero_agentcard_tasks,
+    )
+
+    test_catalog_agentcard_tasks_are_identified_from_catalog_fields()
+    test_deploy_prod_agentcard_lane_uses_selector_path_set()
+    for surface in ("local", "cloud"):
+        for changed in NON_AGENTCARD_DIFFS:
+            with tempfile.TemporaryDirectory() as folder:
+                test_non_agentcard_diff_selects_zero_agentcard_tasks(Path(folder), surface, changed)
+        for path in AGENTCARD_INFRA_DIFFS:
+            with tempfile.TemporaryDirectory() as folder:
+                test_agentcard_infra_diff_selects_every_agentcard_task(Path(folder), surface, path)
+    with tempfile.TemporaryDirectory() as folder:
+        test_agentcard_infra_diff_keeps_hard_cap_scream(Path(folder))
 
 
 async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, judge_cases):
@@ -28028,6 +28754,10 @@ async def run_all_tests():
         "owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup
     )
     await r.record_async(
+        "owned_cleanup_abandon_retries_until_the_cleanup_deadline",
+        test_owned_cleanup_abandon_retries_until_the_cleanup_deadline,
+    )
+    await r.record_async(
         "owned_release_stall_proof_survives_auth_flap_within_deadline",
         test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline,
     )
@@ -28038,6 +28768,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_release_policy_fetch_cancel_strict",
         test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
+    )
+    await r.record_async(
+        "release_stall_survives_failed_final_reads_with_owned_ledger",
+        test_release_stall_survives_failed_final_reads_when_owned_ledger_holds_it,
     )
     await r.record_async(
         "agentcard_release_policy_fresh_stall_after_recovered_read_error",
@@ -28061,6 +28795,9 @@ async def run_all_tests():
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
+    r.record(
+        "predeploy_selector_agentcard_infra_gate", test_predeploy_selector_gates_agentcard_tasks_on_agentcard_infra
+    )
     from benchmarks.select_predeploy_benches_test import (
         test_catalog_validation_requires_ready_task_deploy_category,
         test_selector_treats_explicit_deploy_opt_out_as_uncategorized,
@@ -28962,6 +29699,14 @@ async def run_all_tests():
         "mid_run_feedback_depth_trigger_poll_loop",
         test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence,
     )
+    await r.record_async(
+        "auto_reply_to_two_distinct_questions_is_not_a_duplicate_message",
+        test_auto_reply_to_two_distinct_questions_is_not_a_duplicate_message,
+    )
+    await r.record_async(
+        "auto_reply_answers_each_question_once_when_its_wait_is_re_emitted",
+        test_auto_reply_answers_each_question_once_when_its_wait_is_re_emitted,
+    )
     r.record(
         "fly_infra_detector_ignores_placeholders",
         test_fly_infra_detector_ignores_collector_placeholders,
@@ -29027,6 +29772,10 @@ async def run_all_tests():
         test_agentcard_setup_retries_transient_upstream_failure,
     )
     await r.record_async(
+        "agentcard_setup_retries_a_timed_out_idempotent_attempt",
+        test_agentcard_setup_retries_a_timed_out_idempotent_attempt,
+    )
+    await r.record_async(
         "agentcard_setup_retries_only_the_structured_org_rate_limit",
         test_agentcard_setup_retries_only_the_structured_org_rate_limit,
     )
@@ -29059,8 +29808,8 @@ async def run_all_tests():
         test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path,
     )
     r.record(
-        "production_payment_lifecycle_user_is_non_admin",
-        test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity,
+        "production_payment_lifecycle_user_is_owner",
+        test_production_payment_lifecycle_tasks_run_as_the_owner_identity,
     )
     r.record(
         "admin_bypass_gate_grants_synthetic_admin",
@@ -29286,6 +30035,10 @@ async def run_all_tests():
         "declared_evaluator_evidence_normalized_completion_card",
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
     )
+    await r.record_async(
+        "declared_judge_sees_the_item_displayed_to_the_user",
+        test_declared_judge_sees_the_item_displayed_to_the_user,
+    )
     r.record(
         "declared_evaluator_evidence_includes_structured_output_first",
         test_declared_evaluator_evidence_includes_structured_output_first,
@@ -29369,6 +30122,10 @@ async def run_all_tests():
     r.record(
         "doordash_food_plan_grocery_repro_contract",
         test_doordash_food_plan_grocery_repro_contract,
+    )
+    r.record(
+        "doordash_food_plan_cart_reauth_receives_pinned_manifest",
+        test_doordash_food_plan_cart_reauth_receives_pinned_manifest,
     )
     r.record(
         "live_cookie_scope_separate_from_injectable_cookie_requirement",
@@ -29653,6 +30410,10 @@ async def run_all_tests():
     r.record(
         "tamy_identity_fixture_declaration_drives_run_user",
         test_tamy_identity_fixture_declaration_drives_the_run_user,
+    )
+    await r.record_async(
+        "owner_probe_purges_records_when_lifecycle_already_reconciled",
+        test_owner_probe_purges_records_when_lifecycle_already_reconciled,
     )
     await r.record_async(
         "parallel_tasks_keep_their_own_run_user",

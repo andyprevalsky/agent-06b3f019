@@ -67,10 +67,14 @@ test('pool-default benchmark override serves a pool exactly as production would'
   assert.ok(SUPERVISOR_LLM_SOURCE.includes('benchmarkSupervisorTokenType() !== undefined'));
 });
 
-test('dumps every supervisor call for replay (dev only)', () => {
+test('archives every supervisor call under the per-user root', () => {
   // Without a dump_context the supervisor's raw request/response was never
   // captured, so an empty-tool-call round could not be inspected or replayed.
-  assert.ok(SUPERVISOR_LLM_SOURCE.includes("dump_context: { call_site: 'sms_supervisor'"));
+  // Supervisor turns act on no agent tree: they bind the documented `user-<userId>` root.
+  assert.match(
+    SUPERVISOR_LLM_SOURCE,
+    /dump_context: \{\s*call_site: 'sms_supervisor',\s*agent_id: `sms-supervisor-\$\{userId\}`,\s*root_agent_id: userArchiveRoot\(userId\),/
+  );
 });
 
 test('keeps the full grep surface — the union limit is not a reason to cut tools', () => {

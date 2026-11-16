@@ -610,7 +610,7 @@ def _build_claude_auth_context(
     if not claude_token:
         return None
 
-    if source not in ("user", "pool") or not user_id:
+    if source not in ("user", "team", "pool") or not user_id:
         return claude_auth_from_token(claude_token)
 
     async def _mark_rate_limited(
@@ -624,7 +624,7 @@ def _build_claude_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
-            integration_id=integration_id if ctx.source == "user" else None,
+            integration_id=integration_id if ctx.source in ("user", "team") else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
@@ -694,7 +694,7 @@ def _build_gpt_auth_context(
     if not gpt_token:
         return None
 
-    if source not in ("user", "pool") or not user_id:
+    if source not in ("user", "team", "pool") or not user_id:
         return gpt_auth_from_token(gpt_token, account_id)
 
     async def _mark_rate_limited(
@@ -708,7 +708,7 @@ def _build_gpt_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
-            integration_id=integration_id if ctx.source == "user" else None,
+            integration_id=integration_id if ctx.source in ("user", "team") else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
@@ -1213,13 +1213,13 @@ def build_verifier_context_messages(
         if role == "ASSISTANT":
             if metadata.get("plannedToolName") == "reasoning":
                 reasoning_payload = {
-                    "tool_name": "reasoning",
+                    "source": "reasoning",
                     "result": text,
                 }
                 dag_task_index = metadata.get("dagTaskIndex")
                 if isinstance(dag_task_index, int):
                     reasoning_payload["dag_task_index"] = dag_task_index
-                current_batch.append("TOOL_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str))
+                current_batch.append("AUTHORED_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str))
             _append_file_evidence(msg)
             continue
 
@@ -1309,7 +1309,7 @@ def build_verifier_context_messages(
             # covers resolved file pointers; spawn_agent / artifact_file tool
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
-            dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
+            dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str, separators=(",", ":"))
             if str(call_site or "") == "benchmark_declared_evaluator" or (
                 metadata.get("benchmark_final_evidence") is True
                 and call_site == "semantic_output_field_recovery_judge"
@@ -1706,14 +1706,21 @@ def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[
             first_execute_idx = idx
             break
 
-    if first_execute_idx is None:
-        boundary_idx: Optional[int] = None
-        for idx, msg in enumerate(sorted_context):
-            if _is_execute_boundary_message(msg):
-                boundary_idx = idx
-        if boundary_idx is None:
-            return context
+    boundary_idx: Optional[int] = None
+    transition_idx: Optional[int] = None
+    for idx, msg in enumerate(sorted_context):
+        if _is_execute_boundary_message(msg):
+            boundary_idx = idx
+            if (msg.get("metadata") or {}).get("toolName") == "attempt_completion":
+                transition_idx = idx
+    if transition_idx is not None:
+        # DAG reasoning can precede the first EXECUTE-tagged status chip.
+        # The explicit transition already establishes that work as execution.
+        first_execute_idx = min(first_execute_idx, transition_idx + 1) if first_execute_idx is not None else transition_idx + 1
+    elif first_execute_idx is None and boundary_idx is not None:
         first_execute_idx = boundary_idx + 1
+    if first_execute_idx is None:
+        return context
 
     execute_context: List[Dict[str, Any]] = []
     if goal_idx is not None and goal_idx < first_execute_idx:
@@ -3114,6 +3121,7 @@ async def call_llm_structured_streaming(
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
     reserved_tool_call_ids: frozenset[str] = frozenset(),  # Stored ids new tool calls must not reuse
+    include_reasoning_in_response: bool = True,  # Authored-output callers keep the provider's answer field exact
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
@@ -3772,6 +3780,7 @@ async def call_llm_structured_streaming(
                 tool_choice=tool_choice,
                 context_tools=context_tools,
                 reserved_tool_call_ids=reserved_tool_call_ids,
+                include_reasoning_in_response=include_reasoning_in_response,
                 _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
                 _parse_retry_attempt=_parse_retry_attempt,
@@ -3985,7 +3994,7 @@ async def call_llm_structured_streaming(
 
             combined_reasoning = "\n\n".join(part for part in combined_reasoning_parts if part)
 
-            if combined_reasoning and "response" in parsed_content:
+            if include_reasoning_in_response and combined_reasoning and "response" in parsed_content:
                 parsed_content["response"] = combined_reasoning + "\n\n" + parsed_content["response"]
 
             response = response_model.model_validate(parsed_content)
@@ -4070,6 +4079,7 @@ async def call_llm_structured_streaming(
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
                     reserved_tool_call_ids=reserved_tool_call_ids,
+                    include_reasoning_in_response=include_reasoning_in_response,
                     _exclude_anthropic_family=_exclude_anthropic_family,
                     _is_escalation=_is_escalation,
                     _parse_retry_attempt=_parse_retry_attempt + 1,
@@ -4233,6 +4243,19 @@ async def call_llm_structured_streaming(
     final_response = None
     chunk_count = 0
 
+    direct_dump = _archive_direct_openrouter_start(
+        call_site,
+        messages,
+        model=model,
+        agent_id=agent_id,
+        config={
+            "mode": "instructor_json_partial",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "response_model": response_model.__name__ if response_model else None,
+            **extra_args,
+        },
+    )
     # Use create_partial for streaming
     try:
         async for partial in client.chat.completions.create_partial(
@@ -4269,15 +4292,29 @@ async def call_llm_structured_streaming(
         if accumulated_text and accumulated_text != last_emitted_for_chunk:
             await on_chunk(accumulated_text, len(accumulated_text) // 4)
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancelled:
         logger.info("⏹️ OpenRouter streaming cancelled (asyncio.CancelledError)")
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(final_response, model, cancelled)
+        )
         raise
     except Exception as e:
         logger.error(f"Streaming LLM call failed: {str(e)}", model=model)
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(final_response, model, e)
+        )
         raise
 
     if final_response is None:
-        raise ValueError(f"Streaming LLM returned no response (model={model})")
+        empty = ValueError(f"Streaming LLM returned no response (model={model})")
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(None, model, empty)
+        )
+        raise empty
+
+    # The archive keeps the model's output exactly as received; deduplication
+    # below shapes only the response returned to the caller.
+    archived_response = _direct_openrouter_response_snapshot(final_response)
 
     # Deduplicate single-call-per-step tools (keep only first occurrence)
     # These tools should never be called more than once in the same response
@@ -4302,8 +4339,74 @@ async def call_llm_structured_streaming(
         "total_tokens": estimated_tokens,
         "cancelled": False,
     }
+    _archive_direct_openrouter_final(
+        direct_dump,
+        model=model,
+        output={
+            **archived_response,
+            "usage": {**usage, "estimated": True},
+            "actual_model": model,
+        },
+    )
 
     return final_response, usage, []  # No tool detection in OpenRouter path
+
+
+def _archive_direct_openrouter_start(
+    call_site: str,
+    messages: List[Dict[str, Any]],
+    *,
+    model: str,
+    agent_id: Optional[str],
+    config: Dict[str, Any],
+) -> Optional[str]:
+    """Start record for a non-Rose (direct OpenRouter SDK) call; never raises."""
+    try:
+        from helpers.observability import dump_llm_context
+
+        return dump_llm_context(
+            call_site,
+            messages,
+            agent_id=agent_id,
+            model=model,
+            config={"provider": "openrouter_direct", **config},
+        )
+    except Exception:
+        logger.debug("llm.direct_openrouter.dump_start_failed", call_site=call_site, exc_info=True)
+        return None
+
+
+def _direct_openrouter_response_snapshot(response: Any) -> Dict[str, Any]:
+    """Serialized view of an Instructor (partial) response at this moment."""
+    return {
+        "content": response.model_dump_json() if hasattr(response, "model_dump_json") else str(response),
+        "structured": response.model_dump() if hasattr(response, "model_dump") else None,
+    }
+
+
+def _direct_openrouter_terminal_output(partial: Any, model: str, error: BaseException) -> Dict[str, Any]:
+    """Final record for a direct call that failed, was cancelled or streamed nothing.
+
+    Runs inside the caller's except block, so it never raises over the original error.
+    """
+    output: Dict[str, Any] = {"content": "", "structured": None}
+    if partial is not None:
+        try:
+            output = _direct_openrouter_response_snapshot(partial)
+        except Exception:
+            logger.debug("llm.direct_openrouter.partial_snapshot_failed", exc_info=True)
+    return {**output, "actual_model": model, "error": {"type": type(error).__name__, "message": str(error)}}
+
+
+def _archive_direct_openrouter_final(handle: Optional[str], *, model: Optional[str], output: Dict[str, Any]) -> None:
+    if not handle:
+        return
+    try:
+        from helpers.observability import update_llm_dump
+
+        update_llm_dump(handle, model=model, output={"provider": "openrouter_direct", **output})
+    except Exception:
+        logger.debug("llm.direct_openrouter.dump_final_failed", exc_info=True)
 
 
 def _extract_completed_tool_calls(accumulated_json: str) -> List[Dict[str, Any]]:
@@ -4728,13 +4831,51 @@ async def call_llm(
         # Use OpenRouter for all other models
         client = AsyncOpenAI(api_key=config.openrouter.api_key, base_url=config.openrouter.base_url)
 
-        # Call OpenRouter
-        response = await client.chat.completions.create(
+        direct_dump = _archive_direct_openrouter_start(
+            call_site,
+            messages,
             model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=effective_response_format,
+            agent_id=agent_id,
+            config={
+                "mode": "chat_completions",
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": effective_response_format,
+            },
+        )
+        # Call OpenRouter
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=effective_response_format,
+            )
+        except (Exception, asyncio.CancelledError) as direct_error:
+            _archive_direct_openrouter_final(
+                direct_dump, model=model, output=_direct_openrouter_terminal_output(None, model, direct_error)
+            )
+            raise
+        direct_message = response.choices[0].message.model_dump() if response.choices else {}
+        _archive_direct_openrouter_final(
+            direct_dump,
+            model=response.model,
+            output={
+                "content": direct_message.get("content") or "",
+                "reasoning": direct_message.get("reasoning") or "",
+                "reasoning_blocks": [
+                    {"type": "openrouter_reasoning_detail", "raw": detail}
+                    for detail in direct_message.get("reasoning_details") or []
+                ],
+                "tool_calls": direct_message.get("tool_calls") or [],
+                "message": direct_message,
+                "usage": {
+                    **(response.usage.model_dump() if response.usage else {}),
+                    "finish_reason": response.choices[0].finish_reason if response.choices else None,
+                },
+                "actual_model": response.model,
+            },
         )
 
         # Log full response to debug
@@ -5567,16 +5708,6 @@ def _fill_missing_verifier_output_from_messages(
     return parsed_json
 
 
-def _schema_field_names(response_schema: Optional[Dict[str, Any]]) -> List[str]:
-    if not response_schema or not isinstance(response_schema.get("fields"), list):
-        return []
-    return [
-        field.get("name")
-        for field in response_schema.get("fields", [])
-        if isinstance(field, dict) and isinstance(field.get("name"), str) and field.get("name")
-    ]
-
-
 _POINTER_FIELD_TYPES = frozenset(
     {"file_pointer", "session_file_pointer", "list[file_pointer]", "list[session_file_pointer]"}
 )
@@ -5712,24 +5843,6 @@ def _structured_response_satisfies_schema(
     return True
 
 
-_COMPLETED_CHILD_SYNTHETIC_PREFIX = "completed-child-attempt-completion-"
-
-
-def _completed_child_handoff_identity(tool_call_id: Any) -> str:
-    """Return a stable, non-reversible identity for a completed child call."""
-    if not isinstance(tool_call_id, str) or not tool_call_id:
-        return ""
-    return hashlib.sha256(tool_call_id.encode("utf-8")).hexdigest()[:16]
-
-
-def _synthetic_completion_handoff_identity(tool_call_id: Any) -> Optional[str]:
-    if not isinstance(tool_call_id, str) or not tool_call_id.startswith(_COMPLETED_CHILD_SYNTHETIC_PREFIX):
-        return None
-    suffix = tool_call_id[len(_COMPLETED_CHILD_SYNTHETIC_PREFIX) :]
-    match = re.match(r"^([0-9a-f]{16})-", suffix)
-    return match.group(1) if match else None
-
-
 def _is_from_ancestor_agent(metadata: Dict[str, Any]) -> bool:
     """True when an agent message's sender is above its recipient in the agent tree."""
     sender = metadata.get("fromAgentPath")
@@ -5737,102 +5850,6 @@ def _is_from_ancestor_agent(metadata: Dict[str, Any]) -> bool:
     if not isinstance(sender, str) or not isinstance(recipient, str) or not sender:
         return False
     return recipient.startswith(sender.rstrip("/") + "/")
-
-
-def _is_rejected_completion_feedback(metadata: Dict[str, Any]) -> bool:
-    if metadata.get("toolName") != "attempt_completion" or metadata.get("toolStatus") != "FINISHED":
-        return False
-    title = str(metadata.get("title") or "")
-    if "Verifier rejected" in title:
-        return True
-    progress_match = re.search(r"Progress:\s*(\d+(?:\.\d+)?)%", title)
-    return bool(progress_match and float(progress_match.group(1)) < 100.0)
-
-
-def _completed_child_task_structured_handoff(
-    context: List[Dict[str, Any]],
-    response_schema: Optional[Dict[str, Any]],
-) -> Optional[Tuple[Dict[str, Any], str]]:
-    """Return a completed child's structured output and source tool-call id.
-
-    This is deliberately narrow: only finished child task completion messages
-    from tools that already ran their own verifier qualify. The parent verifier
-    can then accept grounded structured output instead of retrying work it
-    already delegated successfully.
-    """
-    if not context or not response_schema:
-        return None
-
-    rejected_synthetic_call_ids = {
-        str(metadata.get("toolCallId"))
-        for message in context
-        if isinstance(message, dict)
-        and isinstance((metadata := message.get("metadata")), dict)
-        and _is_rejected_completion_feedback(metadata)
-        and str(metadata.get("toolCallId") or "").startswith(_COMPLETED_CHILD_SYNTHETIC_PREFIX)
-    }
-    rejected_child_identities: set[str] = set()
-    rejected_legacy_handoffs = 0
-    activated_rejections: set[str] = set()
-    for message in reversed(context):
-        if not isinstance(message, dict):
-            continue
-        metadata = message.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        tool_calls = metadata.get("tool_calls")
-        if isinstance(tool_calls, list):
-            for tool_call in tool_calls:
-                if not isinstance(tool_call, dict) or tool_call.get("tool") != "attempt_completion":
-                    continue
-                synthetic_call_id = str(tool_call.get("tool_call_id") or "")
-                if synthetic_call_id not in rejected_synthetic_call_ids or synthetic_call_id in activated_rejections:
-                    continue
-                activated_rejections.add(synthetic_call_id)
-                rejected_identity = _synthetic_completion_handoff_identity(synthetic_call_id)
-                if rejected_identity:
-                    rejected_child_identities.add(rejected_identity)
-                else:
-                    # Older persisted handoffs did not encode their child id.
-                    # In reverse order each such marker belongs to the first
-                    # qualifying child before it, so skip exactly that child.
-                    rejected_legacy_handoffs += 1
-        tool_name = metadata.get("toolName")
-        if tool_name not in {"spawn_claude_code_agent", "spawn_browser_agent"}:
-            continue
-        if metadata.get("toolStatus") != "FINISHED":
-            continue
-        if tool_name == "spawn_claude_code_agent" and metadata.get("action_type") != "task_complete":
-            continue
-        if tool_name == "spawn_claude_code_agent" and metadata.get("success") is not True:
-            continue
-        if tool_name == "spawn_browser_agent" and (
-            metadata.get("action_type") != "task_complete" or metadata.get("success") is not True
-        ):
-            continue
-        structured_response = metadata.get("structured_response")
-        if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
-            structured_response = structured_response["output"]
-        if _structured_response_satisfies_schema(structured_response, response_schema):
-            child_tool_call_id = str(metadata.get("toolCallId") or "")
-            child_identity = _completed_child_handoff_identity(child_tool_call_id)
-            if child_identity and child_identity in rejected_child_identities:
-                continue
-            if rejected_legacy_handoffs:
-                rejected_legacy_handoffs -= 1
-                continue
-            return structured_response, child_tool_call_id
-
-    return None
-
-
-def _completed_child_task_structured_response(
-    context: List[Dict[str, Any]],
-    response_schema: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """Return a completed child task's schema-covering structured output."""
-    handoff = _completed_child_task_structured_handoff(context, response_schema)
-    return handoff[0] if handoff else None
 
 
 _TASK_COMPLETION_DIRECTIVE = """
@@ -7680,6 +7697,8 @@ async def fetch_compute_token_activity(
                     user_id=user_id,
                     type=provider_type,
                     source=data.get("source", "user"),
+                    # A team lease names the teammate whose shared account served it.
+                    owner_user_id=data.get("ownerUserId"),
                 )
                 return {
                     "type": provider_type,
@@ -7873,10 +7892,11 @@ async def mark_compute_token_rate_limited_activity(
         body["rateLimitReason"] = rate_limit_reason
     if source == "pool" and pool_token_id:
         body["poolTokenId"] = pool_token_id
-    if source == "user":
+    if source in ("user", "team"):
         body["userId"] = user_id
         # Name the exact leased row: an auth_error must never expire the
-        # user's other subscriptions (S33).
+        # user's other subscriptions (S33). A team lease names the shared row,
+        # which the backend maps to its owner while the share is current.
         if integration_id:
             body["integrationId"] = integration_id
     if credential:
@@ -7982,15 +8002,26 @@ def _planner_goal_from_messages(messages: List[Dict[str, Any]], *, fallback: Opt
 
 
 async def _retrieve_planner_memories(
-    *, goal: str, user_id: Optional[str], agent_id: Optional[str], memory_enabled: bool
+    *,
+    goal: str,
+    user_id: Optional[str],
+    agent_id: Optional[str],
+    memory_enabled: bool,
+    llm_auth: Optional[Dict[str, Any]] = None,
 ) -> Optional["MemoryRetrieval"]:
-    """Retrieve planner memories (traced, best-effort). None when the agent has memory off."""
+    """Retrieve planner memories (traced, best-effort). None when the agent has memory off.
+
+    ``llm_auth`` is the planner activity's own leased compute token; a plan-time
+    compression reuses it instead of falling through to API-key legs.
+    """
     from providers.planner_memory import planner_memory_available, retrieve_memories
 
     if not memory_enabled or not goal or not planner_memory_available():
         return None
     async with span("planner_memory_retrieve", call_site="planner", agent_id=agent_id, goal_chars=len(goal)):
-        return await retrieve_memories(goal, user_id=user_id, exclude_root_agent_id=agent_id, agent_id=agent_id)
+        return await retrieve_memories(
+            goal, user_id=user_id, exclude_root_agent_id=agent_id, agent_id=agent_id, llm_auth=llm_auth
+        )
 
 
 # Must fit at least twice inside set_plan's PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS.
@@ -8144,6 +8175,18 @@ async def call_planner_llm_activity(
                 user_id=planner_user_id,
                 agent_id=agent_id,
                 memory_enabled=memory_enabled,
+                llm_auth={
+                    "claude_token": claude_max_token,
+                    "claude_token_source": claude_token_source,
+                    "claude_token_pool_id": claude_token_pool_id,
+                    "claude_token_user_id": claude_token_user_id,
+                    "gpt_token": gpt_token,
+                    "gpt_account_id": gpt_account_id,
+                    "gpt_token_source": gpt_token_source,
+                    "gpt_token_pool_id": gpt_token_pool_id,
+                    "gpt_token_user_id": gpt_token_user_id,
+                    "compute_token_lineage_key": compute_token_lineage_key,
+                },
             ),
         )
         memory_fork = None

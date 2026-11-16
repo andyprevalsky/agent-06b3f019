@@ -1,20 +1,79 @@
 /**
+ * STATE MACHINE: CliIntegrationsSection (state in useCliIntegrations)
+ *
  * CLOSED --Add CLI--> PROMPT --submit--> SETTING_UP --server verifies--> CONNECTED
  *                              |                     --server fails--> FAILED --Retry--> PROMPT
  *                              --request error--> PROMPT (same idempotency key)
  * Integrations page -> CLI API -> user's template setup agent -> verified CLI list.
  * A successful start automatically opens the normal Rose setup agent.
+ * A CONNECTED CLI the backend lists as shareable (cli, by its connection's integration id)
+ * shows its team-sharing caption (AccountTeamShare) beside its name.
+ *
+ * Card look matches GitHub Repos and MCP servers (integrationCardStyles): app-icon
+ * tile, title and detail line, plain inputs and the dark Connect button. Rendered
+ * the same way on the stock page and in Rose Desktop.
  */
 import { useRef, useState } from 'react';
 import { Loader2, Plus, Terminal, X } from 'lucide-react';
 import claudeIcon from '@/assets/claude-color.svg';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 import { openAgentInCurrentClient } from '@/lib/openAgent';
 import { useCliIntegrations } from '../hooks/useCliIntegrations';
+import {
+  INTEGRATION_ADD_BUTTON_CLASSES,
+  INTEGRATION_CARD_CLASSES,
+  INTEGRATION_CARD_HEADER_CLASSES,
+  INTEGRATION_CONNECT_BUTTON_CLASSES,
+  INTEGRATION_FORM_CLASSES,
+  INTEGRATION_ICON_BUTTON_CLASSES,
+  INTEGRATION_ICON_TILE_CLASSES,
+  INTEGRATION_INPUT_CLASSES,
+  INTEGRATION_ROW_CLASSES,
+  INTEGRATION_TEXT_ACTION_CLASSES,
+} from './integrationCardStyles';
 
-export default function CliIntegrationsSection({ desktop = false }: { desktop?: boolean }) {
+type CliIntegration = ReturnType<typeof useCliIntegrations>['integrations'][number];
+
+export function CliIntegrationsIcon() {
+  return (
+    <div className="flex h-full w-full items-center justify-center rounded-lg bg-[#1f2328] text-white">
+      <Terminal className="h-5 w-5" aria-hidden="true" />
+    </div>
+  );
+}
+
+function detailText(cli: ReturnType<typeof useCliIntegrations>): string {
+  const count = cli.integrations.filter((row) => row.status === 'connected').length;
+  if (count === 0) return 'Connect command-line tools for your agents';
+  return `${count} CLI${count === 1 ? '' : 's'} connected`;
+}
+
+function CliStatus({ integration, onRetry }: { integration: CliIntegration; onRetry: () => void }) {
+  if (integration.status === 'setting_up')
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        <span>Setting up…</span>
+      </span>
+    );
+  if (integration.status === 'connected')
+    return <span className="text-xs text-green-600 dark:text-green-400">Connected</span>;
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span className="truncate text-xs text-destructive">
+        {integration.error || 'Setup failed'}
+      </span>
+      <button type="button" className={INTEGRATION_TEXT_ACTION_CLASSES} onClick={onRetry}>
+        Retry
+      </button>
+    </span>
+  );
+}
+
+export default function CliIntegrationsSection() {
   const cli = useCliIntegrations();
+  const { shareTarget } = useAccountShares();
   const [open, setOpen] = useState(false);
   const [request, setRequest] = useState('');
   const requestId = useRef<string | null>(null);
@@ -33,124 +92,123 @@ export default function CliIntegrationsSection({ desktop = false }: { desktop?: 
   };
 
   return (
-    <section
-      aria-label="CLIs"
-      className={desktop ? 'py-2' : 'rounded-lg border border-border bg-card/60 overflow-hidden'}
-    >
-      <div className="flex items-center justify-between gap-3 p-4">
-        <div className="flex items-center gap-3">
-          <Terminal className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
-          <div>
+    <section aria-label="CLIs" className={INTEGRATION_CARD_CLASSES}>
+      <div className={`${INTEGRATION_CARD_HEADER_CLASSES} justify-between`}>
+        <div className="flex min-w-0 items-center gap-3">
+          <div className={INTEGRATION_ICON_TILE_CLASSES}>
+            <CliIntegrationsIcon />
+          </div>
+          <div className="flex min-w-0 flex-col">
             <h3 className="font-medium">CLIs</h3>
-            <p className="text-xs text-muted-foreground">Connect tools for your agents</p>
+            <span className="text-xs text-muted-foreground">{detailText(cli)}</span>
           </div>
         </div>
-        <Button size="icon" variant="ghost" aria-label="Add CLI" onClick={() => setOpen(true)}>
+        <button
+          type="button"
+          aria-label="Add CLI"
+          onClick={() => setOpen(true)}
+          className={INTEGRATION_ADD_BUTTON_CLASSES}
+        >
           <Plus className="h-4 w-4" />
-        </Button>
+        </button>
       </div>
+      {cli.integrations.length > 0 && (
+        <ul aria-label="Connected CLIs" aria-live="polite" className="border-t border-border">
+          {cli.integrations.map((integration) => {
+            const share = integration.status === 'connected' && shareTarget('cli', integration.id);
+            return (
+              <li key={integration.id} className={INTEGRATION_ROW_CLASSES}>
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="truncate font-medium">{integration.name}</span>
+                    {share && <AccountTeamShare {...share} />}
+                  </div>
+                  <CliStatus
+                    integration={integration}
+                    onRetry={() => {
+                      editRequest(integration.request);
+                      setOpen(true);
+                    }}
+                  />
+                </div>
+                {integration.agent_id && (
+                  <button
+                    type="button"
+                    className={INTEGRATION_TEXT_ACTION_CLASSES}
+                    onClick={() => openAgentInCurrentClient(integration.agent_id!)}
+                  >
+                    Open setup
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {cli.error && (
+        <div className="flex items-center gap-2 px-4 pb-3">
+          <p role="alert" className="text-xs text-destructive">
+            {cli.error}
+          </p>
+          <button
+            type="button"
+            className={INTEGRATION_TEXT_ACTION_CLASSES}
+            disabled={cli.loading}
+            onClick={() => void cli.refresh()}
+          >
+            Refresh CLIs
+          </button>
+        </div>
+      )}
       {open && (
         <form
-          className="mx-4 mb-4 rounded-lg border border-border p-3"
+          className={INTEGRATION_FORM_CLASSES}
           onSubmit={(event) => {
             event.preventDefault();
             void submit();
           }}
         >
-          <div className="mb-3 flex items-center gap-2">
+          <div className="flex items-center gap-2">
             <img src={claudeIcon} alt="Claude" className="h-5 w-5" />
             <label htmlFor="cli-setup-request" className="text-sm">
               Enter the CLI you want to connect
             </label>
-            <Button
+            <button
               type="button"
-              size="icon"
-              variant="ghost"
-              className="ml-auto h-6 w-6"
               aria-label="Cancel CLI setup"
               disabled={cli.submitting}
               onClick={() => setOpen(false)}
+              className={`${INTEGRATION_ICON_BUTTON_CLASSES} ml-auto h-6 w-6`}
             >
               <X className="h-3 w-3" />
-            </Button>
+            </button>
           </div>
-          <div className="flex gap-2">
-            <Input
+          <div className="flex flex-wrap items-center gap-2">
+            <input
               id="cli-setup-request"
-              placeholder="e.g. YC CLI"
+              placeholder="e.g. YC (Y Combinator) CLI"
               value={request}
               onChange={(event) => editRequest(event.target.value)}
               disabled={cli.submitting}
               maxLength={2000}
               autoFocus
+              className={`${INTEGRATION_INPUT_CLASSES} flex-1`}
             />
-            <Button type="submit" disabled={cli.submitting || !request.trim()}>
+            <button
+              type="submit"
+              disabled={cli.submitting || !request.trim()}
+              className={INTEGRATION_CONNECT_BUTTON_CLASSES}
+            >
+              {cli.submitting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
               {cli.submitting ? 'Starting…' : 'Connect'}
-            </Button>
+            </button>
           </div>
         </form>
       )}
-      {cli.error && (
-        <div className="px-4 pb-3">
-          <p role="alert" className="text-sm text-destructive">
-            {cli.error}
-          </p>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={cli.loading}
-            onClick={() => void cli.refresh()}
-          >
-            Refresh CLIs
-          </Button>
-        </div>
-      )}
-      <div aria-live="polite">
-        {cli.integrations.map((integration) => (
-          <div
-            key={integration.id}
-            className="flex flex-wrap items-center gap-2 border-t border-border/50 px-4 py-3"
-          >
-            <span className="text-sm font-medium">{integration.name}</span>
-            {integration.status === 'setting_up' && (
-              <>
-                <Loader2 className="h-3 w-3 animate-spin" />
-                <span className="text-xs text-muted-foreground">Setting up…</span>
-              </>
-            )}
-            {integration.status === 'connected' && (
-              <span className="text-xs text-green-600">Connected</span>
-            )}
-            {integration.status === 'failed' && (
-              <>
-                <span className="text-xs text-destructive">
-                  {integration.error || 'Setup failed'}
-                </span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    editRequest(integration.request);
-                    setOpen(true);
-                  }}
-                >
-                  Retry
-                </Button>
-              </>
-            )}
-            {integration.agent_id && (
-              <Button
-                className="ml-auto"
-                size="sm"
-                variant="ghost"
-                onClick={() => openAgentInCurrentClient(integration.agent_id!)}
-              >
-                Open setup
-              </Button>
-            )}
-          </div>
-        ))}
-      </div>
     </section>
   );
 }

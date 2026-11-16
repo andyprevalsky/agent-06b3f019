@@ -36,7 +36,18 @@ const ALB_503 =
   `Content-Type: text/html\r\nContent-Length: ${Buffer.byteLength(ALB_503_BODY)}\r\n` +
   `Connection: close\r\n\r\n${ALB_503_BODY}`;
 
-type Worker = 'dead' | 'healthy' | 'no-id' | 'no-connect-url';
+/**
+ * One planned answer per POST /v1/session. Capacity and keyed-create plans replay
+ * the 2026-11-15 parallel-wave smoke (PR #2110, agent-payment-test-shop): 503
+ * capacity_unavailable ×2 (Retry-After 5 in production; 0 here to bound runtime),
+ * then a create that never answered within the 15 s client timeout.
+ * - capacity: 503 capacity_unavailable, nothing allocated.
+ * - hang: allocates a session under the request's Idempotency-Key, never answers.
+ * - in-flight: 409 idempotency_key_in_use (a create under this key is still running).
+ * - replay: the documented keyed replay, 201 with the key's session.
+ */
+type Worker =
+  'dead' | 'healthy' | 'no-id' | 'no-connect-url' | 'capacity' | 'hang' | 'in-flight' | 'replay';
 
 const originalFetch = globalThis.fetch;
 globalThis.fetch = (async (input, init) => {
@@ -90,6 +101,8 @@ interface FakeTilion {
   baseUrl: string;
   plan: Worker[];
   creates: string[];
+  /** Every POST /v1/session: its planned answer and Idempotency-Key. */
+  posts: { worker: Worker; key: string }[];
   deletes: Map<string, number>;
   unexpected: string[];
   noConnectUrl: string[];
@@ -101,14 +114,25 @@ async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promi
     baseUrl: '',
     plan: [],
     creates: [],
+    posts: [],
     deletes: new Map(),
     unexpected: [],
     noConnectUrl: [],
   };
   const dead = new Set<string>();
   const released = new Set<string>();
-  const json = (res: ServerResponse, status: number, body: unknown) => {
-    res.writeHead(status, { 'Content-Type': 'application/json', 'X-Request-ID': randomUUID() });
+  const keyed = new Map<string, string>();
+  const json = (
+    res: ServerResponse,
+    status: number,
+    body: unknown,
+    headers: Record<string, string> = {}
+  ) => {
+    res.writeHead(status, {
+      'Content-Type': 'application/json',
+      'X-Request-ID': randomUUID(),
+      ...headers,
+    });
     res.end(JSON.stringify(body));
   };
   state.server = createServer((req, res) => {
@@ -123,12 +147,63 @@ async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promi
         json(res, 200, [{ code: 'us', name: 'United States', country: 'us' }]);
       } else if (req.method === 'POST' && path === '/v1/session') {
         const worker = state.plan.shift();
-        assert(worker !== undefined, 'more Tilion creates than the scenario planned');
+        if (worker === undefined) {
+          // Recorded, never thrown: a throw in this handler crashes the process before the
+          // scenarios' own failures are asserted and before cleanup runs.
+          state.unexpected.push('POST /v1/session beyond the scenario plan');
+          json(res, 500, { detail: 'fixture create beyond plan' });
+          return;
+        }
+        const key = String(req.headers['idempotency-key'] ?? '');
+        state.posts.push({ worker, key });
+        if (worker === 'capacity') {
+          json(
+            res,
+            503,
+            {
+              detail: {
+                error: 'capacity_unavailable',
+                message: 'no session capacity in this region right now; please retry',
+              },
+            },
+            { 'Retry-After': '0' }
+          );
+          return;
+        }
+        if (worker === 'in-flight') {
+          json(
+            res,
+            409,
+            { detail: { error: 'idempotency_key_in_use', message: 'create still running' } },
+            { 'Retry-After': '0' }
+          );
+          return;
+        }
+        if (worker === 'replay') {
+          const replayed = keyed.get(key);
+          if (replayed === undefined) {
+            state.unexpected.push('replay of an Idempotency-Key that allocated nothing');
+            json(res, 500, { detail: 'fixture replay without allocation' });
+          } else
+            json(res, 201, {
+              session_id: replayed,
+              state: 'live',
+              created_at: Date.now() / 1000,
+              connect_url: healthyEndpoint,
+              exit_id: null,
+            });
+          return;
+        }
         const prefix = worker === 'dead' ? 'sess_993d70' : 'sess_c3d0eb';
         const id = `${prefix}${randomUUID().replace(/-/g, '').slice(0, 21)}`;
         state.creates.push(worker === 'no-id' ? '<no-id>' : id);
         if (worker === 'dead') dead.add(id);
         if (worker === 'no-connect-url') state.noConnectUrl.push(id);
+        if (worker === 'hang') {
+          // Allocated, but the reply is lost: only a keyed replay can identify it.
+          keyed.set(key, id);
+          return;
+        }
         const connectUrl =
           worker === 'dead' ? `ws://127.0.0.1:${deadPort}/cdp/${id}?token=t` : healthyEndpoint;
         json(res, 201, {
@@ -215,6 +290,8 @@ async function main() {
   const { logicalBrowserTaskId } = await import('../../providers/browser/logicalSession');
   const { TILION_TASK_CREATE_ATTEMPTS } =
     await import('../../providers/browser/tilionCreateValidation');
+  const { TILION_SESSION_CREATE_MAX_ATTEMPTS } =
+    await import('../../providers/browser/tilionClient');
   const userId = `tilion-dead-worker-${randomUUID()}`;
   const failures: string[] = [];
 
@@ -231,19 +308,28 @@ async function main() {
     return { session: null, errors };
   }
 
-  async function scenario(name: string, plan: Worker[], expectSuccess: boolean) {
+  async function scenario(
+    name: string,
+    plan: Worker[],
+    expectSuccess: boolean,
+    expectedKeys?: number
+  ) {
     const agentId = randomUUID();
     await prisma.agent.create({ data: { id: agentId, userId, goal: `tilion ${name}` } });
     tilion.plan = [...plan];
     tilion.creates.length = 0;
+    tilion.posts.length = 0;
     tilion.deletes.clear();
     const { session, errors } = await workerInit(agentId);
     const row = await prisma.browserSession.findUnique({
       where: { id: logicalBrowserTaskId(agentId) },
     });
     const deadIds = tilion.creates.filter((id) => id.startsWith('sess_993d70'));
+    const keys = new Set(tilion.posts.map((post) => post.key));
     const observed = {
       creates: tilion.creates.map((id) => id.slice(0, 11)),
+      posts: tilion.posts.map((post) => post.worker),
+      keys: keys.size,
       errors: errors.map((e) => e.slice(0, 160)),
       bound: row?.sessionId ?? null,
       status: row?.status ?? null,
@@ -257,9 +343,14 @@ async function main() {
         failures.push(`${name}: healthy session not bound ACTIVE ${JSON.stringify(observed)}`);
       if (tilion.plan.length !== 0)
         failures.push(`${name}: planned creates unused ${JSON.stringify(observed)}`);
-    } else if (session !== null || tilion.creates.length !== plan.length) {
+    } else if (session !== null || tilion.posts.length !== plan.length) {
       failures.push(`${name}: failed create must stay latched ${JSON.stringify(observed)}`);
     }
+    // A keyed create is settled by replaying its key, never relaunched under a new one.
+    if (expectedKeys !== undefined && keys.size !== expectedKeys)
+      failures.push(
+        `${name}: expected ${expectedKeys} Idempotency-Key(s) ${JSON.stringify(observed)}`
+      );
     for (const id of deadIds) {
       if ((tilion.deletes.get(id) ?? 0) === 0)
         failures.push(`${name}: dead session ${id.slice(0, 11)} release never attempted`);
@@ -322,12 +413,30 @@ async function main() {
       if ((tilion.deletes.get(id) ?? 0) === 0)
         failures.push(`no-connect-url: session ${id.slice(0, 11)} release never attempted`);
     }
+    // PR #2110 smoke: capacity ×2, then a lost reply whose first replay is lost too. The
+    // create settles by replaying its key (409 while still running, then 201) and binds it.
+    await scenario(
+      'capacity-then-lost-replies-replayed',
+      ['capacity', 'capacity', 'hang', 'hang', 'in-flight', 'replay'],
+      true,
+      1
+    );
+    // Capacity for a whole create call: a definite rejection, so the worker's retry creates afresh.
+    const capacityCall = Array<Worker>(TILION_SESSION_CREATE_MAX_ATTEMPTS).fill('capacity');
+    await scenario('capacity-exhausted-then-healthy', [...capacityCall, 'healthy'], true, 2);
+    // A create still in flight at the call's end may own a browser: latched, never relaunched.
+    const inFlight = Array<Worker>(TILION_SESSION_CREATE_MAX_ATTEMPTS - 1).fill('in-flight');
+    await scenario('unsettled-keyed-create-stays-latched', ['hang', ...inFlight], false, 1);
+    // A rejection after a lost reply cannot prove that reply allocated nothing: still latched.
+    const rejected = Array<Worker>(TILION_SESSION_CREATE_MAX_ATTEMPTS - 1).fill('capacity');
+    await scenario('capacity-after-lost-reply-stays-latched', ['hang', ...rejected], false, 1);
     // Resume replacements have no outer retry: the adapter's own creates must reach a healthy worker.
     await resumeScenario();
-    assert.deepEqual(tilion.unexpected, [], 'Tilion calls outside the fixture contract');
-    assert.deepEqual(failures, [], 'dead Tilion worker must not end browser init');
-    console.log(
-      'PASS Tilion dead worker: second create, fresh worker retry, latched non-retryable creates, resume replacement'
+    // One assertion so a failure always prints both: scenario failures name the boundary.
+    assert.deepEqual(
+      { failures, unexpected: tilion.unexpected },
+      { failures: [], unexpected: [] },
+      'dead Tilion worker must not end browser init, and Tilion calls stay in the fixture contract'
     );
   } finally {
     await prisma.toolSideEffect.deleteMany({
@@ -347,6 +456,11 @@ async function main() {
     }
     globalThis.fetch = originalFetch;
   }
+  // A create that arrived during cleanup (after the assertion above) still fails the run.
+  assert.deepEqual(tilion.unexpected, [], 'Tilion calls outside the fixture contract');
+  console.log(
+    'PASS Tilion dead worker: second create, fresh worker retry, latched non-retryable creates, capacity retry, keyed replay, resume replacement'
+  );
 }
 
 // Exit explicitly: a failure before cleanup must not leave loopback servers holding the process.

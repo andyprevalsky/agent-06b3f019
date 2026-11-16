@@ -2,7 +2,6 @@ import type { CompletionMessage } from '../rose';
 import { createLogger } from '../logger';
 import { SMS_MAX_BODY_CHARACTERS } from '../smsDeliveryContract';
 import type { SupervisorChannel } from './channelDelivery';
-import type { LinqNotificationCard } from '../linqCards';
 import { rewriteNotification, SMS_NOTIFICATION_SYSTEM_PROMPT } from './notificationLlm';
 
 const log = createLogger('SmsNotification');
@@ -23,7 +22,6 @@ export interface NotificationContent {
   requiredLinks: readonly string[];
   /** An accepted final answer is immutable, even after a provider rejection. */
   preserveText?: boolean;
-  card?: LinqNotificationCard;
 }
 
 export class NotificationDeliveryError extends Error {
@@ -41,6 +39,8 @@ export async function deliverNotificationMessage(
   config: NotificationContent & {
     channel: SupervisorChannel;
     agentId?: string;
+    /** Archive owner when no agent is bound (per-user root). */
+    userId?: string;
     eventType?: unknown;
     correctionBudget?: { remaining: number };
     send: (message: string) => Promise<DeliveryResult>;
@@ -109,7 +109,7 @@ export async function deliverNotificationMessage(
       }
     );
     try {
-      message = await rewriteNotification(messages, config.agentId);
+      message = await rewriteNotification(messages, config.agentId, config.userId);
     } catch (generationError) {
       return {
         success: false,

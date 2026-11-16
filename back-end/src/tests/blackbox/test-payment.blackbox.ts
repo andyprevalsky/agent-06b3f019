@@ -237,6 +237,31 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    'owner-billing readiness reflects the backend probe customer configuration',
+    async () => {
+      // The blackbox backend loads the same env files as this process; the configured path is
+      // also covered in-process by purchases-owner-lifecycle.cases.ts.
+      const expected =
+        (process.env.BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID ?? '').trim() !== '';
+      const response = await request('/api/test-payment/lifecycle/owner-billing');
+      assertStatus(response.status, 200, response.data);
+      assert(
+        (response.data as { configured?: unknown }).configured === expected,
+        `expected configured=${String(expected)}`
+      );
+    },
+  ],
+  [
+    'purge refuses an agent that is not the owner lifecycle probe',
+    async () => {
+      const response = await request('/api/test-payment/lifecycle/purge', {
+        method: 'POST',
+        body: JSON.stringify({ agentId: `missing-agent-${Date.now()}` }),
+      });
+      assertStatus(response.status, 404, response.data);
+    },
+  ],
+  [
     'lifecycle cross-verifies purchase, hold, card, transfer, and resolved setup',
     async () => {
       let transferReads = 0;

@@ -8,6 +8,10 @@ import {
 } from './config';
 import type { Transaction, IPhoneLease, IPhoneDevice } from './types';
 import { databaseNow } from './repo.clock';
+import { expiredPrivacy } from './privacy';
+import { createLogger } from '../../providers/logger';
+
+const log = createLogger('IPhoneLease');
 
 export async function closeLease(tx: Transaction, id: string, status: string) {
   const executing = await tx.iPhoneOperation.findFirst({
@@ -23,6 +27,33 @@ export async function closeLease(tx: Transaction, id: string, status: string) {
       data: { releaseRequestedAt: await databaseNow(tx), releaseStatus: status },
     });
     return;
+  }
+  const lease = await tx.iPhoneLease.findUniqueOrThrow({ where: { id } });
+  // The user grace bounds a user-held or pending-auth hold; its expiry returns control to the
+  // agent, so the private phase this lease opened ends with it (values stay vaulted for
+  // redaction). Releases, cancellations and inherited phases still need an explicit handback.
+  if (
+    status === 'EXPIRED' &&
+    lease.status === 'ACTIVE' &&
+    (lease.controlOwner === 'user' || lease.attentionRequestId !== null)
+  ) {
+    const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: lease.deviceId } });
+    let privateInputEncrypted: string | null = null;
+    try {
+      privateInputEncrypted = expiredPrivacy(device.privateInputEncrypted, lease.id);
+    } catch (error) {
+      // A malformed envelope stays as-is (privacy checks keep failing closed on it), so the
+      // lease lifecycle still advances instead of wedging every device route.
+      log.error('expiry left unreadable private phase', {
+        leaseId: lease.id,
+        deviceId: device.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (privateInputEncrypted !== null) {
+      await tx.iPhoneDevice.update({ where: { id: device.id }, data: { privateInputEncrypted } });
+      log.info('expiry ended private phase', { leaseId: lease.id, deviceId: device.id });
+    }
   }
   await tx.iPhoneLease.update({
     where: { id },
@@ -52,8 +83,11 @@ async function reconcileActive(tx: Transaction, lease: IPhoneLease) {
     await closeLease(tx, lease.id, 'CANCELLED');
     return;
   }
-  // A paused agent cannot act on the phone; it must not starve the FIFO queue.
-  if (agent.status === 'PAUSED') return closeLease(tx, lease.id, 'RELEASED');
+  // A paused agent cannot act on the phone; it must not starve the FIFO queue. A pause for this
+  // lease's own phone auth keeps the hold so the owner can act on a live phone; the pending-auth
+  // branch below still bounds it by the user-control grace, and other pauses release at once.
+  if (agent.status === 'PAUSED' && lease.attentionRequestId === null)
+    return closeLease(tx, lease.id, 'RELEASED');
   if (lease.browserTaskId !== null) {
     const task = await tx.browserSession.findFirst({
       where: { id: lease.browserTaskId, agentId: lease.agentId, context: { userId: lease.userId } },

@@ -2,8 +2,14 @@
 import asyncio
 import json
 import os
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import httpx
+from structlog.testing import capture_logs
 
 from _test_utils import BlackboxResult
 from helpers import jev_progress as jev
@@ -136,6 +142,79 @@ async def test_http_contract():
         client.assert_not_called()
 
 
+async def test_typesafe_call_archived_in_root_bundle():
+    """Every TypeSafe JEV request/response is a v2 record in the tree root's bundle, never in logs."""
+    import tempfile
+
+    import structlog
+
+    import helpers.observability as observability
+    import helpers.trace_archive as trace_archive
+    from helpers.trace_archive import decrypt_and_validate_artifact, read_local_artifact
+
+    client = AsyncMock()
+    response = client.post.return_value
+    response.raise_for_status = lambda: None
+    response.json = lambda: answer()
+    logged = []
+
+    class _Logger:
+        def __getattr__(self, level):
+            return lambda event, **kw: logged.append(event)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        old = (trace_archive._LOCAL_ROOT, observability._IS_PRODUCTION, observability.logger)
+        trace_archive._LOCAL_ROOT, observability._IS_PRODUCTION, observability.logger = Path(tmp), True, _Logger()
+        tokens = structlog.contextvars.bind_contextvars(root_agent_id="tree-root")
+        try:
+            with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test", "TRACE_ARCHIVE_ENABLED": "1",
+                                         "TRACE_ARCHIVE_BACKEND": "local"}), \
+                    patch.object(jev, "get_http_client", return_value=client), \
+                    patch.object(jev, "publish_progress_estimate", new_callable=AsyncMock):
+                os.environ.pop("LLM_CONTEXT_DUMP_PROD", None)
+                await jev.predict_jev_progress(snapshot())
+
+            def records(folder):
+                bundle = Path(tmp) / "tree-root" / folder
+                return [json.loads(decrypt_and_validate_artifact(*read_local_artifact(
+                    root_agent_id="tree-root", path=f"{folder}/{item.name}"))) for item in bundle.glob("*.json.gz.enc")]
+
+            start, final = records("llm"), records("llm-updates")
+        finally:
+            structlog.contextvars.reset_contextvars(**tokens)
+            trace_archive._LOCAL_ROOT, observability._IS_PRODUCTION, observability.logger = old
+    assert len(start) == 1 and len(final) == 1, (start, final)
+    sent = client.post.await_args.kwargs["json"]
+    assert start[0]["config"]["request_body"] == sent and start[0]["agent_id"] == "root"
+    assert final[0]["call_site"] == "jev_progress" and final[0]["output"]["structured"] == answer()
+    assert final[0]["output"]["estimate"]["model"] == jev.MODEL
+    assert "llm.context.dumped" not in logged and "llm.context.dump_updated" not in logged, logged
+
+
+async def test_decode_rejection_archives_received_response():
+    """CodeRabbit 4576377076: a response the decoder rejects is still archived verbatim with its error."""
+    rejected = answer()
+    rejected["answers"]["remaining_batches"]["probabilities"]["0"] = float("nan")
+    client = AsyncMock()
+    response = client.post.return_value
+    response.raise_for_status = lambda: None
+    response.json = lambda: rejected
+    archived = []
+    with (
+        patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}),
+        patch.object(jev, "get_http_client", return_value=client),
+        patch.object(jev, "_archive_jev_request", return_value="dump-handle"),
+        patch.object(jev, "_archive_jev_result", side_effect=lambda *args: archived.append(args)),
+        patch.object(jev, "publish_progress_estimate", new_callable=AsyncMock) as publish,
+    ):
+        await jev.predict_jev_progress(snapshot())
+    publish.assert_not_awaited()
+    assert len(archived) == 1, archived
+    dump, raw, estimate, error = archived[0]
+    assert dump == "dump-handle" and raw is rejected and estimate is None
+    assert isinstance(error, ValueError), error
+
+
 async def test_freeze_queue_and_cancel_http():
     received = []
     gate = asyncio.Event()
@@ -188,7 +267,6 @@ def test_browser_batches():
 
 async def test_generation_publication():
     from helpers import update_status
-    from types import SimpleNamespace
     client = AsyncMock()
     client.patch.return_value.raise_for_status = lambda: None
     config = SimpleNamespace(backend=SimpleNamespace(api_url="http://local.test", api_key="test"))
@@ -205,7 +283,6 @@ async def test_http_concurrency_bound():
     active = peak = 0
     four_started = asyncio.Event()
     release = asyncio.Event()
-    from types import SimpleNamespace
     async def post(*args, **kwargs):
         nonlocal active, peak
         active += 1
@@ -228,7 +305,6 @@ async def test_http_concurrency_bound():
 
 async def test_tree_generation_broadcast():
     from helpers import messages
-    from types import SimpleNamespace
     client = AsyncMock()
     client.patch.return_value.status_code = 200
     client.patch.return_value.json = lambda: {"mutation_accepted": True}
@@ -239,18 +315,191 @@ async def test_tree_generation_broadcast():
     assert client.patch.call_args.kwargs["headers"]["X-Agent-Workflow-Generation"] == "new-generation"
 
 
+def long_browser_snapshot(steps=190):
+    """H-76 (e24 browser-doordash-food-plan-grocery-cart-reauth r2): a ~190-step
+    browser prefix whose clipped state exceeds the 24k-token budget. Every string
+    is longer than the final 80-character clip, as on real DoorDash pages."""
+    kinds = ["click", "read_browser_state", "evaluate", "goto", "click", "click", "key_press"]
+    entries = [{"step": s, "action": kinds[s % len(kinds)],
+                "params": {"index": 1000 + s, "url": f"https://www.doordash.com/store/1741346/search/item-{s}?q=" + "x" * 200,
+                           "script": "(() => [...document.querySelectorAll('[data-anchor-id]')].map(r => r.innerText))()" * 3},
+                "result": {"success": True, "extracted_content": f"Added item {s} to cart. " * 120,
+                           "title": 'Clicked <button "Add to cart"> ' * 5, "current_url": "https://www.doordash.com/cart?x=" + "y" * 300,
+                           "message": "Executed JS. " * 50, "formatted_state": "[1234]<div role=button>Add</div>\n" * 400}}
+               for s in range(1, steps + 1)]
+    return {"agentId": "root", "taskId": "browser-task", "kind": "browser", "goal": "Build the complete weekly grocery cart. " * 20,
+            "output_schema": {"type": "object"}, "events": jev.browser_prefix_events(entries),
+            "observedAt": "2026-11-08T06:23:20Z", "sequence": 1}
+
+
+def status_client(status, body=None):
+    client = AsyncMock()
+    client.post.return_value = httpx.Response(status, json=body, request=httpx.Request("POST", "https://api.typesafe.ai/v1/systemone"))
+    return client
+
+
+TOO_LARGE = {"detail": {"error_type": "max_tokens_exceeded"}}
+
+
+async def test_prefix_build_runs_off_event_loop():
+    """H-76: the json/tiktoken clip loop for a long browser prefix ran on the
+    activity's event-loop thread, stalling the browser step loop ~0.27-0.37s per
+    prediction (one prediction per step). It must run on a worker thread so the
+    loop stays responsive while the prefix is built."""
+    loop_thread = threading.get_ident()
+    built = {}
+    original = jev.request
+    def timed_request(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return original(*args, **kwargs)
+        finally:
+            built["thread"], built["seconds"] = threading.get_ident(), time.perf_counter() - start
+    jev.request(long_browser_snapshot(20), {"scope": "", "progress": "", "eta": ""})  # warm tiktoken outside the measurement
+    worst = 0.0
+    done = False
+    ticker_started = asyncio.Event()
+    # Deliberate heartbeat workload: preserve the measured 2ms probe cadence.
+    EVENT_LOOP_PROBE_INTERVAL_SECONDS = 0.002
+    async def ticker():
+        nonlocal worst
+        while not done:
+            start = time.perf_counter()
+            ticker_started.set()
+            await asyncio.sleep(EVENT_LOOP_PROBE_INTERVAL_SECONDS)
+            worst = max(worst, time.perf_counter() - start - 0.002)
+    tick = asyncio.create_task(ticker())
+    await asyncio.wait_for(ticker_started.wait(), timeout=0.01)
+    with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}), patch.object(jev, "get_http_client", return_value=status_client(200)), \
+            patch.object(jev, "request", timed_request), capture_logs():
+        await jev.predict_jev_progress(long_browser_snapshot(130))
+    done = True
+    await tick
+    assert built["thread"] != loop_thread, "JEV prefix build ran on the event-loop thread"
+    # Relative to the build's own duration, so host speed does not matter.
+    assert worst < max(0.05, built["seconds"] / 2), f"event loop stalled {worst:.3f}s during a {built['seconds']:.3f}s prefix build"
+
+
+async def test_http_failure_logs_status_and_stage():
+    """H-76: 18 jev_progress.failed HTTPStatusError warnings carried no status,
+    and the same exception type is raised by the TypeSafe call and the backend
+    publish. Log the status code, its response class and the failing stage."""
+    with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}), patch.object(jev, "get_http_client", return_value=status_client(413)), \
+            capture_logs() as logs:
+        await jev.predict_jev_progress(snapshot())
+    failed = [entry for entry in logs if entry["event"] == "jev_progress.failed"]
+    assert len(failed) == 1, logs
+    assert failed[0]["error_type"] == "HTTPStatusError"
+    assert failed[0].get("status_code") == 413 and failed[0].get("response_class") == "4xx", failed[0]
+    assert failed[0].get("stage") == "predict", failed[0]
+    assert "test" not in json.dumps(failed[0], default=str)
+
+
+async def drive_session(snap, client, schedules=6):
+    with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}), patch.object(jev, "get_http_client", return_value=client), \
+            capture_logs() as logs:
+        session = jev.JEVSession("root", "browser-task", "browser")
+        for _ in range(schedules):
+            session.schedule(snap["goal"], snap["output_schema"], snap["events"])
+            await asyncio.gather(*list(session.pending), return_exceptions=True)
+            for _ in range(3):
+                await asyncio.sleep(0)
+        session.close()
+    return [entry for entry in logs if entry["event"] == "jev_progress.failed"]
+
+
+async def test_budget_exceeded_stops_session():
+    """H-76: once the browser prefix exceeded the 24k-token budget it could only
+    grow, yet every later step rebuilt it and logged another ValueError (66 in
+    the run). The session stops estimating after the first deterministic budget
+    failure; the prompt, input format and budget are unchanged."""
+    client = status_client(200)
+    failed = await drive_session(long_browser_snapshot(190), client)
+    client.post.assert_not_awaited()
+    assert len(failed) == 1, failed
+    assert failed[0]["error_type"] == "JEVBudgetExceeded" and failed[0]["stage"] == "prepare"
+
+
+async def test_provider_size_refusal_stops_session():
+    """H-76: TypeSafe answers 400 {"detail": {"error_type": "max_tokens_exceeded"}}
+    for a ~25.6k-token body that passed the state-only 24k check (steps 130-141,
+    18 failures). That size refusal, or a 413, stops the session."""
+    for client in (status_client(400, TOO_LARGE), status_client(413)):
+        failed = await drive_session(snapshot(), client)
+        assert client.post.await_count == 1 and len(failed) == 1, failed
+        assert failed[0]["status_code"] in (400, 413) and failed[0]["stage"] == "predict"
+
+
+async def test_transient_failures_do_not_stop_session():
+    """A stop is recorded in Temporal history for the rest of the run, so only a
+    size refusal may stop it. Auth/availability blips, other 400s, network errors
+    and publish-stage 4xx keep the session estimating on every schedule."""
+    request = httpx.Request("POST", "https://api.typesafe.ai/v1/systemone")
+    cases = {status: status_client(status) for status in (500, 503, 408, 409, 401, 403, 404, 425, 429)}
+    cases["400 other"] = status_client(400, {"detail": {"error_type": "invalid_request"}})
+    cases["400 no body"] = status_client(400)
+    for name, error in (("connect", httpx.ConnectError("down", request=request)), ("read timeout", httpx.ReadTimeout("slow", request=request))):
+        cases[name] = AsyncMock()
+        cases[name].post.side_effect = error
+    for name, client in cases.items():
+        failed = await drive_session(snapshot(), client, schedules=3)
+        assert client.post.await_count == 3 and len(failed) == 3, (name, failed)
+    ok = status_client(200)
+    ok.post.return_value = SimpleNamespace(raise_for_status=lambda: None, json=answer)
+    rejected = httpx.Response(404, request=httpx.Request("PATCH", "http://local.test/api/agents/root/progress-estimate"))
+    publish = AsyncMock(side_effect=httpx.HTTPStatusError("not found", request=rejected.request, response=rejected))
+    with patch.object(jev, "publish_progress_estimate", publish):
+        failed = await drive_session(snapshot(), ok, schedules=3)
+    assert ok.post.await_count == 3 and publish.await_count == 3, failed
+    assert len(failed) == 3 and all(entry["stage"] == "publish" and entry["status_code"] == 404 for entry in failed)
+
+
+def test_done_callback_ignores_non_dict_results():
+    """CodeRabbit PR #1865: a non-dict activity result must not raise inside the done callback,
+    which would leave the queued prefix unstarted; only a dict stopSession stops the session."""
+    from helpers.jev_progress import JEVSession
+
+    class finished:  # a completed future's surface; hashable like a real future
+        def __init__(self, value):
+            self.value = value
+
+        def cancelled(self):
+            return False
+
+        def exception(self):
+            return None
+
+        def result(self):
+            return self.value
+
+    session = JEVSession("agent-done-callback")
+    for value in ("unexpected", ["stopSession"], None, {}):
+        session._done(finished(value))
+        assert session.stopped is False, value
+    session._done(finished({"stopSession": True}))
+    assert session.stopped is True
+
+
 async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("tree bus generation", test_tree_generation_broadcast)
     r.record("prefix and decoder", test_prefix_and_decode)
     r.record("task ownership", test_scope)
     r.record("browser batches", test_browser_batches)
+    r.record("done callback type guard", test_done_callback_ignores_non_dict_results)
     await r.record_async("snapshot freeze and cancellation", test_freeze_queue_and_cancel_http)
     await r.record_async("generation publication", test_generation_publication)
     await r.record_async("global HTTP concurrency bound", test_http_concurrency_bound)
     await r.record_async("nonblocking bounded lifecycle", test_background_lifecycle)
     await r.record_async("HTTP and pinned prompt", test_http_contract)
+    await r.record_async("TypeSafe call archived in root bundle", test_typesafe_call_archived_in_root_bundle)
+    await r.record_async("decode rejection archives received response", test_decode_rejection_archives_received_response)
     await r.record_async("DEMO replay runs without JEV", test_demo_replay_runs_without_jev)
+    await r.record_async("prefix build runs off the event loop", test_prefix_build_runs_off_event_loop)
+    await r.record_async("HTTP failure logs status and stage", test_http_failure_logs_status_and_stage)
+    await r.record_async("budget exceeded stops the session", test_budget_exceeded_stops_session)
+    await r.record_async("provider size refusal stops the session", test_provider_size_refusal_stops_session)
+    await r.record_async("transient failures do not stop the session", test_transient_failures_do_not_stop_session)
     return r.all_passed
 
 

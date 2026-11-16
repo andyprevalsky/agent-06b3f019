@@ -820,16 +820,80 @@ PRESTACK_FORBIDDEN_LOG = (
 )
 
 
-def undelivered_native_stop_sha(args: argparse.Namespace, volume_id: str | None = None) -> tuple[str, str]:
-    """The controller's exact verified native stop of a never-delivered guest."""
-    payload = read_bytes(Path(args.output_dir) / "guest-native-stop.json", maximum=65536)
-    record = parse_json_object(payload, Path(args.output_dir) / "guest-native-stop.json")
+# A delivered shutdown can find a driver that exited before run.sh started the
+# backend: no services manifest, backend log or run record ever existed, so the
+# guest can neither acknowledge cleanup nor name a provider session. Recovery
+# seals that exact guest-state receipt, natively stops the exact Machine (or
+# accepts it already stopped) and records the stop here. The original-volume
+# capture then proves the same absence on the stopped volume itself.
+PREBACKEND_DELIVERY = "pre-backend-exit"
+PREBACKEND_STATE_RECEIPT = "guest-cleanup.state.json"
+ABSENT_GUEST_FILE = {"exists": False, "regular": False, "symlink": False, "bytes": None, "within_limit": False}
+# Recovery inputs whose presence means this guest already has other evidence.
+NATIVE_STOP_RECOVERY_OUTPUTS = (
+    "guest-shutdown.confirmed",
+    "guest-cleanup.backend.log",
+    "guest-cleanup.provider-manifest.json",
+    "guest-cleanup.recovery-receipt.json",
+    "guest-cleanup.machine-stopped.json",
+    UNDELIVERED_CAPTURE_POINTER,
+)
+# Everything a started backend, worker or benchmark root leaves on the volume.
+PREBACKEND_ABSENT = (
+    "cloudbench-driver.pid",
+    "repo/.context/cloudbench/services.json",
+    "repo/.context/cloudbench/run.json",
+    "repo/.context/cloudbench/logs/backend.log",
+    "repo/.context/cloudbench/logs/worker.log",
+)
+PREBACKEND_FORBIDDEN_LOG = (
+    "stack healthy",
+    "running benchmark",
+    "[Server] Server started",
+    "Service manifest:",
+)
+
+
+def prebackend_exit_state(output_dir: str, machine_id: str, guest_run_token: str) -> str:
+    """SHA-256 of the sealed guest state proving the driver exited pre-backend."""
+    payload = read_bytes(Path(output_dir) / PREBACKEND_STATE_RECEIPT, maximum=1024 * 1024)
+    state = parse_json_object(payload, Path(output_dir) / PREBACKEND_STATE_RECEIPT)
     expected = {
-        "version": 1, "kind": "guest-native-stop", "fleet_owner_token": args.owner,
-        "run_id": args.fleet_run_id, "bench": args.bench, "machine_id": args.machine_id,
+        "schema_version": "cloudbench-guest-state-v1", "version": 1, "state": "exited",
+        "machine_id": machine_id, "guest_run_token": guest_run_token,
+        "reason": "missing exact guest services manifest", "driver_state": "exited",
+        "driver_pid": None, "driver_process_state": None, "driver_token_match": False,
+        "driver_descendants": [], "services_manifest": ABSENT_GUEST_FILE,
+        "run_json": ABSENT_GUEST_FILE, "backend_log": ABSENT_GUEST_FILE,
+        "services_status": None, "stopped_service_pids": [], "live_service_pids": [],
+        "backend_port": None, "backend_closed": None,
+    }
+    if state != expected or any(type(state[key]) is not type(value) for key, value in expected.items()):
+        raise CleanupEvidenceError("guest state does not prove the driver exited before its backend started")
+    return sha256_bytes(payload)
+
+
+def native_stop_record(
+    output_dir: str, owner: str, run_id: str, bench: str, machine_id: str,
+    guest_run_token: str, volume_id: str | None = None,
+) -> tuple[str, str, str]:
+    """The controller's exact verified native stop: (sha256, volume, delivery)."""
+    payload = read_bytes(Path(output_dir) / "guest-native-stop.json", maximum=65536)
+    record = parse_json_object(payload, Path(output_dir) / "guest-native-stop.json")
+    delivery = record.get("delivery_receipt")
+    expected = {
+        "version": 1, "kind": "guest-native-stop", "fleet_owner_token": owner,
+        "run_id": run_id, "bench": bench, "machine_id": machine_id,
         "ownership": "fresh", "delivery_receipt": "absent", "stop_requested": True,
         "verified": True, "verified_state": "stopped", "destroyed": False,
     }
+    if delivery == PREBACKEND_DELIVERY:
+        # An already stopped exact Machine is accepted without a new request.
+        expected.update(delivery_receipt=PREBACKEND_DELIVERY,
+                        reason="guest exited before its backend started",
+                        stop_requested=record.get("stop_requests", 0) > 0
+                        if type(record.get("stop_requests")) is int else None,
+                        guest_state_sha256=prebackend_exit_state(output_dir, machine_id, guest_run_token))
     volume = record.get("volume_id")
     if (
         any(record.get(key) != value or type(record.get(key)) is not type(value)
@@ -838,7 +902,66 @@ def undelivered_native_stop_sha(args: argparse.Namespace, volume_id: str | None 
         or (volume_id is not None and volume != volume_id)
     ):
         raise CleanupEvidenceError("guest-native-stop.json is not an exact verified undelivered stop")
-    return sha256_bytes(payload), volume
+    return sha256_bytes(payload), volume, delivery
+
+
+def undelivered_native_stop_sha(args: argparse.Namespace, volume_id: str | None = None) -> tuple[str, str]:
+    """The controller's exact verified native stop of a never-delivered guest."""
+    native_sha, volume, _ = native_stop_record(
+        args.output_dir, args.owner, args.fleet_run_id, args.bench, args.machine_id,
+        args.guest_run_token, volume_id)
+    return native_sha, volume
+
+
+def publish_prebackend_native_stop(args: argparse.Namespace) -> int:
+    """Record the exact stopped Machine of a guest that exited before its backend."""
+    identity(args)
+    output = Path(args.output_dir)
+    if (
+        Path(args.state_receipt) != output / PREBACKEND_STATE_RECEIPT
+        or re.fullmatch(r"vol_[A-Za-z0-9]+", args.volume_id) is None
+        or SAFE_NAME.fullmatch(args.clone_name) is None
+        or args.stop_requests not in {0, 1}
+    ):
+        raise CleanupEvidenceError("unsafe pre-backend native-stop identity")
+    if read_bytes(output / ".cid", maximum=256) != f"clone {args.machine_id}\n".encode():
+        raise CleanupEvidenceError("pre-backend native stop requires the task's exact fresh clone")
+    state_sha = prebackend_exit_state(args.output_dir, args.machine_id, args.guest_run_token)
+    status_sha = parse_stopped_machine_status(Path(args.machine_status), args.machine_id, args.clone_name)
+    target = output / "guest-native-stop.json"
+    if target.exists() or target.is_symlink():
+        native_stop_record(args.output_dir, args.owner, args.fleet_run_id, args.bench,
+                           args.machine_id, args.guest_run_token, args.volume_id)
+        return 0
+    for name in NATIVE_STOP_RECOVERY_OUTPUTS:
+        if (output / name).exists() or (output / name).is_symlink():
+            raise CleanupEvidenceError(f"{name} already exists; this guest has other recovery evidence")
+    now = int(time.time())
+    atomic_json(target, {
+        "version": 1, "kind": "guest-native-stop",
+        "reason": "guest exited before its backend started",
+        "delivery_receipt": PREBACKEND_DELIVERY, "run_id": args.fleet_run_id,
+        "fleet_owner_token": args.owner, "bench": args.bench, "machine_id": args.machine_id,
+        "volume_id": args.volume_id, "ownership": "fresh",
+        "stop_requested": args.stop_requests > 0, "stop_requests": args.stop_requests,
+        "verified_state": "stopped", "verified": True, "requested_epoch": now,
+        "verified_epoch": now, "destroyed": False, "guest_state_sha256": state_sha,
+        "machine_status_sha256": status_sha,
+    })
+    native_stop_record(args.output_dir, args.owner, args.fleet_run_id, args.bench,
+                       args.machine_id, args.guest_run_token, args.volume_id)
+    return 0
+
+
+def prove_prebackend_exit(args: argparse.Namespace) -> int:
+    identity(args)
+    if Path(args.state_receipt) != Path(args.output_dir) / PREBACKEND_STATE_RECEIPT:
+        raise CleanupEvidenceError("unsafe pre-backend guest state path")
+    backend = Path(args.backend_log)
+    if backend.exists() or backend.is_symlink():
+        raise CleanupEvidenceError("a backend log exists; the guest is not pre-backend")
+    prebackend_exit_state(args.output_dir, args.machine_id, args.guest_run_token)
+    return 0
 
 
 def undelivered_prestack_zero_manifest(args: argparse.Namespace) -> dict[str, Any]:
@@ -853,7 +976,9 @@ def undelivered_prestack_zero_manifest(args: argparse.Namespace) -> dict[str, An
     import tarfile
 
     exact_identity = identity(args)
-    native_sha, volume = undelivered_native_stop_sha(args)
+    native_sha, volume, delivery = native_stop_record(
+        args.output_dir, args.owner, args.fleet_run_id, args.bench, args.machine_id,
+        args.guest_run_token)
     pointer_path = Path(args.output_dir) / UNDELIVERED_CAPTURE_POINTER
     pointer = read_json_object(pointer_path, maximum=65536)
     capture_dir = Path(str(pointer.get("capture_dir", "")))
@@ -901,13 +1026,35 @@ def undelivered_prestack_zero_manifest(args: argparse.Namespace) -> dict[str, An
         not isinstance(files, dict) or not isinstance(missing, list)
         or files != {name: {"bytes": len(data), "sha256": sha256_bytes(data)}
                      for name, data in originals.items()}
-        or set(originals) != {"bench.log", "cloudbench-driver.state"}
+    ):
+        raise CleanupEvidenceError("undelivered capture does not prove the stack never started")
+    if delivery == PREBACKEND_DELIVERY:
+        token = args.guest_run_token
+        forbidden = set(PREBACKEND_ABSENT) | {
+            f"cloudbench-interrupt-cleanup-{token}.status",
+            f"repo/.context/cloudbench/cloudbench-interrupt-cleanup-{token}.status",
+        }
+        text = "\n".join(data.decode("utf-8", "replace") for data in originals.values())
+        if (
+            originals.get("cloudbench-driver.state") != b"exited\n"
+            or not bench_log.startswith(f"RUNSTAMP-{token}\n")
+            or not set(PREBACKEND_ABSENT) <= set(missing)
+            or forbidden & set(originals)
+            or any(name.startswith("repo/.context/cloudbench/logs/") for name in originals)
+            or any(marker in text for marker in PREBACKEND_FORBIDDEN_LOG)
+        ):
+            raise CleanupEvidenceError("pre-backend capture does not prove the backend never started")
+        driver_state = "exited"
+    elif (
+        set(originals) != {"bench.log", "cloudbench-driver.state"}
         or not set(PRESTACK_ABSENT) <= set(missing)
         or originals["cloudbench-driver.state"] != b"booting\n"
         or not bench_log.startswith(f"RUNSTAMP-{args.guest_run_token}\n")
         or any(marker in bench_log for marker in PRESTACK_FORBIDDEN_LOG)
     ):
         raise CleanupEvidenceError("undelivered capture does not prove the stack never started")
+    else:
+        driver_state = "booting"
     return {
         "schema_version": SCHEMA,
         "version": 1,
@@ -919,7 +1066,8 @@ def undelivered_prestack_zero_manifest(args: argparse.Namespace) -> dict[str, An
             "guest_native_stop_sha256": native_sha,
             "capture_archive_sha256": archive_sha,
             "capture_provenance_sha256": sha256_bytes(provenance_payload),
-            "driver_state": "booting",
+            "driver_state": driver_state,
+            **({"delivery_receipt": delivery} if delivery == PREBACKEND_DELIVERY else {}),
             "allocation_event_count": 0,
         },
     }
@@ -1832,6 +1980,19 @@ def parse_args() -> argparse.Namespace:
     add_zero_provider_arguments(zero)
     zero.add_argument("--receipt", required=True)
 
+    prebackend = subparsers.add_parser("prove-prebackend-exit")
+    add_identity_arguments(prebackend)
+    prebackend.add_argument("--backend-log", required=True)
+    prebackend.add_argument("--state-receipt", required=True)
+
+    prebackend_stop = subparsers.add_parser("publish-prebackend-native-stop")
+    add_identity_arguments(prebackend_stop)
+    prebackend_stop.add_argument("--state-receipt", required=True)
+    prebackend_stop.add_argument("--clone-name", required=True)
+    prebackend_stop.add_argument("--volume-id", required=True)
+    prebackend_stop.add_argument("--machine-status", required=True)
+    prebackend_stop.add_argument("--stop-requests", type=int, required=True)
+
     validate = subparsers.add_parser("validate-recovery-receipt")
     add_identity_arguments(validate)
     add_optional_provider_arguments(validate)
@@ -1859,6 +2020,10 @@ def main() -> int:
         return cleanup_sealed_provider_sessions(args)
     if args.command == "recover-zero-allocation":
         return recover_zero_allocation(args)
+    if args.command == "prove-prebackend-exit":
+        return prove_prebackend_exit(args)
+    if args.command == "publish-prebackend-native-stop":
+        return publish_prebackend_native_stop(args)
     if args.command == "validate-recovery-receipt":
         return validate_recovery_receipt(args)
     raise CleanupEvidenceError("unknown cleanup command")

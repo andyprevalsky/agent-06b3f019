@@ -38,13 +38,13 @@
     {
       "id": "tilion-browser-sessions",
       "name": "Tilion browser sessions",
-      "limit": 20,
+      "limit": 250,
       "limit_unit": "concurrent browsers",
-      "limit_qualifier": "pilot plan",
+      "limit_qualifier": "pilot_roselabs",
       "credential_env": "TILION_API_KEY",
       "per_bench_peak": 1,
       "per_bench_peak_unit": "sessions per bench",
-      "limit_source": "Tilion pilot: 20 concurrent browsers on one account shared by prod, dev and benchmarks; a 21st create answers 429 concurrency_limit.",
+      "limit_source": "Tilion GET https://back.tilion.dev/v1/usage (read 2026-11-15): concurrency_limit 250, tier pilot_roselabs, rate_limits scope api_key; one account shared by prod, dev and benchmarks; a create above the limit answers 429 concurrency_limit.",
       "demand_source": "Not yet measured on Tilion; one live session per bench assumed until a Tilion fleet census exists.",
       "exhaustion": "Browser session creation fails with a typed 429; no unlimited fallback.",
       "browser_provider": "tilion",
@@ -90,6 +90,18 @@
       "limit_source": "Firecrawl plan rate limit, 500 requests/min.",
       "demand_source": "run600c peak ~1.53 requests/min per bench.",
       "fallback": "overflow falls back to Parallel Extract"
+    }
+  ],
+  "demand_profiles": [
+    {
+      "id": "polar-bench",
+      "task_group": "polar-bench",
+      "date": "2026-11-16",
+      "per_bench_peak": {
+        "parallel-search-extract": 3.25
+      },
+      "demand_measurement": "polar-bench census 2026-11-16, 1.5x margin",
+      "demand_source": "24 Polar cloud runs 2026-11-15/16 (20 distinct polar-bu/polar-odysseys tasks, 463 bench-minutes; .context/fleet/runs/*/polar-*/run.json). Explore sub-agents run inside the root workflow, so root messages and each bench's worker log cover the tree. Worker logs: 43 Parallel Search requests (one per web_search call, 0 provider retries) and 0 Parallel Extract fallbacks (all 26 web_fetch calls served by Firecrawl). Conservative count = every web_search + every web_fetch call (71, by toolCallId) aligned at a synchronized start: peak 52 requests in 60 s over 24 benches = 2.17 requests/min per bench (polar-bu only 2.64; steady state 0.15). Recorded 3.25 = 1.5x margin over 2.17."
     }
   ]
 }

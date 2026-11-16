@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import structlog
 
@@ -24,6 +24,20 @@ COMPRESSOR_VERSION = "cp-v7"
 COMPRESSOR_PROMPT_MAX_LINES = 100
 COMPRESSOR_CALL_SITE = "memory_compressor"
 COMPRESSOR_MODEL = os.environ.get("PLANNER_MEMORY_COMPRESSOR_MODEL", "rose-labs/rose-1-ultra")
+# call_llm credentials a caller may lend the compressor: the planner activity's own
+# leased compute token, so a plan-time compression rides the same lease.
+COMPRESSOR_AUTH_KWARGS = (
+    "claude_token",
+    "claude_token_source",
+    "claude_token_pool_id",
+    "claude_token_user_id",
+    "gpt_token",
+    "gpt_account_id",
+    "gpt_token_source",
+    "gpt_token_pool_id",
+    "gpt_token_user_id",
+    "compute_token_lineage_key",
+)
 
 COMPRESSOR_PROMPT = """You are given the transcript of one completed agent run and the goal it pursued.
 Extract the shortest path that actually produced the outcome. Return JSON only.
@@ -97,10 +111,15 @@ async def compress_transcript(
     model: Optional[str] = None,
     agent_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    llm_auth: Optional[Mapping[str, Any]] = None,
 ) -> CriticalPath:
-    """Run the compressor LLM once for ``transcript`` and return the clamped record."""
+    """Run the compressor LLM once for ``transcript`` and return the clamped record.
+
+    ``llm_auth`` carries the caller's leased compute token (``COMPRESSOR_AUTH_KWARGS``).
+    """
     from helpers.llm import call_llm
 
+    auth = {key: value for key, value in (llm_auth or {}).items() if key in COMPRESSOR_AUTH_KWARGS and value}
     started = time.perf_counter()
     result = await call_llm(
         build_compressor_messages(transcript),
@@ -113,6 +132,7 @@ async def compress_transcript(
         agent_id=agent_id,
         user_id=user_id,
         skip_cache_write=True,
+        **auth,
     )
     content = result.get("content") if isinstance(result, dict) else None
     if not isinstance(content, str) or not content.strip():

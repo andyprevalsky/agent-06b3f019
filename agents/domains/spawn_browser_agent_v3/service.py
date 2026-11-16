@@ -473,6 +473,31 @@ async def build_browser_verifier_context(
         and isinstance(entry.get("result"), dict) and "value" in entry["result"]
     ]
 
+    # Native phone requests/results are canonical execution evidence, not
+    # browser DOM. Keep every recorded operation outside the compact window:
+    # later observations cannot recreate an earlier irreversible input.
+    phone_evidence = [
+        {"role": "TOOL", "text": "",
+         "metadata": {
+             "toolName": "phone",
+             "title": "Recorded phone request and result; not browser DOM confirmation.",
+             "toolStatus": "FINISHED" if entry["result"].get("success", True) else "ERROR",
+             "browser_action_step": entry["step"],
+             "structured_response": {"step": entry["step"], "params": entry.get("params", {}),
+                                     "result": entry["result"]},
+         }}
+        for entry in all_action_entries
+        if type(entry.get("step")) is int and entry.get("action") == "phone"
+        and isinstance(entry.get("result"), dict)
+    ]
+    # Keep the latest actual phone screen ahead of the remaining bounded
+    # history. Later metadata reads must not displace current visual evidence.
+    latest_phone_observation = [
+        receipt for receipt in phone_evidence
+        if receipt["metadata"]["structured_response"]["params"].get("operation") == "screen.text"
+    ][-1:]
+    phone_evidence = [receipt for receipt in phone_evidence if receipt not in latest_phone_observation]
+
     page_stats = browser_state.get("page_stats", {})
     scroll_pos = browser_state.get("scroll_position", {})
     pages_above = scroll_pos.get("pages_above", 0)
@@ -624,12 +649,12 @@ async def build_browser_verifier_context(
                 "screenshot_context": browser_state.get("screenshot_context") or {"url": current_url},
             },
         },
-    ] + observation_evidence[:1] + sorted(
+    ] + observation_evidence[:1] + latest_phone_observation + sorted(
         # Keep the latest independent native observation first. Admit remaining
         # step-owned receipts newest first across both kinds, so old native
         # history cannot consume the whole budget ahead of recent evaluations.
         # Stable sorting keeps native observations first for equal steps.
-        observation_evidence[1:] + evaluation_evidence,
+        observation_evidence[1:] + evaluation_evidence + phone_evidence,
         key=lambda receipt: receipt["metadata"]["browser_action_step"],
         reverse=True,
     )

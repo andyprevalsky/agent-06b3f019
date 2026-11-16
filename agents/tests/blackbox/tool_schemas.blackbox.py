@@ -319,7 +319,11 @@ def test_grep_tool_schema_exact_contract():
     assert descriptions == {
         "owner_user_id": "Only this owner's records (ids from the shared data map).",
         "team_id": "Only accounts shared with this team.",
-        "account_id": 'Only this inbox email ("" = default iMessage account).',
+        "account_id": (
+            'Only this account (exact accountId from the shared data map): an inbox email, "" (iMessage), '
+            '"whatsapp", "linkedin" (via messages), "granola", "fireflies", or a bank login id. '
+            "Shared bank transactions need team_id or owner_user_id."
+        ),
     }
 
 

@@ -723,6 +723,9 @@ def test_boot_admission_archives_only_verified_completed_standalone_runs(tmp_pat
         "manifest-timeout",
         "socket-reset",
         "socket-disconnect",
+        "file-stall",
+        "file-truncate",
+        "file-corrupt",
         "shutdown-url",
         "driver-timeout",
         "ack-url",
@@ -855,3 +858,89 @@ trap stop_on_exit EXIT
     assert (out / "runtime-evidence.pending").is_file()
     assert (out / "runtime-evidence.owner.json").is_file()
     assert not (out / "remote-logs/runtime-evidence").exists()
+
+
+@pytest.mark.parametrize(
+    "case", ["probe", "autoscaler-log", "autoscaler-pid", "workers", "owner-only", "no-ack", "foreign-ack", "worker-evidence"]
+)
+def test_recovery_admits_infra_probe_outputs_that_never_own_runtime_evidence(tmp_path: Path, case: str) -> None:
+    """A SIGKILLed --infra-probe fleet (owner 0e592393) has admitted guests but, by design, no runtime evidence."""
+    token = "b" * 32
+    registry = tmp_path / "registries" / token
+    (registry / "clones").mkdir(parents=True)
+    audit = tmp_path / "audits" / token
+    for name in ("fresh", "expected-fresh", "by-machine-id", "pool"):
+        (audit / name).mkdir(parents=True)
+    (audit / "meta").write_text(f"fleet_owner_token={token}\n")
+    runs = tmp_path / "runs"
+    run = runs / "run-p"
+    (run / "_batch").mkdir(parents=True)
+    names = ["probe-a", "probe-b"]
+    (run / "_batch/benches.json").write_text(json.dumps([{"name": n, "mode": "REAL"} for n in names]))
+    contract = runpy.run_path(str(ROOT / "scripts/cloudbench_execution_provenance.py"))
+    matrix = contract["build_task_matrix"]([f"{n}=real" for n in names])
+    config = contract["build_config"](
+        contract["CONFIG_SCHEMA_VERSION"], ["task_count=2", "task_matrix_sha256=" + matrix["sha256"]]
+    )
+    (run / "execution-provenance.json").write_text(json.dumps({
+        "schema_version": contract["EXECUTION_SCHEMA_VERSION"], "base_sha": "a" * 40,
+        "workspace_patch_sha256": "none",
+        "controller_snapshot": {"schema_version": contract["SNAPSHOT_SCHEMA_VERSION"], "sha256": "b" * 64},
+        "config": config,
+    }))
+    (run / "execution-task-matrix.json").write_text(json.dumps(matrix))
+    for index, name in enumerate(names):
+        machine = f"abc12{index}"
+        (audit / f"fresh/clone-{index}").write_text(f"source_machine_id=123456\nmachine_id={machine}\n")
+        out = run / name
+        out.mkdir()
+        (out / ".cid").write_text(f"clone {machine}\n")
+        (out / "post-config-start.accepted").write_text(machine + "\n")
+        (out / "autoscaler.ready").write_bytes(b"")
+        (out / "autoscaler.completed-after-child").write_bytes(b"")
+        (out / "desired-worker-count").write_text("0\n")
+        (out / "guest-shutdown.confirmed").write_text("run-p\n")
+    out = run / names[1]
+    if case == "autoscaler-log":
+        (out / "autoscaler.log").write_text("autoscaler started\n")
+    elif case == "autoscaler-pid":
+        (out / "autoscaler.pid").write_text("123 start\n")
+    elif case == "workers":
+        (out / "desired-worker-count").write_text("1\n")
+    elif case == "owner-only":
+        (out / "runtime-evidence.owner.json").write_text(json.dumps({"version": 1, "machine_id": "abc121", "run_token": token + "-1"}))
+    elif case == "no-ack":
+        (out / "guest-shutdown.confirmed").unlink()
+    elif case == "foreign-ack":
+        (out / "guest-shutdown.confirmed").write_text("run-other\n")
+    elif case == "worker-evidence":
+        (out / "worker-runtime-evidence/w1").mkdir(parents=True)
+    (registry / "meta").write_text(f"fleet_owner_token={token}\naudit_dir={audit}\nruns_root={runs}\nrun_id=run-p\n")
+    latch = registry / "runtime-evidence-unconfirmed"
+    latch.touch()
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "cloudbench_execution_provenance.py").write_bytes(
+        (ROOT / "scripts/cloudbench_execution_provenance.py").read_bytes()
+    )
+    (snapshot / "cloudbench_result.py").write_text("import sys\nsys.exit(0)\n")
+    functions = "\n".join(
+        _extract_fleet_function(fleet_source_text(), name + "() {")
+        for name in (
+            "registry_meta_value",
+            "cloudbench_retain_runtime_evidence",
+            "cloudbench_validate_primary_runtime_evidence",
+            "cloudbench_validate_worker_evidence_coverage",
+            "cloudbench_collect_remaining_runtime_evidence",
+            "fleet_recovery_confirm_runtime_evidence",
+        )
+    )
+    result = subprocess.run(
+        ["bash", "-c", functions + '\ncloudbench_fsync_directory() { :; }\nfleet_recovery_confirm_runtime_evidence "$REGISTRY"\n'],
+        env={**os.environ, "REGISTRY": str(registry), "FLEET_AUDIT_ROOT": str(audit.parent),
+             "CLOUDBENCH_SCRIPT_SNAPSHOT": str(snapshot), "INFRA_PROBE": "0", "SKIP_AUTOSCALER": "0"},
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    accepted = case == "probe"
+    assert (result.returncode == 0) == accepted, result.stderr
+    assert latch.exists() == (not accepted)

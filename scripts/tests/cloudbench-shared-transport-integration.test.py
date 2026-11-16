@@ -31,6 +31,18 @@ def frame(data):
     return struct.pack('<H',len(data))+data
 
 
+def send_with_stall_bound(stream,data):
+    """Send all of data, failing only when one wait for the socket to become writable exceeds the timeout.
+
+    sendall() spends the socket timeout on the whole transfer (Python >= 3.5), which turns a stall
+    bound into a throughput deadline for payloads sized to the host's kernel buffers; send() keeps
+    the timeout per wait (until the peer drains the send buffer past the kernel's writability
+    threshold), as recv() does on the read side.
+    """
+    view=memoryview(data)
+    while view:view=view[stream.send(view):]
+
+
 class FakeUnixAgent:
     """Fly v0.4.115 framing. Payload behavior tests the broker, not WireGuard.
 
@@ -337,7 +349,7 @@ class SharedRelay(unittest.TestCase):
         # send more than those hops can absorb; the relay's RSS bound below is unchanged.
         payload=b'x'*(16*1024*1024+2*kernel_socket_buffer_capacity());finished=threading.Event();errors=[]
         def sender():
-            try:client.sendall(payload)
+            try:send_with_stall_bound(client,payload)
             except OSError as error:errors.append(error)
             finally:finished.set()
         def rss():
@@ -351,18 +363,52 @@ class SharedRelay(unittest.TestCase):
             start=time.monotonic();result=f.call('check',owner,'a'*32,['--lease',lease['lease']])
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertLess(time.monotonic()-start,2,'blocked stream stalled broker control')
-            f.agent.release.set()
+            f.agent.release.set();released=time.monotonic()
             response=bytearray()
             while len(response)<len(payload):
-                block=client.recv(65536)
+                try:block=client.recv(65536)
+                except TimeoutError:
+                    # A failed sender leaves the reader waiting for bytes never sent; report its error first.
+                    thread.join(timeout=3);self.assertFalse(errors,'sender failed before the payload was echoed');raise
                 if not block:break
                 response.extend(block)
             thread.join(timeout=3)
+            print('shared relay backpressure: payload',len(payload)>>20,'MiB, kernel buffer capacity',kernel_socket_buffer_capacity()>>20,
+                  'MiB, echoed in %.2fs'%(time.monotonic()-released),flush=True)
             self.assertFalse(errors)
             self.assertEqual(len(response),len(payload))
             self.assertEqual(hashlib.sha256(response).digest(),hashlib.sha256(payload).digest())
         finally:
             f.agent.release.set();client.close();thread.join(timeout=2)
+
+    def test_backpressure_sender_timeout_bounds_stalls_not_total_transfer_time(self):
+        # FLAKY 3b413cb2: on a large-buffer host the 1 GiB backpressure payload took longer than the
+        # 8 s socket timeout to cross the relay while making steady progress; sendall() timed out,
+        # and the reader then waited out recv() at line 357 for bytes that were never sent.
+        def transfer(reader_pause,reader_reads):
+            writer,reader=socket.socketpair()
+            # Pin the send buffer: AF_UNIX defaults to net.core.wmem_default, which a tuned host can
+            # raise far enough to absorb the payload or stretch one writability wait past 1 s.
+            writer.setsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF,65536);writer.settimeout(1)
+            def drain():
+                try:
+                    for _ in range(reader_reads):
+                        time.sleep(reader_pause)
+                        if not reader.recv(65536):return
+                except OSError:pass  # The writer side is torn down once the transfer has its verdict.
+            thread=threading.Thread(target=drain,daemon=True);thread.start()
+            start=time.monotonic()
+            try:send_with_stall_bound(writer,b'x'*(8*1024*1024));return None,time.monotonic()-start
+            except TimeoutError as error:return error,time.monotonic()-start
+            finally:writer.close();thread.join(timeout=3);reader.close()
+        # A reader that keeps draining with short pauses takes well over the 1 s timeout in total.
+        error,elapsed=transfer(.025,10**6)
+        self.assertIsNone(error,'a progressing transfer failed its per-wait stall bound')
+        self.assertGreater(elapsed,1.5,'fixture transfer did not outlast the socket timeout')
+        # Negative control: a reader that stops draining still trips the same 1 s bound.
+        error,elapsed=transfer(.025,4)
+        self.assertIsInstance(error,TimeoutError,'a stalled transfer was not bounded')
+        self.assertLess(elapsed,5)
 
 
     def test_parent_death_retires_broker_and_listener_without_foreign_signals(self):
@@ -892,6 +938,52 @@ with (root/'wireguard-calls').open('a')as stream:
             values.append(module['start_shared_relay'](repo,third_dir,repo,f.feed,time.monotonic()+15))
             self.assertEqual(len(proxies()),2)
             self.assertTrue(module['stop_shared_relay'](values.pop()))
+
+
+class WireGuardPeerClaimScope(unittest.TestCase):
+    """The one-campaign peer claim belongs to flyctl's effective config dir.
+
+    flyctl keeps config, agent socket and wire_guard_state in FLY_CONFIG_DIR
+    (default ~/.fly). On 2026-11-16 a second rolling campaign launched with its
+    own FLY_CONFIG_DIR (its own agent and peer, 6PN verified) was refused because
+    the claim always used $HOME/.fly.
+    """
+
+    def setUp(self):
+        import runpy
+        self.claim = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))['claim_home_wireguard_peer']
+        directory = tempfile.TemporaryDirectory(prefix='wg-claim-'); self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / 'home'; self.home.mkdir(mode=0o700)
+        self.descriptors = []
+        self.addCleanup(lambda: [os.close(descriptor) for descriptor in self.descriptors])
+
+    def claim_with(self, campaign, **environment):
+        from unittest.mock import patch
+        values = dict(os.environ, HOME=str(self.home)); values.pop('FLY_CONFIG_DIR', None); values.update(environment)
+        with patch.dict(os.environ, values, clear=True):
+            descriptor = self.claim(self.root / campaign)
+        self.descriptors.append(descriptor)
+        return descriptor
+
+    def test_same_config_dir_conflicts_and_distinct_config_dirs_both_claim(self):
+        shared = str(self.root / 'fly-a')
+        self.claim_with('campaign-a', FLY_CONFIG_DIR=shared)
+        with self.assertRaisesRegex(ValueError, 'WireGuard peer.*own FLY_CONFIG_DIR'):
+            self.claim_with('campaign-b', FLY_CONFIG_DIR=shared)
+        self.claim_with('campaign-c', FLY_CONFIG_DIR=str(self.root / 'fly-c'))
+        self.assertTrue((self.root / 'fly-a/rose-campaign-wireguard-peer.lock').is_file())
+        self.assertIn('campaign-c', (self.root / 'fly-c/rose-campaign-wireguard-peer.lock').read_text())
+        self.assertFalse((self.home / '.fly').exists(), 'an explicit FLY_CONFIG_DIR claimed the HOME peer')
+
+    def test_unset_config_dir_keeps_the_home_fly_claim(self):
+        self.claim_with('campaign-a')
+        self.assertIn('campaign-a', (self.home / '.fly/rose-campaign-wireguard-peer.lock').read_text())
+        with self.assertRaisesRegex(ValueError, 'WireGuard peer'):
+            self.claim_with('campaign-b')
+        with self.assertRaisesRegex(ValueError, 'WireGuard peer'):
+            self.claim_with('campaign-c', FLY_CONFIG_DIR=str(self.home / '.fly'))
+        self.claim_with('campaign-d', FLY_CONFIG_DIR=str(self.root / 'fly-d'))
 
 
 

@@ -2720,6 +2720,94 @@ fi
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID"' \
   "fleet must wait for the shared warm source to stop before cloning"
+
+# Warm-source maintenance wait (2026-11-16). A sibling launch for another ref
+# ran run-bench-cloud --refresh-deps, which holds the shared app-environment
+# lock while the shared donor is started for ~8-10 minutes. Provisioning fleets
+# exhausted their 60 x 5s stop budget and failed as INFRA, crossing the 5% stop
+# twice. Runs the production await_stopped_warm_source with the real stop wait
+# and lock probe under a simulated clock and a real live lock-owner process.
+warm_source_maintenance_wait_contract() (  # <run-bench-fleet>
+  local fleet="$1" function_source holder status started elapsed out
+  local lock_root="$TMP_ROOT/warm-maintenance"
+  function_source="$(awk '
+    /^await_stopped_warm_source\(\) \{/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$fleet")"
+  [ -n "$function_source" ] || { echo "could not load production await_stopped_warm_source" >&2; return 1; }
+  eval "$function_source"
+  unset CLOUDBENCH_WARM_STOP_ATTEMPTS CLOUDBENCH_WARM_STOP_SLEEP_SECONDS CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS SNAPSHOT_LOOP_PID
+  # shellcheck source=../lib/cloudbench-app-env-lock.sh
+  source "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh"
+  mkdir -p "$lock_root"
+  APP_ENV_LOCK_FILE="$lock_root/cloudbench-app-env.lock"
+  WARM_ID=683e47df5094d8
+  command sleep 3600 &
+  holder=$!
+  trap 'kill "$holder" 2>/dev/null || true' EXIT
+  # Simulated clock: Bash SECONDS is assignable, so the stop wait's sleep and
+  # every SECONDS-based deadline advance together without real waiting.
+  sleep() { SECONDS=$((SECONDS + ${1%.*})); }
+  machines_snapshot_identity() { printf 'generation-1\n'; }
+  campaign_inventory_capture() { printf -v "$1" '%s' '[]'; }
+  pool_machine_shape_from_json() { cat >/dev/null; printf '%s shared 1 2048\n' "$(pool_machine_state "$WARM_ID")"; }
+  run_wait() {  # <case>: sets status/elapsed/out for one fresh wait
+    out="$lock_root/$1.out"
+    warm_state=started
+    status=0
+    SECONDS=0
+    await_stopped_warm_source > "$out" 2>&1 || status=$?
+    elapsed="$SECONDS"
+  }
+
+  # Live maintenance owns the lock for 600s (> the 300s stop budget), then
+  # parks the donor and releases the lock: the fleet must proceed, not fail.
+  printf '%s\n' "$holder" > "$APP_ENV_LOCK_FILE"
+  pool_machine_state() {
+    if [ "$SECONDS" -ge 600 ]; then rm -f "$APP_ENV_LOCK_FILE"; printf 'stopped\n'; else printf 'started\n'; fi
+  }
+  run_wait live-maintenance
+  [ "$status" -eq 0 ] && [ "$warm_state" = stopped ] \
+    || { echo "live lock owner: fleet failed after ${elapsed}s (status=$status)" >&2; cat "$out" >&2; return 1; }
+  [ "$elapsed" -ge 600 ] && [ "$elapsed" -lt 900 ] \
+    || { echo "live lock owner: fleet proceeded after ${elapsed}s, expected the 600s maintenance" >&2; return 1; }
+  grep -Fq "under live shared app environment maintenance (lock owner=$holder)" "$out" \
+    || { echo "live lock owner: the extended wait did not name its maintenance owner" >&2; cat "$out" >&2; return 1; }
+
+  # No lock owner, and a dead-owner (stale) lock, cannot explain a started
+  # donor: both keep today's 300s failure.
+  pool_machine_state() { printf 'started\n'; }
+  rm -f "$APP_ENV_LOCK_FILE"
+  run_wait no-owner
+  [ "$status" -ne 0 ] && [ "$elapsed" -le 300 ] && [ "$elapsed" -ge 290 ] \
+    && grep -Fq "warm source must be stopped before fleet provisioning (state=started)" "$out" \
+    || { echo "no lock owner: expected the 300s failure, got status=$status after ${elapsed}s" >&2; cat "$out" >&2; return 1; }
+  local dead=999999
+  while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+  printf '%s\n' "$dead" > "$APP_ENV_LOCK_FILE"
+  run_wait dead-owner
+  [ "$status" -ne 0 ] && [ "$elapsed" -le 300 ] && [ "$elapsed" -ge 290 ] \
+    || { echo "dead lock owner: expected the 300s failure, got status=$status after ${elapsed}s" >&2; cat "$out" >&2; return 1; }
+
+  # A live owner that never releases is still bounded by the lock's wait budget.
+  printf '%s\n' "$holder" > "$APP_ENV_LOCK_FILE"
+  run_wait stuck-maintenance
+  [ "$status" -ne 0 ] && [ "$elapsed" -le 3600 ] && [ "$elapsed" -ge 3590 ] \
+    && grep -Fq "still live after the 3600s lock wait budget" "$out" \
+    || { echo "stuck live owner: expected failure at the 3600s lock budget, got status=$status after ${elapsed}s" >&2; cat "$out" >&2; return 1; }
+)
+warm_source_maintenance_wait_contract "$ROOT_DIR/scripts/run-bench-fleet" \
+  || fail "fleet must outwait live shared-environment maintenance of the warm source, and only that"
+# The extended wait precedes provisioning, every bench's execution timeout and
+# its start-barrier clock.
+warm_wait_line="$(grep -n '^    await_stopped_warm_source || exit 1$' "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
+bench_timeout_line="$(grep -n 'bench_child_timeout=\$((bench_run_timeout + START_BARRIER_WAIT_SECONDS))' "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
+barrier_line="$(grep -n '^    barrier_start="\$(date +%s)"$' "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
+[ -n "$warm_wait_line" ] && [ -n "$bench_timeout_line" ] && [ -n "$barrier_line" ] \
+  && [ "$warm_wait_line" -lt "$bench_timeout_line" ] && [ "$warm_wait_line" -lt "$barrier_line" ] \
+  || fail "warm-source maintenance wait must precede bench execution timeouts and the start barrier"
+echo "PASS: fleet outwaits live warm-source maintenance; unexplained started donor still fails at 300s"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'stopping|replacing|starting)' \
   "machine start must wait out Fly stopping/replacing before request_machine_start"

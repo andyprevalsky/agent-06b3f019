@@ -1,4 +1,8 @@
-import { isNativePhoneAttention } from './nativePhoneAttention';
+import {
+  isNativePhoneAttention,
+  NativePhoneAttentionError,
+  type NativePhoneUserAction,
+} from './nativePhoneAttention';
 import { completeNativePhoneAttention } from './nativePhoneAttentionCompletion';
 import { runTransactionWithRetry } from './database';
 import { resumeAgentWorkflow } from './agentResume';
@@ -31,7 +35,8 @@ async function signalAuthAssistanceCompleted(
   workflowId: string,
   agentId: string,
   requestId: string,
-  userMessage: string | null = null
+  userMessage: string | null = null,
+  response: string = AUTH_ASSISTANCE_COMPLETED_RESPONSE
 ): Promise<void> {
   try {
     const client = await getTemporalClient();
@@ -40,7 +45,7 @@ async function signalAuthAssistanceCompleted(
       'receive_user_response',
       JSON.stringify({
         request_id: requestId,
-        response: AUTH_ASSISTANCE_COMPLETED_RESPONSE,
+        response,
         user_message: userMessage,
       })
     );
@@ -101,7 +106,8 @@ export async function completeAuthAssistanceForUser(
   userId: string,
   now = new Date(),
   overrides: Partial<AuthAssistanceCompletionDependencies> = {},
-  userMessage?: string
+  userMessage?: string,
+  action?: NativePhoneUserAction
 ): Promise<AuthAssistanceCompletionResult> {
   const deps: AuthAssistanceCompletionDependencies = {
     signalCompleted: signalAuthAssistanceCompleted,
@@ -136,6 +142,8 @@ export async function completeAuthAssistanceForUser(
       return { status: 'forbidden' as const };
     }
     if (isNativePhoneAttention(request.attentionRequest.metadata)) {
+      if (action !== undefined)
+        log.info('Native phone owner action requested', { request_id: id, action });
       await deps.beforeCompletionClaim();
       return completeNativePhoneAttention(
         tx,
@@ -144,9 +152,12 @@ export async function completeAuthAssistanceForUser(
         request.agentId,
         now,
         userMessage,
-        request.completedAt !== null
+        request.completedAt !== null,
+        action
       );
     }
+    if (action !== undefined)
+      throw new NativePhoneAttentionError(400, 'Resend code requires a native phone request');
     if (request.completedAt !== null) {
       await lockAgentWorkflowGeneration(tx, request.agentId);
       const authored = await persistAttentionUserMessages(tx, {
@@ -395,7 +406,8 @@ export async function completeAuthAssistanceForUser(
         result.workflowId,
         result.request.agentId,
         result.request.id,
-        result.userMessage
+        result.userMessage,
+        'response' in result ? result.response : undefined
       );
     }
     try {
@@ -425,7 +437,8 @@ export async function completeAuthAssistanceForUser(
           result.workflowId,
           result.request.agentId,
           result.request.id,
-          result.userMessage
+          result.userMessage,
+          'response' in result ? result.response : undefined
         );
       }
       try {

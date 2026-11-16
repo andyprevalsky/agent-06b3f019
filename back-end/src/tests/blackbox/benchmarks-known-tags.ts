@@ -143,4 +143,6 @@ export const KNOWN_TAGS = [
   'harness',
   // Explicit team account sharing (team-daily-* access-boundary benches).
   'teams',
+  // A connected (or team-shared) remote MCP server's tools (team-daily-shared-mcp).
+  'mcp',
 ];

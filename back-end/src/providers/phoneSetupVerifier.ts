@@ -94,7 +94,12 @@ export const verifyPhoneSetup: SetupVerifier = async (input) => {
               },
       },
     },
-    dump_context: { call_site: 'phone_setup_identity', agent_id: input.agentId },
+    // Same call site the usage ledger records (service.setup.ts billSetup).
+    dump_context: {
+      call_site: target === 'apple_account' ? 'phone_setup_identity' : `phone_setup_${target}`,
+      agent_id: input.agentId,
+      archive_scope: { agentId: input.agentId },
+    },
   });
   const output = new StructuredOutputAccumulator();
   let model = '';

@@ -2,11 +2,13 @@
  * [AGENT] Take control -> broker confirmation; [USER] navigation/Type -> stable owned command.
  * [BUSY|UNKNOWN|STALE|READ_ONLY] -> writes disabled; Type panel owns ephemeral text/focus.
  * [NATIVE ATTENTION] -> exact masked form, no generic Type/handback.
+ * [NATIVE ATTENTION] --Resend code--> typed resend completion (usePhoneResendCode states).
  * Handback -> agent; hide/lease change -> discard text. Controls remain outside phone pixels.
  */
 import { useEffect, useRef, useState } from 'react';
 import { PhoneAttentionNotice } from './PhoneAttentionNotice';
 import { PhoneAuthenticationForm } from './PhoneAuthenticationForm';
+import { PhoneResendCodeButton } from './PhoneResendCodeButton';
 import { matchesPhoneAttention } from './phoneAttentionState';
 import type { PhoneAttentionModel } from './usePhoneAttention';
 import type { PhoneOverlayModel } from './usePhoneOverlay';
@@ -190,6 +192,14 @@ export function PhoneOverlayControls({
           phone={phone}
           attention={attention}
           enabled={enabled}
+        />
+      )}
+      {!readOnly && attention && (
+        <PhoneResendCodeButton
+          agentId={lease?.agentId ?? attention.request?.agentId}
+          taskId={phone.taskId}
+          pendingRequestId={privateForm ? attention.request.id : null}
+          disabled={phone.busy || phone.uncertain || attention.completing}
         />
       )}
       {readOnly && <p className="text-xs text-white/70">Read-only phone view</p>}
