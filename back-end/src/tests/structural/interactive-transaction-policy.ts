@@ -99,6 +99,13 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
       'canonical wrapper implementation; caller deadline bounds acquisition/body and only pre-body failures retry',
   },
   {
+    file: 'providers/database.ts',
+    scope: 'runReadOnlyTransactionWithRetry',
+    fingerprint: 'c3fdc39db28f7b2d',
+    reason:
+      'canonical read-only wrapper: SET TRANSACTION READ ONLY makes a mid-body replay write-free, so it retries Prisma DB errors after body entry, which runTransactionWithRetry deliberately refuses',
+  },
+  {
     file: 'providers/purchase-wallet-funding-repo.ts',
     scope: 'recordIssuedCardAndFunding',
     fingerprint: 'edde5882c2ca127a',
