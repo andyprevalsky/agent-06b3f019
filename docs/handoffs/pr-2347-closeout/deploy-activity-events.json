@@ -1,0 +1,4101 @@
+{
+  "run_id": "20261116-062645-660536",
+  "capture_lines": 72,
+  "captured_file_sha256": "6e0f45a88b60db6737c5045a1d934a864558f4d814e631af287d35375b7f762b",
+  "events": [
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T06:31:53.411418+00:00",
+      "recorded_epoch": 1794810713.411418,
+      "workspace": "rose",
+      "git_sha": "453dddb5c4b88b6f9e261c70f2f20c58f72b127c",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-deploy-coordination",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T06:34:49.137134+00:00",
+      "recorded_epoch": 1794810889.1371336,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-deploy-coordination",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-start",
+      "value": "code-review",
+      "recorded_at": "2026-11-16T06:34:58.013810+00:00",
+      "recorded_epoch": 1794810898.01381,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "review-request",
+      "value": "coderabbit",
+      "recorded_at": "2026-11-16T06:35:07.075313+00:00",
+      "recorded_epoch": 1794810907.0753129,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "pr_number": 2347,
+        "reason": "waiter-start"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "review-arrival",
+      "value": "coderabbit",
+      "recorded_at": "2026-11-16T06:35:07.731160+00:00",
+      "recorded_epoch": 1794810907.7311604,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "pr_number": 2347,
+        "reason": "error"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-start",
+      "value": "runtime-blackbox",
+      "recorded_at": "2026-11-16T06:35:47.574966+00:00",
+      "recorded_epoch": 1794810947.574966,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "review-request",
+      "value": "coderabbit",
+      "recorded_at": "2026-11-16T06:35:53.723831+00:00",
+      "recorded_epoch": 1794810953.7238314,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "pr_number": 2347,
+        "reason": "waiter-start"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "review-arrival",
+      "value": "coderabbit",
+      "recorded_at": "2026-11-16T06:35:56.537893+00:00",
+      "recorded_epoch": 1794810956.5378928,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "pr_number": 2347,
+        "reason": "NEUTRAL"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-start",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T06:40:44.188448+00:00",
+      "recorded_epoch": 1794811244.1884482,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-validation-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-finish",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T06:47:14.625172+00:00",
+      "recorded_epoch": 1794811634.6251724,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-validation-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "diagnosis",
+      "recorded_at": "2026-11-16T06:47:14.719787+00:00",
+      "recorded_epoch": 1794811634.7197866,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-sleep-attribution",
+        "run_id": "20261116-062645-660536",
+        "reason": "diagnosis"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "diagnosis",
+      "recorded_at": "2026-11-16T06:48:30.827841+00:00",
+      "recorded_epoch": 1794811710.827841,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-sleep-attribution",
+        "run_id": "20261116-062645-660536",
+        "reason": "diagnosis"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-start",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T06:48:40.651947+00:00",
+      "recorded_epoch": 1794811720.651947,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-validation-wait-2",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-finish",
+      "value": "code-review",
+      "recorded_at": "2026-11-16T07:11:14.302170+00:00",
+      "recorded_epoch": 1794813074.3021703,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-finish",
+      "value": "runtime-blackbox",
+      "recorded_at": "2026-11-16T07:20:43.200694+00:00",
+      "recorded_epoch": 1794813643.2006938,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "tests": {
+          "counts": {
+            "FAIL": 1,
+            "UNVERIFIED": 1,
+            "QUARANTINED_PASS": 10
+          },
+          "lines": [
+            "FAIL deploy-command-structural::test-sleep-ratchet at=1794811501",
+            "UNVERIFIED deploy-command-structural::deploy-command-structural at=1794811762",
+            "QUARANTINED_PASS live-probes::chat-router-failover::testLiveFailoverEscalates at=1794811056",
+            "QUARANTINED_PASS semantic-stack::...e2e/browser-chip-count.spec.ts > browser-chip-count > visible browser chips always equal active browser agents at=1794811084",
+            "QUARANTINED_PASS backend-coverage-blackbox::indexeddb-upload-memory::indexeddb-upload-memory at=1794811117",
+            "QUARANTINED_PASS live-probes::browser-provider::browser-provider at=1794811167",
+            "QUARANTINED_PASS backend-coverage-blackbox::send-sms::send-sms at=1794811200",
+            "QUARANTINED_PASS backend-coverage-blackbox::iphone-control::iphone-control at=1794811260",
+            "QUARANTINED_PASS backend-coverage-blackbox::code-preview::Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview DOM in ? 3 s at=1794811327",
+            "QUARANTINED_PASS backend-coverage-blackbox::treasury-rails::treasury-rails at=1794811425",
+            "QUARANTINED_PASS deploy-command-structural::...lan::InterruptedProcessObservation.test_own_user_service_manager_is_skipped_only_on_cgroup_evidence at=1794811502",
+            "QUARANTINED_PASS agents-coverage-blackbox::spawn-claude-code-agent::test_claude_ws_server_starts_every_task_as_a_goal at=1794811666"
+          ],
+          "omitted": 0
+        },
+        "gates": [
+          {
+            "gate": "backend-structural",
+            "phase": "quick",
+            "round": "1",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 29.5
+          },
+          {
+            "gate": "eslint",
+            "phase": "quick",
+            "round": "1",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 11.6
+          },
+          {
+            "gate": "format",
+            "phase": "quick",
+            "round": "1",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 0.7
+          },
+          {
+            "gate": "typescript",
+            "phase": "quick",
+            "round": "1",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 29.2
+          },
+          {
+            "gate": "agents-coverage-blackbox",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 918.1
+          },
+          {
+            "gate": "backend-coverage-blackbox",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 789.4
+          },
+          {
+            "gate": "canonical-seed-whatsapp-content",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 52.0
+          },
+          {
+            "gate": "cloudbench-controller",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 520.6
+          },
+          {
+            "gate": "deploy-command-structural",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "UNVERIFIED",
+            "native_exit": 1,
+            "seconds": 793.6
+          },
+          {
+            "gate": "e2b-smoke",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 96.8
+          },
+          {
+            "gate": "frontend-coverage-blackbox",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 856.9
+          },
+          {
+            "gate": "live-probes",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 310.4
+          },
+          {
+            "gate": "new-test-stability",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 96.3
+          },
+          {
+            "gate": "seed-cache-decision",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 51.1
+          },
+          {
+            "gate": "seed-memory-ratchet",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 96.7
+          },
+          {
+            "gate": "semantic-stack",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 1095.7
+          },
+          {
+            "gate": "smoke",
+            "phase": "initial",
+            "round": "2",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 2131.6
+          }
+        ]
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-finish",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T07:21:22.353173+00:00",
+      "recorded_epoch": 1794813682.3531725,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-validation-wait-2",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T07:21:22.411017+00:00",
+      "recorded_epoch": 1794813682.4110172,
+      "workspace": "rose",
+      "git_sha": "ba513d2037c0b67360dcaedc756b5d97a8e80dc7",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-main-integration",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-start",
+      "value": "runtime-blackbox",
+      "recorded_at": "2026-11-16T07:29:41.277255+00:00",
+      "recorded_epoch": 1794814181.277255,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-finish",
+      "value": "runtime-blackbox",
+      "recorded_at": "2026-11-16T07:29:43.073154+00:00",
+      "recorded_epoch": 1794814183.073154,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-start",
+      "value": "runtime-blackbox",
+      "recorded_at": "2026-11-16T07:33:44.047188+00:00",
+      "recorded_epoch": 1794814424.047188,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-finish",
+      "value": "runtime-blackbox",
+      "recorded_at": "2026-11-16T07:34:17.095694+00:00",
+      "recorded_epoch": 1794814457.095694,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "gates": [
+          {
+            "gate": "backend-structural",
+            "phase": "quick",
+            "round": "3",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 25.3
+          },
+          {
+            "gate": "eslint",
+            "phase": "quick",
+            "round": "3",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 10.5
+          },
+          {
+            "gate": "format",
+            "phase": "quick",
+            "round": "3",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 0.6
+          },
+          {
+            "gate": "typescript",
+            "phase": "quick",
+            "round": "3",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 26.3
+          }
+        ]
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-start",
+      "value": "runtime-blackbox",
+      "recorded_at": "2026-11-16T07:36:52.160940+00:00",
+      "recorded_epoch": 1794814612.1609397,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T07:41:00.110177+00:00",
+      "recorded_epoch": 1794814860.1101768,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-main-integration",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-start",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T07:41:00.168493+00:00",
+      "recorded_epoch": 1794814860.168493,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-revalidation-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-finish",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T08:27:42.506004+00:00",
+      "recorded_epoch": 1794817662.5060039,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-revalidation-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T08:27:42.563610+00:00",
+      "recorded_epoch": 1794817662.56361,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-release-prep",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T08:30:06.448925+00:00",
+      "recorded_epoch": 1794817806.4489253,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-release-prep",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-start",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T08:30:06.511758+00:00",
+      "recorded_epoch": 1794817806.5117583,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-final-smoke-release-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-finish",
+      "value": "runtime-blackbox",
+      "recorded_at": "2026-11-16T08:32:52.331253+00:00",
+      "recorded_epoch": 1794817972.331253,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "tests": {
+          "counts": {
+            "QUARANTINED_PASS": 10
+          },
+          "lines": [
+            "QUARANTINED_PASS deploy-command-structural::...lan::InterruptedProcessObservation.test_own_user_service_manager_is_skipped_only_on_cgroup_evidence at=1794815102",
+            "QUARANTINED_PASS live-probes::chat-router-failover::testLiveFailoverEscalates at=1794815490",
+            "QUARANTINED_PASS semantic-stack::...e2e/browser-chip-count.spec.ts > browser-chip-count > visible browser chips always equal active browser agents at=1794815527",
+            "QUARANTINED_PASS backend-coverage-blackbox::indexeddb-upload-memory::indexeddb-upload-memory at=1794815552",
+            "QUARANTINED_PASS live-probes::browser-provider::browser-provider at=1794815603",
+            "QUARANTINED_PASS backend-coverage-blackbox::send-sms::send-sms at=1794815633",
+            "QUARANTINED_PASS backend-coverage-blackbox::treasury-rails::treasury-rails at=1794815643",
+            "QUARANTINED_PASS backend-coverage-blackbox::iphone-control::iphone-control at=1794815691",
+            "QUARANTINED_PASS backend-coverage-blackbox::code-preview::Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview DOM in ? 3 s at=1794815760",
+            "QUARANTINED_PASS agents-coverage-blackbox::spawn-claude-code-agent::test_claude_ws_server_starts_every_task_as_a_goal at=1794816124"
+          ],
+          "omitted": 0
+        },
+        "gates": [
+          {
+            "gate": "deploy-command-structural",
+            "phase": "focused",
+            "round": "4",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 763.5
+          },
+          {
+            "gate": "backend-structural",
+            "phase": "quick",
+            "round": "6",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 25.6
+          },
+          {
+            "gate": "eslint",
+            "phase": "quick",
+            "round": "6",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 10.9
+          },
+          {
+            "gate": "format",
+            "phase": "quick",
+            "round": "6",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 0.7
+          },
+          {
+            "gate": "typescript",
+            "phase": "quick",
+            "round": "6",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 7.2
+          },
+          {
+            "gate": "agents-coverage-blackbox",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 929.8
+          },
+          {
+            "gate": "backend-coverage-blackbox",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 613.9
+          },
+          {
+            "gate": "canonical-seed-whatsapp-content",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 51.5
+          },
+          {
+            "gate": "cloudbench-controller",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 550.3
+          },
+          {
+            "gate": "e2b-smoke",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 97.1
+          },
+          {
+            "gate": "frontend-coverage-blackbox",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 946.0
+          },
+          {
+            "gate": "live-probes",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 307.8
+          },
+          {
+            "gate": "new-test-stability",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 111.7
+          },
+          {
+            "gate": "seed-cache-decision",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 51.0
+          },
+          {
+            "gate": "seed-memory-ratchet",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 112.5
+          },
+          {
+            "gate": "semantic-stack",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 1080.3
+          },
+          {
+            "gate": "smoke",
+            "phase": "final",
+            "round": "7",
+            "outcome": "PASS",
+            "native_exit": 0,
+            "seconds": 1994.8
+          }
+        ]
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-finish",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T08:34:31.410616+00:00",
+      "recorded_epoch": 1794818071.4106162,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-final-smoke-release-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T08:34:31.479343+00:00",
+      "recorded_epoch": 1794818071.4793434,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-merge-production-coordination",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-start",
+      "value": "production-verify",
+      "recorded_at": "2026-11-16T08:35:26.902543+00:00",
+      "recorded_epoch": 1794818126.9025433,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "production-start",
+      "value": "render",
+      "recorded_at": "2026-11-16T08:36:07.821094+00:00",
+      "recorded_epoch": 1794818167.8210936,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T08:40:46.486483+00:00",
+      "recorded_epoch": 1794818446.486483,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-merge-production-coordination",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-start",
+      "value": "provider",
+      "recorded_at": "2026-11-16T08:40:46.547968+00:00",
+      "recorded_epoch": 1794818446.547968,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-production-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "provider"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-finish",
+      "value": "provider",
+      "recorded_at": "2026-11-16T08:52:27.943608+00:00",
+      "recorded_epoch": 1794819147.943608,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-production-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "provider"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "diagnosis",
+      "recorded_at": "2026-11-16T08:52:28.002481+00:00",
+      "recorded_epoch": 1794819148.002481,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-render-timeout-diagnosis",
+        "run_id": "20261116-062645-660536",
+        "reason": "diagnosis"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "production-start",
+      "value": "render",
+      "recorded_at": "2026-11-16T08:54:14.383698+00:00",
+      "recorded_epoch": 1794819254.383698,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "production-finish",
+      "value": "render",
+      "recorded_at": "2026-11-16T08:54:14.820041+00:00",
+      "recorded_epoch": 1794819254.8200412,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "production-start",
+      "value": "semantic",
+      "recorded_at": "2026-11-16T08:54:14.882530+00:00",
+      "recorded_epoch": 1794819254.88253,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "production-start",
+      "value": "backend-probes",
+      "recorded_at": "2026-11-16T08:54:14.882536+00:00",
+      "recorded_epoch": 1794819254.882536,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "production-finish",
+      "value": "backend-probes",
+      "recorded_at": "2026-11-16T08:54:20.843954+00:00",
+      "recorded_epoch": 1794819260.843954,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "diagnosis",
+      "recorded_at": "2026-11-16T09:00:21.961272+00:00",
+      "recorded_epoch": 1794819621.9612722,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-render-timeout-diagnosis",
+        "run_id": "20261116-062645-660536",
+        "reason": "diagnosis"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "reporting",
+      "recorded_at": "2026-11-16T09:00:22.021011+00:00",
+      "recorded_epoch": 1794819622.0210109,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-records-preparation",
+        "run_id": "20261116-062645-660536",
+        "reason": "reporting"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "reporting",
+      "recorded_at": "2026-11-16T09:02:51.987534+00:00",
+      "recorded_epoch": 1794819771.9875336,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-records-preparation",
+        "run_id": "20261116-062645-660536",
+        "reason": "reporting"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T09:02:52.046999+00:00",
+      "recorded_epoch": 1794819772.0469987,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-semantic-transport-coordination",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T09:05:34.809311+00:00",
+      "recorded_epoch": 1794819934.809311,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-semantic-transport-coordination",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-start",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T09:05:34.869448+00:00",
+      "recorded_epoch": 1794819934.8694484,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-production-semantic-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-finish",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T09:14:33.395135+00:00",
+      "recorded_epoch": 1794820473.3951347,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-production-semantic-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-start",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T09:14:33.454596+00:00",
+      "recorded_epoch": 1794820473.454596,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-final-closeout-coordination",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "production-start",
+      "value": "semantic",
+      "recorded_at": "2026-11-16T09:14:34.389684+00:00",
+      "recorded_epoch": 1794820474.3896837,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "work-finish",
+      "value": "coordination",
+      "recorded_at": "2026-11-16T09:16:36.597721+00:00",
+      "recorded_epoch": 1794820596.5977209,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-final-closeout-coordination",
+        "run_id": "20261116-062645-660536",
+        "reason": "coordination"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "wait-start",
+      "value": "dependency",
+      "recorded_at": "2026-11-16T09:16:36.658734+00:00",
+      "recorded_epoch": 1794820596.658734,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      },
+      "detail": {
+        "schema_version": 1,
+        "request_id": "phone-extra-aggregate-wait",
+        "run_id": "20261116-062645-660536",
+        "reason": "dependency"
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "production-finish",
+      "value": "semantic",
+      "recorded_at": "2026-11-16T09:22:39.221949+00:00",
+      "recorded_epoch": 1794820959.2219493,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "stage-finish",
+      "value": "production-verify",
+      "recorded_at": "2026-11-16T09:22:39.277859+00:00",
+      "recorded_epoch": 1794820959.2778592,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "workflow": "deploy",
+      "event": "outcome",
+      "value": "completed",
+      "recorded_at": "2026-11-16T09:22:39.486782+00:00",
+      "recorded_epoch": 1794820959.4867823,
+      "workspace": "rose",
+      "git_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "branch": "fix/phone-capability-lease-2b33",
+      "run_id": "20261116-062645-660536",
+      "telemetry": {
+        "schema_version": 1,
+        "observed_at": null,
+        "record_type": "snapshot",
+        "evidence": {},
+        "execution": {
+          "provider": null,
+          "model": null,
+          "reasoning_effort": null,
+          "service_tier": null,
+          "harness": null,
+          "harness_version": null
+        },
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cached_input_tokens": null,
+          "cost_usd": null
+        },
+        "attribution": {
+          "run_id": null,
+          "assignment_id": null,
+          "thread_id": null,
+          "agent_id": null,
+          "parent_agent_id": null,
+          "configuration_id": null
+        },
+        "timing": {
+          "active_seconds": null,
+          "approval_wait_seconds": null,
+          "queue_wait_seconds": null,
+          "rate_limit_wait_seconds": null,
+          "infrastructure_wait_seconds": null,
+          "other_seconds": null,
+          "time_to_first_token_seconds": null,
+          "output_tokens_per_second": null
+        },
+        "environment": {
+          "os": null,
+          "architecture": null,
+          "runtime_version": null,
+          "resource_class": null,
+          "concurrency": null
+        },
+        "validation": {
+          "source_sha": null,
+          "command_redacted": null,
+          "result": null,
+          "evidence_ref": null
+        }
+      }
+    }
+  ],
+  "late_events": "Exact scoped operational tail is durably committed here; the clock gap is qualified separately."
+}

@@ -1,0 +1,56 @@
+{
+  "archives": [
+    {
+      "receipt": "final-archive-receipt.json",
+      "receipt_sha256": "672802e5ea6e66df6f2f6feca0f35468013f14745a3799a60500a2c69b681d10",
+      "key": "devbox-closeout-private/pr2347/d35a3fe4-final-preservation-20261116T.tar.gz.aesgcm",
+      "ciphertext_sha256": "bbcc4340c76fcb763054093eca419ce8f973efe2528264f861e3424a776d7c3e",
+      "files": 5404,
+      "original_bytes": 863906858,
+      "manifest_sha256": "7031b24ec08ef86e6d3d4d63fa928447111d9b64a9c5f36a36cb7d0861389916",
+      "full_readback_verified": true
+    },
+    {
+      "receipt": "final-gates-archive-receipt.json",
+      "receipt_sha256": "6173be5e7ed107788d687017ea907e993d5f4eb197c781db5a88dddf83e6d0e8",
+      "key": "devbox-closeout-private/pr2347/d35a3fe4-completed-final-gates-20261116T.tar.gz.aesgcm",
+      "ciphertext_sha256": "b647a60affd3836e7f85795560469cf36a523ca8322e83a0b35e521ece4442c9",
+      "files": 14289,
+      "original_bytes": 425254682,
+      "manifest_sha256": "c4bf610cf0cc72f291a43cd20bf28edb18d30956f3edf5da346d1e36c5cbfcec",
+      "full_readback_verified": true
+    },
+    {
+      "receipt": "initial-supplement-archive-receipt.json",
+      "receipt_sha256": "00b55c816e02bbb5bcc01337d8a12d2c67c25d9ff2531c84134bf7f367ddb1c6",
+      "key": "devbox-closeout-private/pr2347/d35a3fe4-initial-completed-supplement-20261116T0738.tar.gz.aesgcm",
+      "ciphertext_sha256": "1222860f7f9e79a4f830b1585adf190c53d03338d4fbeba7ade6cea9d256834a",
+      "files": 16476,
+      "original_bytes": 792749395,
+      "manifest_sha256": "a18a3f8ccc12514c28aa53bd6d07e09472a5b6e075a86f1414a9ba290d639049",
+      "full_readback_verified": true
+    },
+    {
+      "receipt": "late-proofs-archive-receipt.json",
+      "receipt_sha256": "0f1504dd9f7c8ec67adc7910eb50008bde48d33a1ab99bbe83e8c1ed0666da45",
+      "key": "devbox-closeout-private/pr2347/d35a3fe4-late-verification-proofs-20261116T.tar.gz.aesgcm",
+      "ciphertext_sha256": "5a20084896e21be8aedc2ab6de544e32c695b0c5d4d4daa7cb3167db8c8ade4e",
+      "files": 32,
+      "original_bytes": 60369711,
+      "manifest_sha256": "2281a7f3a38ae667fcbb4503fdd8332f5efc2fb7475f71175a2328484d42fa97",
+      "full_readback_verified": true
+    },
+    {
+      "receipt": "preparation-archive-receipt.json",
+      "receipt_sha256": "8afa3ef8f7ab009bf2ad7a6caef975c6bd764d5839155de43066d7d56857d974",
+      "key": "devbox-closeout-private/pr2347/d35a3fe4-preparation-20261116T-preserved-originals.tar.gz.aesgcm",
+      "ciphertext_sha256": "085a1e756fe3b76c812575110f70b1159b4bf3999d439e0323b2813c4e7832c6",
+      "files": 107,
+      "original_bytes": 3889742,
+      "manifest_sha256": "315ac592f26a468ef0e21ca4893a8f9f88b6e600e95cf529eb7f6e2e5984b8d3",
+      "full_readback_verified": true
+    }
+  ],
+  "raw_evidence": "Private encrypted only; catalogs recover via embedded support",
+  "late_proofs": "Final post-upload proof artifacts preserved separately, independently restored and hashed"
+}

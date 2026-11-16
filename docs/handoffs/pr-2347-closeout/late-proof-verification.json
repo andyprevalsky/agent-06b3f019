@@ -1,0 +1,10 @@
+{
+  "observed_at": "2026-11-16T09:34:36.063233+00:00",
+  "manifest_authenticated": true,
+  "all_restored_hashes_and_sizes_match": true,
+  "restored_files": 32,
+  "restored_bytes": 60369711,
+  "original_postchecks": 31,
+  "original_changes": 0,
+  "ciphertext_sha256": "5a20084896e21be8aedc2ab6de544e32c695b0c5d4d4daa7cb3167db8c8ade4e"
+}

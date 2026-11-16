@@ -1,0 +1,26 @@
+{
+  "revisions": [
+    {
+      "label": "local-head",
+      "revision": "c470ba27145ce59f3574532e79efadb653d179c1",
+      "exact_native_error_reproduced": true,
+      "timeout_seconds": 905.0,
+      "recovered_status": "verified-by-descendant"
+    },
+    {
+      "label": "premerge-main",
+      "revision": "a3ca8e421c099fd4168654b62d04dbde94fa8add",
+      "exact_native_error_reproduced": true,
+      "timeout_seconds": 905.0,
+      "recovered_status": "verified-by-descendant"
+    },
+    {
+      "label": "merge",
+      "revision": "26a6deac6accc2f7b82420926ff0d4e739b5153c",
+      "exact_native_error_reproduced": true,
+      "timeout_seconds": 905.0,
+      "recovered_status": "verified-by-descendant"
+    }
+  ],
+  "proof_sha256": "b63607cc163711b1ce8b660431e35776d8b9675b1145c58ac27a11ca4afb56cb"
+}

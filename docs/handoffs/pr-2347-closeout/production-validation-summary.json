@@ -1,0 +1,122 @@
+{
+  "merged_sha": "26a6deac6accc2f7b82420926ff0d4e739b5153c",
+  "tested_sha": "c470ba27145ce59f3574532e79efadb653d179c1",
+  "premerge_gates": {
+    "selected": 17,
+    "passed": 17,
+    "quarantined_failed": 0,
+    "quarantined_passed": 10
+  },
+  "smoke": {
+    "tasks": 7,
+    "passed": 7,
+    "native_exit": 0,
+    "complete": true,
+    "cleanup_complete": true,
+    "report_sha256": "af4debca817de1570a2bf5c0c901482bd860d8341c094cc1fcb3a0e0c22a3422"
+  },
+  "production_complete": true,
+  "production_status": "PASS",
+  "lanes": {
+    "render": {
+      "status": "PASS-verified-by-descendant",
+      "reason": "verified by descendant 521432070b659416d644072c58d5f6b3afb25e4e: merged-deploy-canceled-live-descendant (Render canceled deploy dep-dbtc0ldckfvc73ehe91g of the merged commit; live deploy dep-dbtc5ke417fc738enp4g serves 521432070, a descendant of 26a6deac6); not an exact-SHA deploy",
+      "started_at": "2026-11-16T08:54:14Z",
+      "finished_at": "2026-11-16T08:54:14Z",
+      "exit_code": 0
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent runtime or deploy-agents.yml change",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "vercel": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no front-end/ change",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "mac-release": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #2347 without MAC-APP-RELEASE)",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "backend-probes": {
+      "status": "PASS",
+      "reason": "/health + /api/agents 200, endpoint smoke passed, Render log clean",
+      "started_at": "2026-11-16T08:54:14Z",
+      "finished_at": "2026-11-16T08:54:20Z",
+      "exit_code": 0
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent cutover",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "agentcard": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no AgentCard payment path change (benchmark history ledgers excluded)",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "semantic": {
+      "status": "PASS-verified-by-descendant",
+      "reason": "verified by descendant 12b77e3e7a7a8f525eb896892cc7795454de964c: chat-lifecycle-ratchet run 43837969497 success with the specs of live frontend 12b77e3e7a7a (a descendant of 26a6deac6acc)",
+      "started_at": "2026-11-16T09:14:34Z",
+      "finished_at": "2026-11-16T09:22:39Z",
+      "exit_code": 0
+    }
+  },
+  "semantic_runs": [
+    {
+      "run_id": null,
+      "url": null,
+      "source_sha": null,
+      "head_sha": null,
+      "outcome": "failed",
+      "conclusion": null,
+      "created_at": null,
+      "completed_at": null,
+      "finished_at": "2026-11-16T08:54:17Z"
+    },
+    {
+      "run_id": "43836518429",
+      "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43836518429",
+      "source_sha": "12b77e3e7a7a8f525eb896892cc7795454de964c",
+      "head_sha": "12b77e3e7a7a8f525eb896892cc7795454de964c",
+      "outcome": "passed",
+      "conclusion": "success",
+      "created_at": "2026-11-16T09:04:40Z",
+      "completed_at": "2026-11-16T09:13:14Z",
+      "finished_at": "2026-11-16T09:13:17Z"
+    },
+    {
+      "run_id": "43837969497",
+      "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43837969497",
+      "source_sha": "12b77e3e7a7a8f525eb896892cc7795454de964c",
+      "head_sha": "1ac75606167f7973aeb63f983eedfa8aed2c3775",
+      "outcome": "passed",
+      "conclusion": "success",
+      "created_at": "2026-11-16T09:14:36Z",
+      "completed_at": "2026-11-16T09:22:14Z",
+      "finished_at": "2026-11-16T09:22:39Z"
+    }
+  ],
+  "quarantine_report": "Tests skipped (quarantined): 10 \u2014 0 failed (non-blocking), 10 passed",
+  "unnecessary_repeat": "Aggregate closure launched a second full semantic run after the first pass; both passed, neither result nor elapsed time hidden."
+}

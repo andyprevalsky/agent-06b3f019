@@ -1,0 +1,50 @@
+{
+  "result": "CLEAN",
+  "reviewed_at_utc": "2026-11-16T21:37:55.369839+00:00",
+  "title": "--ai-- PR2347 closeout records review",
+  "verified": {
+    "archive_member_counts": {
+      "preparation": 107,
+      "initial": 16476,
+      "final_gates": 14289,
+      "final": 5404,
+      "late_proof": 32
+    },
+    "receipt_hash_bindings": "all five match public summary",
+    "proof_summaries": "public final, preparation, late proof, schema, cancellation and status JSON equal private authoritative summaries",
+    "manifest": {
+      "flat_entries": 142,
+      "ignored": 69,
+      "exact_refs": 73,
+      "nulls": 0,
+      "pure_disposition_and_preserved_checks": "PASS",
+      "private_draft_differences": "only sanitized recovery_receipt and verification_record pointers"
+    },
+    "qualifications": "17 gates/7 smoke; strict descendant production; 16 probes; both five-job semantic runs; 905s timeout; pre-execution GET403; same-primary POST/native result ownership; CodeRabbit limit; no original phone retry; unknown clock gap; exact-owned cancellation143 retained",
+    "privacy": "No credentials, raw catalogs, raw trajectories or raw personal contact data found in reviewed public files. Diagnostic UUIDs and infrastructure/archive identifiers retained.",
+    "late_metadata": "all four original path/hash/byte bindings match; later metadata explicitly excluded from prior capture",
+    "late_added_files": "clock-observation-gap.json accurately retains unknown waiting interval; deploy-activity-events.json contains 56 scoped deployment events selected from a 72-line capture, with unknown telemetry null and no sensitive pattern matches."
+  },
+  "scope_limits": [
+    "No tests, production calls, gates, original archive restores, cleanup, source/Git/env/DB/pipeline edits, phone operations, Freedom operations or delegation performed.",
+    "This is metadata review using existing independent proof summaries, not an independent replay of archive recovery or native production tests.",
+    "Root owns RCA archive validation and formatting; parent owns native checker and records merge."
+  ],
+  "remaining_conditions": [
+    "Native checker receipt committed",
+    "Records-only PR remotely merged and linked from PR2347",
+    "Final checker rerun READY"
+  ],
+  "snapshot": "ordered-path-hash-snapshot.json",
+  "resolved_blockers": [
+    {
+      "id": "B1",
+      "path": "docs/handoffs/pr-2347-closeout/README.md",
+      "line": 27,
+      "issue": "Stale sentence says final encrypted preservation remains, conflicting with completed five-archive preservation and the preceding final/late-proof verification statements.",
+      "required_change": "State that supported native checker/readiness and durable records publication/merge remain; final encrypted preservation is complete."
+    }
+  ],
+  "blockers": [],
+  "delta_review": "Only README.md changed from original 24-file snapshot. Line 27 now correctly records completed encrypted preservation/restore and remaining native checker/readiness plus durable records publication/merge."
+}

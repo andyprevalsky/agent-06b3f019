@@ -1,0 +1,11 @@
+{
+  "classification": "NOT_INTRODUCED",
+  "scope": "additional production Render verification timeout",
+  "baseline": "a3ca8e421c099fd4168654b62d04dbde94fa8add",
+  "requested_merge": "26a6deac6accc2f7b82420926ff0d4e739b5153c",
+  "native_result": "FAIL",
+  "cause": "Target and successive newer builds were canceled before any qualifying descendant became live during the fixed 900-second lane window.",
+  "recovery": "Unchanged verifier accepted actual live descendant521432070b659416d644072c58d5f6b3afb25e4e; production endpoint probes passed.",
+  "source_edits": "None",
+  "limits": "No provider outage, build error, startup failure or cancellation actor was inferred. Semantic launch later failed separately on primary-user GitHub REST quota exhaustion."
+}

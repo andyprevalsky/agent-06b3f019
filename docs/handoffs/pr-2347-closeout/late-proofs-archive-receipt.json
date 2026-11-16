@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr2347/d35a3fe4-late-verification-proofs-20261116T.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "5a20084896e21be8aedc2ab6de544e32c695b0c5d4d4daa7cb3167db8c8ade4e",
+  "gzip_sha256": "4031e150de3aaf57f23d58cf86bc6665d747db2bcb5ecf787e15f877641bc047",
+  "stored_bytes": 6363947,
+  "frames": 1,
+  "files": 32,
+  "original_bytes": 60369711,
+  "manifest_sha256": "2281a7f3a38ae667fcbb4503fdd8332f5efc2fb7475f71175a2328484d42fa97",
+  "full_readback_verified": true
+}
