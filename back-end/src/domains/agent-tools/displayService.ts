@@ -63,7 +63,7 @@ import type { PreparedItem, ResolvedItem } from './displayTypes';
 import { itemLabel, resolveAll } from './displayResolution';
 import { postInline } from './displayPosting';
 const TYPES_HELP =
-  'allowed: image/*, video/*, an .html page, a .js/.mjs script, a 3D model (.glb .gltf .obj .stl .usdz), a .pdf, or a site folder; SVG excluded';
+  'allowed: image/* (including .svg), video/*, an .html page, a .js/.mjs script, a 3D model (.glb .gltf .obj .stl .usdz), a .pdf, or a site folder';
 const extOf = (path: string) => path.slice(path.lastIndexOf('.') + 1).toLowerCase();
 
 /** `<base href>` so a fetched page's relative links still load from its own site. */

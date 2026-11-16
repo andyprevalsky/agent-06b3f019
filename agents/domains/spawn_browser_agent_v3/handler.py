@@ -295,6 +295,19 @@ AUTH_RESEND_CODE_RESULT = {
         "for the new code again."
     ),
 }
+
+
+def auth_assistance_declined_message(auth_realm: Optional[str]) -> str:
+    """Facts only: the exact request the user declined, then what the browser did.
+
+    The quoted question is the one the backend showed the user
+    (back-end/src/domains/auth-assistance/repo.ts, repo.nativeWrite.ts).
+    """
+    if auth_realm == "iphone":
+        return 'The user declined the request "Complete the protected step on your iPhone". The browser task stopped.'
+    return f'The user declined the request "Sign in to {auth_realm or "the site"}". The browser task stopped.'
+
+
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
@@ -4616,12 +4629,20 @@ async def _hard_recover_frozen_renderer_page(
     fallback_url: str = "",
     timeout_s: float = 20.0,
 ) -> tuple[Optional[Any], List[str]]:
-    """Open a fresh page, then kill the frozen target via browser-process CDP.
+    """Replace a frozen page inside its own BrowserContext via browser-process CDP.
 
     When classify_evaluate_cdp_stall reports renderer_main_thread_blocked, the
-    page-target CDP is dead but Browser.getVersion still works. Creating the
-    replacement page *before* closing the hung target is required: closing the
-    last page target via CDP can tear down the Playwright BrowserContext.
+    page-target CDP is dead but Browser.getVersion still works. The replacement
+    page must stay in the frozen page's BrowserContext, which holds the
+    session's injected cookies and site storage. A fresh ``new_context()`` has
+    an empty cookie jar, so the task would resume logged out (H-63).
+
+    The blank replacement page is created *before* the hung target is closed,
+    because closing the last page target via CDP can tear down the Playwright
+    BrowserContext. The resume navigation runs after a best-effort close of the
+    hung targets (5 s per target, errors ignored). A same-site resume therefore
+    usually starts after the blocked renderer is gone, but a failed or slow
+    close does not stop the navigation, so this is not guaranteed.
     """
     actions: List[str] = []
     if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
@@ -4674,23 +4695,37 @@ async def _hard_recover_frozen_renderer_page(
                 await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
             browser_cdp = None
 
-    try:
-        # Prefer a fresh BrowserContext: under a pegged renderer,
-        # context.new_page() can fail with "Please use browser.new_context()".
-        new_context = await asyncio.wait_for(playwright_browser.new_context(), timeout=10.0)
-        new_page = await asyncio.wait_for(new_context.new_page(), timeout=10.0)
-        actions.append("new_context_page")
-    except Exception as exc:
-        actions.append(f"new_page_failed:{type(exc).__name__}")
+    async def _context_cookie_count() -> str:
         try:
-            new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
-            actions.append("new_page")
-        except Exception as exc2:
-            actions.append(f"context_new_page_failed:{type(exc2).__name__}")
-            if browser_cdp is not None:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
-            return None, actions
+            return str(len(await asyncio.wait_for(context.cookies(), timeout=3.0)))
+        except Exception:
+            return "unavailable"
+
+    cookies_before = await _context_cookie_count()
+    try:
+        new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
+        actions.append("new_page")
+    except Exception as exc:
+        actions.append(f"context_new_page_failed:{type(exc).__name__}")
+        if browser_cdp is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
+        return None, actions
+
+    if browser_cdp is not None:
+        closed = 0
+        for target_id in frozen_target_ids:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
+                    timeout=5.0,
+                )
+                closed += 1
+                actions.append(f"close_target:{target_id[:12]}")
+        if closed:
+            actions.append(f"closed_targets:{closed}")
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
 
     if resume_url.startswith(("http://", "https://")):
         try:
@@ -4710,26 +4745,13 @@ async def _hard_recover_frozen_renderer_page(
             await asyncio.wait_for(new_page.goto(resume_url), timeout=10.0)
             actions.append("goto_resume_url")
 
-    if browser_cdp is not None:
-        closed = 0
-        for target_id in frozen_target_ids:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
-                    timeout=5.0,
-                )
-                closed += 1
-                actions.append(f"close_target:{target_id[:12]}")
-        if closed:
-            actions.append(f"closed_targets:{closed}")
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
-
     if input_page is not None:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(input_page.close(), timeout=3.0)
             actions.append("close_playwright_page")
 
+    # Counts only: proves the resumed page kept the session cookie jar.
+    actions.append(f"context_cookies:{cookies_before}->{await _context_cookie_count()}")
     return new_page, actions
 
 
@@ -4857,9 +4879,10 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
         },
         (
             "Every visible item; one media image (or rendered_summary for multi-item). "
-            "Per item require title, numeric rating, review count, and a canonical "
-            "product-detail URL already in the trajectory — never cart/checkout/order/return URLs. "
-            "Include price, qty, description (<80 chars), seller, shipping, totals, payment, address when visible."
+            "Per item require a title; include its own product page URL already in the trajectory when it has "
+            "one — never cart/checkout/order/return URLs. "
+            "Include price, qty, description (<80 chars), rating, review count, seller, shipping, totals, payment, "
+            "address when visible."
         ),
     ),
     (
@@ -8748,6 +8771,11 @@ async def _spawn_browser_agent_activity_v3_real(
                     for field in protocol_keys:
                         if field in original:
                             visible_auth[key][field] = original[field]
+                    # The backend mints the Tilion live-view token for this
+                    # handoff and re-mints it for display; like browser_url,
+                    # the persisted copy carries it redacted.
+                    if "liveViewUrl" in original:
+                        visible_auth[key]["liveViewUrl"] = redact_url_secrets(original["liveViewUrl"])
         return result
 
     browser_url = None
@@ -9123,7 +9151,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "status": "auth_assistance_declined",
                 "success": False,
                 "user_declined_auth": True,
-                "message": "The user declined sign-in assistance. The browser task stopped without retrying authentication.",
+                "message": auth_assistance_declined_message((write_lock_resume_state or {}).get("auth_realm")),
                 "task_id": task_id,
                 "session_id": session_id,
                 "browser_url": redact_url_secrets(browser_url),
@@ -9717,9 +9745,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
             _user_context_sections.append(
                 "## Purchase Approval Context\n"
-                "Before triggering any Buy, Place Order, or other purchase write action, collect every item's "
-                "canonical product-detail URL, numeric rating, and numeric review count. Never use a cart or "
-                "checkout URL as the product link. A purchase approval is blocked if any item lacks these fields."
+                "Before triggering any Buy, Place Order, or other purchase write action, collect each item's own "
+                "product page URL when it has one, and its rating and review count when the page shows them. "
+                "Never use a cart or checkout URL as the product link."
             )
             _record_timing("parallel.data.user_profile", t)
 
@@ -10940,7 +10968,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_download_persister = download_persister_task.result()
                 observe_page_state = _with_downloaded_files(observe_page_state, browser_download_persister)
                 restored_transcript_unobserved = False
-                step_timer.annotate(observe_dom=observe_needs_dom)
+                step_timer.annotate(
+                    observe_dom=observe_needs_dom,
+                    observe_dom_timing_ms=getattr(dom_service, "last_dom_build_timing_ms", None)
+                    if observe_needs_dom
+                    else None,
+                )
                 current_url = _private_browser_runtime_url(dom_service, observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
             except asyncio.TimeoutError:

@@ -495,6 +495,69 @@ describe('Rose Desktop tool rows: pending actions', () => {
   });
 });
 
+describe('Rose Desktop: MCP logo and the Other integration request', () => {
+  beforeEach(() => {
+    window.history.replaceState({}, '', '/');
+    mockSession();
+    server.use(
+      http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
+      http.get(`${API_BASE}/compute-accounts`, () => HttpResponse.json({ accounts: [] })),
+    );
+  });
+  afterEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('shows the standard MCP logo on the MCP servers row', async () => {
+    renderWithProviders(<Integrations />, { roseDesktop: true });
+    const row = await screen.findByTestId('integration-row-mcp');
+    expect(within(row).getByTestId('mcp-logo')).toBeInTheDocument();
+  });
+
+  it('sends an unlisted integration request once per draft and confirms it', async () => {
+    const bodies: Array<{ request: string; request_id: string }> = [];
+    let fail = true;
+    server.use(
+      http.post(`${API_BASE}/integrations/requests`, async ({ request }) => {
+        bodies.push((await request.json()) as { request: string; request_id: string });
+        if (fail)
+          return HttpResponse.json(
+            { error: 'Could not send your request. Try again.' },
+            { status: 503 },
+          );
+        return HttpResponse.json({ status: 'sent' });
+      }),
+    );
+    renderWithProviders(<Integrations />, { roseDesktop: true });
+    const other = within(await screen.findByRole('region', { name: 'Other' }));
+    expect(other.getByText('An integration not listed here?')).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(
+      other.getByRole('button', { name: 'Request An integration not listed here?' }),
+    );
+    const input = other.getByLabelText('Integration you want');
+    await user.type(input, 'Linear');
+    await user.click(other.getByRole('button', { name: 'Send integration request' }));
+    expect(await other.findByRole('alert')).toHaveTextContent('Try again');
+    expect(input).toHaveValue('Linear');
+    fail = false;
+    await user.click(other.getByRole('button', { name: 'Send integration request' }));
+    expect(await other.findByRole('status')).toHaveTextContent(
+      "Thanks! We'll add Linear within 2 business days.",
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].request).toBe('Linear');
+    expect(bodies[1].request_id).toBe(bodies[0].request_id);
+    expect(bodies[0].request_id).toMatch(/^[0-9a-f-]{36}$/);
+    await user.click(other.getByRole('button', { name: 'Request another' }));
+    await user.type(other.getByLabelText('Integration you want'), 'Notion');
+    await user.click(other.getByRole('button', { name: 'Send integration request' }));
+    await waitFor(() => expect(bodies).toHaveLength(3));
+    expect(bodies[2].request_id).not.toBe(bodies[0].request_id);
+  });
+});
+
 describe('MCP sign-in callback page', () => {
   const originalLocation = window.location;
 

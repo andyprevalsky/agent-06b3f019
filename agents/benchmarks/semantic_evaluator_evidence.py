@@ -125,6 +125,36 @@ def _completion_card_payload(message: dict) -> dict[str, Any] | None:
     }
 
 
+def _displayed_item_rows(data: dict) -> list[dict[str, Any]]:
+    """What the user was shown inline (Agent Display), as answer evidence.
+
+    The display tool's own row only says "Displayed 1 item(s)"; the content is
+    hydrated into ``_benchmark.display_artifacts`` (benchmarks/display_check.py)
+    and bounded here exactly as a tool result.
+    """
+    state = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    artifacts = state.get("display_artifacts")
+    rows: list[dict[str, Any]] = []
+    for artifact in artifacts if isinstance(artifacts, list) else []:
+        if not isinstance(artifact, dict):
+            continue
+        text = artifact.get("text")
+        if not isinstance(text, str) or not text:
+            text = f"[displayed item content unavailable: {artifact.get('fetch_error') or 'not fetched'}]"
+        metadata = {"evidence_type": "displayed_to_user"}
+        metadata.update(
+            {
+                key: artifact[key]
+                for key in ("media_kind", "mime_type", "canonical_id", "text_source")
+                if artifact.get(key)
+            }
+        )
+        if artifact.get("agent_id"):
+            metadata["source_agent_id"] = artifact["agent_id"]
+        rows.append({"role": "ASSISTANT", "text": hard_cap_tool_result_text(text), "metadata": metadata})
+    return rows
+
+
 def _sorted_tree_agent_ids(tree: dict[str, dict], root_id: str) -> list[str]:
     """Depth-first ordering: root first, then children by parent link."""
     if not tree:
@@ -202,6 +232,7 @@ def build_single_turn_evidence(data: dict) -> list[dict[str, Any]]:
                 )
             )
 
+    rows.extend(_displayed_item_rows(data))
     rows.append({"benchmark_state": data.get("_benchmark", {})})
     return rows
 
@@ -242,6 +273,8 @@ def build_agentic_evidence(data: dict) -> dict[str, Any]:
                     "message_count": len(agent_messages),
                 }
             )
+
+    messages.extend(_displayed_item_rows(data))
 
     completion_cards: list[dict[str, Any]] = []
     summaries = _final_completion_summaries(data)

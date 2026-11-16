@@ -264,20 +264,23 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             f"{CHALLENGE_RECOVERY_SCOPE} "
             "Relatively expensive recovery to forcefully open a page or service blocked by a CAPTCHA, bot "
-            "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Do not use when "
+            "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Recovery replaces "
+            "this browser's machine in place: you stay the same browser agent on the same task, with no new "
+            "browser agent and no second session. Do not use when "
             "an alternate path can complete the goal without clearing this blocker. Never use for bad "
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool waits for Kernel or Steel's native automatic CAPTCHA solver, then tests isolated "
             "copies of browser state: known challenge cookies, all target-site cookies, then parallel "
             "cookie-group reductions. Set auth_cookies_are_preserved=true when the current session is logged "
-            "in and the replacement machine must keep that authenticated state. Set "
-            "auth_cookies_are_preserved=false to explore machines with a fresh cookie state (may lose auth, "
+            "in and must keep that authenticated state through recovery. Set "
+            "auth_cookies_are_preserved=false to allow a fresh cookie state (may lose auth, "
             "but can clear a poisoned cookie that forces anti-bot on every session). If no safe cookie fix "
             "is proven, it searches permission-compatible Kernel residential, Kernel mobile, Kernel ISP, "
             "and Steel managed/fixed-IP browsers in parallel, selects a configuration that passes repeated "
-            "stability probes, and caches that configuration as this user's default for future browser "
-            "sessions. Provider CAPTCHA solving remains enabled throughout. Successful recovery returns to "
-            "the current URL with cookies, localStorage, and IndexedDB preserved."
+            "stability probes, moves this session onto it, and caches that configuration as this user's "
+            "default for future browser sessions. Provider CAPTCHA solving remains enabled throughout. "
+            "Successful recovery returns this session to the current URL with cookies, localStorage, and "
+            "IndexedDB preserved."
         ),
         "params": {
             "reason": {
@@ -292,11 +295,11 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "auth_cookies_are_preserved": {
                 "type": "boolean",
                 "description": (
-                    "True when the current browser session is logged in and the new machine must "
-                    "maintain the current authenticated state to pass the goal/task. False when you "
-                    "want to explore machines that have a fresh cookie state (and thus potentially "
-                    "lose auth status, but potentially fix a bad cookie which is poisoning every "
-                    "session with a forced anti-bot). Defaults to true."
+                    "True when the current browser session is logged in and must keep its current "
+                    "authenticated state through recovery to pass the goal/task. False when recovery "
+                    "may use a fresh cookie state (and thus potentially lose auth status, but "
+                    "potentially fix a bad cookie which is poisoning every session with a forced "
+                    "anti-bot). Defaults to true."
                 ),
                 "required": False,
             },
@@ -304,13 +307,16 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "request_payment_card": {
         "description": (
-            "Request a one-time virtual payment card for the current checkout only if checkout requires you to "
-            "enter new card details. If a valid saved payment method is already selected and no card entry is "
+            "Request a one-time virtual payment card for the current checkout when checkout requires you to "
+            "enter new card details, or when the user asked for a one-time card or told you not to use a saved "
+            "payment method. Otherwise, if a valid saved payment method is already selected and no card entry is "
             "required, do not call this tool; continue with that saved method. Before typing any new card details, "
             "first read the full itemized receipt off "
-            "the page and visit each product page as needed. Every item MUST include its canonical product-detail "
-            "URL (never the cart or checkout URL), numeric rating, and numeric review count, plus its name, image "
-            "URL if visible, unit price in cents, quantity, and line total in cents. Include every fee, the "
+            "the page and visit each product page as needed. Every item MUST include its name, image URL if "
+            "visible, unit price in cents, quantity, and line total in cents, plus its own product page URL when "
+            "it has one (never the cart or checkout URL), and its rating and review count when the page shows "
+            "them. "
+            "Include every fee, the "
             "subtotal, and the final total. After the user approves, the card is "
             "minted on demand and the one-time card refs are returned for you to type into the payment fields. "
             "Never ask the user to enter a card and never type stored card details."
@@ -325,7 +331,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "line_items": {
                 "type": "array",
                 "description": (
-                    "Full itemized receipt. Reviews and canonical product links are required for every item."
+                    "Full itemized receipt. Include each item's own product page link when it has one."
                 ),
                 "required": True,
                 "items": {
@@ -347,8 +353,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                         "product_url": {
                             "type": "string",
                             "description": (
-                                "Canonical product-detail URL. Never use a cart, basket, checkout, payment, "
-                                "or order-confirmation URL."
+                                "This item's own product page URL, when it has one; omit it when the item has "
+                                "no page of its own. Never a cart, basket, checkout, payment, or "
+                                "order-confirmation page."
                             ),
                         },
                         "rating": {
@@ -356,7 +363,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                             "description": (
                                 "Numeric rating shown on the product page, such as '4.8 stars'. "
                                 "If the page genuinely shows no rating (e.g. a service, ticket, or "
-                                "event booking), pass '0 stars', never 'N/A', 'none', 'unknown', or a "
+                                "event booking), omit it; never pass 'N/A', 'none', 'unknown', or a "
                                 "made-up number."
                             ),
                         },
@@ -365,7 +372,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                             "description": (
                                 "Numeric review count shown on the product page, such as '312 reviews'. "
                                 "If the page genuinely shows no reviews (e.g. a service, ticket, or "
-                                "event booking), pass '0 reviews', never 'N/A', 'none', 'unknown', or a "
+                                "event booking), omit it; never pass 'N/A', 'none', 'unknown', or a "
                                 "made-up number."
                             ),
                         },
@@ -375,9 +382,6 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                     },
                     "required": [
                         "name",
-                        "product_url",
-                        "rating",
-                        "review_count",
                         "unit_price_cents",
                         "quantity",
                         "line_total_cents",
@@ -434,8 +438,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "purchase": {
                 "type": "object",
                 "description": (
-                    "Required when trigger_type is purchase. Every item MUST include a real numeric rating, "
-                    "numeric review count, and canonical product-detail URL. Never use the current cart or checkout URL."
+                    "Required when trigger_type is purchase. Include each item's own product page URL when it has "
+                    "one, and its rating and review count when the page shows them. Never use the current cart or "
+                    "checkout URL."
                 ),
                 "properties": {
                     "items": {
@@ -464,23 +469,23 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                                         "date-specific purchase when they are not already in the title."
                                     ),
                                 },
-                                "rating": {"type": "string", "description": "Required numeric rating"},
+                                "rating": {"type": "string", "description": "Numeric rating, when the page shows one"},
                                 "review_count": {
                                     "type": "string",
                                     "description": (
-                                        "Required numeric review count followed by 'reviews' or 'ratings', "
-                                        "for example '312 reviews'"
+                                        "Numeric review count followed by 'reviews' or 'ratings', "
+                                        "for example '312 reviews', when the page shows one"
                                     ),
                                 },
                                 "image_url": {"type": "string", "description": "Best visible product image URL"},
                                 "product_url": {
                                     "type": "string",
-                                    "description": "Required canonical product-detail URL; never cart or checkout",
+                                    "description": "This item's own product page URL, when it has one; never cart or checkout",
                                 },
                                 "seller": {"type": "string", "description": "Visible seller"},
                                 "shipping": {"type": "string", "description": "Visible delivery details"},
                             },
-                            "required": ["title", "rating", "review_count", "product_url"],
+                            "required": ["title"],
                             "additionalProperties": False,
                         },
                     },
@@ -839,7 +844,6 @@ Use `screenshot` when you need a viewport image. Re-read state after navigation,
 
 - Your browser is in full screen mode. No search bar or navigation bar.
 - Control+L will NOT focus the address bar - use the goto action to navigate to URLs.
-- Browser cookies have been injected - assume the user is logged in until proven otherwise.
 - Avoid login flows unless the site forces you to login to complete your directed goal.
 - Only interact with elements that have a numeric [index] assigned
 - Only use indexes that are explicitly provided in the current state

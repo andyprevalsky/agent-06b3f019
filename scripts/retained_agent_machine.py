@@ -18,11 +18,11 @@ import os
 import re
 import sys
 from contextlib import contextmanager
-from http.client import HTTPException
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, urlopen
 
 POOL_KEY = "rose_cooperative_worker_pool"
 CUSTODY_KEY = "rose_worker_reuse_custody"
@@ -200,6 +200,31 @@ def initial_spare(machine, app, live_hash):
 TRANSIENT_ATTEMPTS = 3
 
 
+# 2026-11-15 run 43669103359: a retirement metadata POST died in connect()
+# (Errno 101 Network is unreachable). urllib reports that the same way as a
+# failure after the request was sent. A request provably never left when its
+# OSError was raised inside HTTP(S)Connection.connect (TCP, TLS, proxy CONNECT
+# all run before any request byte) on the first hop, not a redirect hop.
+_CONNECT_CODES = {HTTPConnection.connect.__code__, HTTPSConnection.connect.__code__}
+_REDIRECT_CODES = {HTTPRedirectHandler.http_error_302.__code__}
+
+
+def _codes(traceback):
+    while traceback is not None:
+        yield traceback.tb_frame.f_code
+        traceback = traceback.tb_next
+
+
+def not_sent(exc):
+    reason = getattr(exc, "reason", None)
+    return (
+        isinstance(exc, URLError)
+        and isinstance(reason, OSError)
+        and not _REDIRECT_CODES.intersection(_codes(exc.__traceback__))
+        and bool(_CONNECT_CODES.intersection(_codes(reason.__traceback__)))
+    )
+
+
 def transient(exc):
     if isinstance(exc, HTTPError):
         return exc.code in (408, 429) or 500 <= exc.code < 600
@@ -210,12 +235,12 @@ def backoff(attempt):
     return min(2**attempt, 8)
 
 
-def replay_transient(call, attempts=TRANSIENT_ATTEMPTS):
+def replay_transient(call, attempts=TRANSIENT_ATTEMPTS, replayable=transient):
     for attempt in range(attempts):
         try:
             return call()
         except Exception as exc:
-            if attempt == attempts - 1 or not transient(exc):
+            if attempt == attempts - 1 or not replayable(exc):
                 raise
         sleep(backoff(attempt))
 
@@ -228,6 +253,9 @@ STOPPED_WAIT_SECONDS = 20
 STOPPED_WAIT_DEADLINE_SECONDS = 900
 LEASE_TTL_SECONDS = 500  # the TTL lease() acquires
 LEASE_REFRESH_AFTER_SECONDS = 240
+LEASE_DESCRIPTION = "cooperative-worker-pool"
+LEASE_ORPHAN_MARGIN_SECONDS = 60
+LEASE_ORPHAN_POLL_SECONDS = 10
 
 
 def wait_stopped(fly, version):
@@ -266,7 +294,8 @@ class Fly:
         self.leased_at = None
 
     def request(self, method, suffix="", data=None, *, timeout=30, replay=None):
-        """GETs replay transient failures; a write replays only when its caller proves it idempotent."""
+        """GETs replay transient failures; a write replays only when its caller proves it idempotent
+        or the request was never sent."""
         headers = {
             "Authorization": f"Bearer {os.environ['FLY_API_TOKEN']}",
             "Content-Type": "application/json",
@@ -275,7 +304,14 @@ class Fly:
             headers["fly-machine-lease-nonce"] = self.nonce
         body = None if data is None else json.dumps(data).encode()
 
+        transmissions = []
+
         def once():
+            # The caller checked the first transmission; every later one (a replay,
+            # or a re-acquire after a 409) is checked again (CodeRabbit 4577478879).
+            if transmissions:
+                self.assert_request_allowed(method, suffix, data)
+            transmissions.append(method)
             with urlopen(
                 Request(API + self.path + suffix, data=body, headers=headers, method=method),
                 timeout=timeout,
@@ -283,7 +319,18 @@ class Fly:
                 raw = response.read()
                 return json.loads(raw) if raw else None
 
-        return replay_transient(once, TRANSIENT_ATTEMPTS if (method == "GET" if replay is None else replay) else 1)
+        # Any request, write or not, is replayed when it provably never left.
+        idempotent = method == "GET" if replay is None else replay
+
+        def send():
+            return replay_transient(once, TRANSIENT_ATTEMPTS, transient if idempotent else not_sent)
+
+        if method == "POST" and suffix == "/lease" and not self.nonce:
+            return self.wait_out_orphaned_lease(send)
+        return send()
+
+    def assert_request_allowed(self, method, suffix, data):
+        """Per-transmission authority hook; the lease-owned controller overrides it."""
 
     def keep_lease(self, refresh_after=LEASE_REFRESH_AFTER_SECONDS):
         """Extend our own lease during a long native wait (fly-go RefreshLease).
@@ -305,6 +352,48 @@ class Fly:
                 self.nonce = nonce  # ours lapsed and Fly granted a new lease: release that one too
             raise ValueError("Native lease refresh did not extend this owner's lease")
         self.leased_at = monotonic()
+
+    def wait_out_orphaned_lease(self, send):
+        """Acquire, waiting out an orphaned lease from a dead controller of this pool.
+
+        2026-11-15 run 43669305097: the controller recovering a predecessor that
+        died mid-wave got 409 on a Machine lease the predecessor never released.
+        Controllers are serialized by the global deployment lease, so a live
+        holder with our description can only be a dead controller's orphan; it
+        lapses at most LEASE_TTL_SECONDS after it was taken, which was before
+        now. Poll against a local monotonic deadline (no comparison with Fly's
+        clock); every re-sent acquire passes assert_request_allowed first.
+        Any other holder fails at once.
+        """
+        deadline = monotonic() + LEASE_TTL_SECONDS + LEASE_ORPHAN_MARGIN_SECONDS
+        while True:
+            try:
+                return send()
+            except HTTPError as exc:
+                if exc.code != 409:
+                    raise
+                try:
+                    holder = (self.request("GET", "/lease") or {}).get("data") or {}
+                except HTTPError as missing:
+                    if missing.code != 404:
+                        raise
+                    holder = None  # the lease lapsed between the 409 and this read: acquire again at once
+                if holder is None:
+                    if monotonic() >= deadline:
+                        raise ValueError("Machine lease kept changing holders past the orphan deadline") from exc
+                else:
+                    if holder.get("description") != LEASE_DESCRIPTION or monotonic() >= deadline:
+                        raise ValueError(
+                            f"Machine lease is held by {holder.get('owner')!r} "
+                            f"({holder.get('description')!r}, expires_at {holder.get('expires_at')!r})"
+                        ) from exc
+                    print(
+                        f"Waiting out orphaned {LEASE_DESCRIPTION} lease on {self.path} "
+                        f"(expires_at {holder.get('expires_at')!r})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    sleep(LEASE_ORPHAN_POLL_SECONDS)
 
     @contextmanager
     def lease(self):

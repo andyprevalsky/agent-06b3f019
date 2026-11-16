@@ -16,6 +16,7 @@ Modeled after back-end/scripts/run-blackbox-tests.sh.
 """
 
 import asyncio
+import contextvars
 import importlib.util
 import json
 import os
@@ -174,13 +175,17 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
         if spec is None or spec.loader is None:
             return (domain, False, "Could not load test file")
 
+        # Import and run the domain in its own context, like a fresh process (and
+        # like a Temporal activity, which gets its own task): a ContextVar a suite
+        # sets, e.g. a browser handler's bound agent speed, cannot reach later suites.
+        domain_context = contextvars.copy_context()
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        domain_context.run(spec.loader.exec_module, module)
 
         if not hasattr(module, "run_all_tests"):
             return (domain, False, "No run_all_tests() function found")
 
-        result = await module.run_all_tests()
+        result = await asyncio.create_task(module.run_all_tests(), context=domain_context)
         passed_cases, failure_message = _failure_message(result)
         if not passed_cases:
             return (domain, False, failure_message)

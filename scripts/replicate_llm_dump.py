@@ -11,6 +11,18 @@ Modes:
   --mode rebuild-system  For planner dumps: rebuild system prompt via
                          build_planner_system_prompt() while keeping non-system
                          messages from the dump (post-edit check)
+
+Decision panels (generic dumps such as execute_loop, and browser_use dumps):
+  --repeat N [--concurrency C]  replay the same call N times and count each
+                                replay's first tool call (spawn_agent by type)
+  --replace OLD NEW             counterfactual: swap exact text everywhere in the
+                                dump (message bodies and tool-call arguments)
+  --current-tools               browser_use only: send the tool contract built by
+                                this checkout's build_browser_use_tools() for the
+                                dump's recorded available_actions, keeping every
+                                recorded message (tests a tool-description change
+                                against the exact captured decision)
+  --expect NAME:MIN             exit 2 unless at least MIN replays chose NAME
 """
 
 from __future__ import annotations
@@ -52,6 +64,7 @@ RoseResponse = _rose.RoseResponse
 StructuredOutputAccumulator = _rose.StructuredOutputAccumulator
 gpt_auth_from_token = _rose.gpt_auth_from_token
 build_browser_use_messages = _browser_use.build_browser_use_messages
+build_browser_use_tools = _browser_use.build_browser_use_tools
 normalize_browser_use_tool_call = _browser_use.normalize_browser_use_tool_call
 SYSTEM_PROMPT_DYNAMIC_BOUNDARY = _prompts.SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 build_planner_system_prompt = _prompts.build_planner_system_prompt
@@ -570,10 +583,153 @@ async def replay_generic(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def apply_replacements(data: dict[str, Any], pairs: list[list[str]]) -> int:
+    """Replace exact text in every message body and tool-call argument string.
+
+    Tool-call arguments are JSON, so the text is matched in its JSON-escaped
+    form. A pair that matches nothing is an error: a silent no-op would replay
+    the baseline under the counterfactual's name.
+    """
+    hits = 0
+    for old, new in pairs:
+        old_json, new_json = json.dumps(old)[1:-1], json.dumps(new)[1:-1]
+        pair_hits = 0
+        for message in data.get("messages") or []:
+            content = message.get("content")
+            if isinstance(content, str) and old in content:
+                message["content"] = content.replace(old, new)
+                pair_hits += 1
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                arguments = function.get("arguments")
+                if isinstance(arguments, str) and old_json in arguments:
+                    function["arguments"] = arguments.replace(old_json, new_json)
+                    pair_hits += 1
+        if not pair_hits:
+            raise SystemExit(f"--replace text not found in dump: {old[:80]!r}")
+        hits += pair_hits
+    return hits
+
+
+def apply_current_browser_tools(data: dict[str, Any]) -> list[str]:
+    """Swap a browser_use dump's recorded tools for this checkout's tool contract.
+
+    Messages, sampling config and the recorded available_actions stay exactly
+    as captured, so the replay isolates the tool contract. Returns the names of
+    tools whose description or schema differs from the recorded bytes.
+    """
+    if "browser_use" not in str(data.get("call_site") or ""):
+        raise SystemExit("--current-tools applies to browser_use dumps only")
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    actions = config.get("available_actions") or [tool.get("name") for tool in data.get("tools") or []]
+    current = build_browser_use_tools([str(name) for name in actions if name])
+    if not current:
+        raise SystemExit("--current-tools built no tools for the dump's available_actions")
+    recorded = {tool.get("name"): tool for tool in data.get("tools") or [] if isinstance(tool, dict)}
+    changed = sorted(tool["name"] for tool in current if recorded.get(tool["name"]) != tool)
+    data["tools"] = current
+    if isinstance(config.get("requested_params"), dict):
+        config["requested_params"]["tools"] = current
+    return changed
+
+
+def parse_expectation(raw: str) -> tuple[str, int]:
+    name, sep, minimum = str(raw).rpartition(":")
+    if not sep or not name or not minimum.isdigit():
+        raise SystemExit(f"--expect must be NAME:MIN, got {raw!r}")
+    return name, int(minimum)
+
+
+def unmet_expectations(decisions: dict[str, int], expectations: list[str]) -> list[str]:
+    unmet = []
+    for raw in expectations:
+        name, minimum = parse_expectation(raw)
+        observed = int(decisions.get(name, 0))
+        if observed < minimum:
+            unmet.append(f"{name}: {observed} < {minimum}")
+    return unmet
+
+
+def first_tool_decision(result: dict[str, Any]) -> str:
+    """The replay's decision: first tool name, spawn_agent qualified by agent type."""
+    calls = result.get("tool_calls") or []
+    if not calls:
+        return "no_tool_call"
+    call = calls[0]
+    function = call.get("function") if isinstance(call.get("function"), dict) else call
+    name = str(function.get("name") or call.get("name") or "unknown")
+    if name != "spawn_agent":
+        return name
+    raw = function.get("arguments") or call.get("arguments") or "{}"
+    try:
+        arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (TypeError, ValueError):
+        arguments = {}
+    return f"spawn_agent:{arguments.get('type') or 'unknown'}"
+
+
+async def replay_panel(data: dict[str, Any], repeat: int, concurrency: int) -> dict[str, Any]:
+    """Replay one generic call `repeat` times; count first-tool decisions.
+
+    Transport failures are counted separately and never as a decision.
+    """
+    gate = asyncio.Semaphore(max(1, concurrency))
+
+    browser = "browser_use" in str(data.get("call_site") or "")
+
+    async def one(index: int) -> dict[str, Any]:
+        async with gate:
+            try:
+                copy = json.loads(json.dumps(data))
+                result = await (replay_browser_use(copy, exact=True) if browser else replay_generic(copy))
+            except Exception as exc:  # reported per replay, never counted as a decision
+                return {"replay": index, "decision": "replay_error", "error": f"{type(exc).__name__}: {exc}"[:300]}
+            return {
+                "replay": index,
+                "decision": first_tool_decision(result),
+                "actual_model": result.get("actual_model"),
+                "tool_calls": result.get("tool_calls"),
+                "content": (result.get("content") or "")[:2000],
+            }
+
+    rows = await asyncio.gather(*(one(index) for index in range(repeat)))
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["decision"]] = counts.get(row["decision"], 0) + 1
+    return {
+        "call_site": data.get("call_site"),
+        "repeat": repeat,
+        "decisions": dict(sorted(counts.items())),
+        "actual_models": sorted({str(row.get("actual_model")) for row in rows if row.get("actual_model")}),
+        "replays": rows,
+    }
+
+
 async def main_async(args: argparse.Namespace) -> int:
     data = load_dump(args.dump)
     remove_goal_text(data, args.remove_goal_text or [])
+    if args.replace:
+        apply_replacements(data, args.replace)
+    if args.current_tools:
+        changed = apply_current_browser_tools(data)
+        print("CURRENT_TOOLS changed_vs_recorded=" + json.dumps(changed))
     call_site = str(data.get("call_site") or "")
+
+    if args.repeat:
+        if call_site == "planner" or args.mode != "exact":
+            raise SystemExit("--repeat replays generic or browser_use dumps in --mode exact only")
+        panel = await replay_panel(data, args.repeat, args.concurrency)
+        print(json.dumps(panel, indent=2, default=str))
+        print("DECISIONS " + json.dumps(panel["decisions"]) + " models " + json.dumps(panel["actual_models"]))
+        unmet = unmet_expectations(panel["decisions"], args.expect)
+        if unmet:
+            print("EXPECTATION FAILED " + "; ".join(unmet))
+            return 2
+        if args.expect:
+            print("EXPECTATION PASSED " + ", ".join(args.expect))
+        return 0
+    if args.expect:
+        raise SystemExit("--expect requires --repeat")
 
     if "browser_use" in call_site:
         result = await replay_browser_use(data, exact=args.mode == "exact")
@@ -632,6 +788,33 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Remove this exact text from the # Current Goal user message before replaying. Can be repeated.",
+    )
+    parser.add_argument(
+        "--replace",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("OLD", "NEW"),
+        help="Counterfactual: replace exact text in every message and tool-call argument. Can be repeated.",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=0,
+        help="Replay a generic dump N times and count each replay's first tool call.",
+    )
+    parser.add_argument("--concurrency", type=int, default=4, help="Parallel replays for --repeat (default 4).")
+    parser.add_argument(
+        "--current-tools",
+        action="store_true",
+        help="browser_use dumps: send this checkout's tool contract for the recorded available_actions.",
+    )
+    parser.add_argument(
+        "--expect",
+        action="append",
+        default=[],
+        metavar="NAME:MIN",
+        help="With --repeat: exit 2 unless at least MIN replays chose first tool NAME. Can be repeated.",
     )
     args = parser.parse_args()
     if args.exact:

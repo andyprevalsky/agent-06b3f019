@@ -1,7 +1,7 @@
 /** Atomic native attention publication, caller owns device and generation locks. */
 import type { Prisma, IPhoneDevice, IPhoneLease, Agent } from '@prisma/client';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
-import { privacyState } from '../../providers/phoneInputPrivacy';
+import { openedBy, privacyState } from '../../providers/phoneInputPrivacy';
 import type { NativePhoneInput, NativePhoneTarget } from '../../providers/nativePhoneAttention';
 export async function writeNativeRequest(
   tx: Prisma.TransactionClient,
@@ -64,7 +64,7 @@ export async function writeNativeRequest(
     where: { id: device.id },
     data: {
       privateInputEncrypted: sealPhoneValue({
-        ...privacyState(device.privateInputEncrypted),
+        ...openedBy(privacyState(device.privateInputEncrypted), lease.id),
         active: true,
       }),
       ...(['in_progress', 'verifying'].includes(device.setupState)

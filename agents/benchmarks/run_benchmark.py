@@ -351,6 +351,9 @@ AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
 # Long-horizon fundraise bench: runs as Tamy's account snapshot under the WMH.
 RAISE_5M_BREX_TASK_NAME = "raise-5m-rose-labs-brex"
 DOORDASH_FOOD_PLAN_TASK_NAME = "browser-doordash-food-plan-grocery-order"
+# Catalog `pinned_facts.manifest_source` value that binds a task to the frozen
+# food-plan manifest fixture (grocery-order and its cart-reauth sibling).
+DOORDASH_FOOD_PLAN_MANIFEST_SOURCE = "doordash-food-plan-grocery-fixture.json"
 _DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 # Tasks the parallel scheduler must finish (serially) before ordinary work:
 # - Destructive shared-DB fixtures: a retained failed agent tree must not mutate
@@ -371,6 +374,8 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     AMAZON_MX_TAMY_TASK_NAME,
     RAISE_5M_BREX_TASK_NAME,
     DOORDASH_FOOD_PLAN_TASK_NAME,
+    # Applies the same food-plan fixture (shared user profile upsert) as the order task.
+    "browser-doordash-food-plan-grocery-cart-reauth",
     BIOMETRICS_WEBDECOY_TASK_NAME,
     "agent-payment-setup-resume",
     "sms-supervisor-fill-form-searches-then-delegates",
@@ -2883,10 +2888,46 @@ def _doordash_food_plan_frozen_fixture() -> dict | None:
 DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER = "do NOT try to login."
 
 
+class DoorDashFoodPlanManifestUnavailable(RuntimeError):
+    """A task pins the food-plan manifest but the frozen fixture has no checkout table."""
+
+
+def _uses_doordash_food_plan_manifest(task: BenchmarkTask) -> bool:
+    """True when the catalog pins the frozen DoorDash food-plan manifest fixture."""
+    pinned = getattr(task, "pinned_facts", None)
+    pinned = pinned if isinstance(pinned, dict) else {}
+    return pinned.get("manifest_source") == DOORDASH_FOOD_PLAN_MANIFEST_SOURCE
+
+
+def _prepare_doordash_food_plan_fixture(task: BenchmarkTask, base_url: str) -> None:
+    """Apply the frozen food-plan manifest fixture before any task that pins it."""
+    if not _uses_doordash_food_plan_manifest(task):
+        return
+    if not _is_local_base_url(base_url):
+        raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+    doordash_manifest = _run_doordash_food_plan_fixture("apply")
+    prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
+    print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
+
+
 def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
-    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+    """Resolve the goal for tasks pinning the food-plan manifest.
+
+    The grocery-order task runs the prod-derived execute prompt. Siblings keep
+    their own catalog contract (e.g. cart-reauth: guest cart, stop at auth) and
+    receive the pinned checkout manifest table those prompts refer to.
+    """
+    if not _uses_doordash_food_plan_manifest(task):
         return None
     frozen = _doordash_food_plan_frozen_fixture()
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        checkout_manifest = (frozen or {}).get("checkout_manifest") or ""
+        if not checkout_manifest:
+            raise DoorDashFoodPlanManifestUnavailable(
+                f"{task.name} pins {DOORDASH_FOOD_PLAN_MANIFEST_SOURCE} but the frozen fixture has no "
+                "checkout_manifest; re-freeze the DoorDash food-plan fixture"
+            )
+        return f"{task.prompt.rstrip()}\n\nWeekly food-plan manifest:\n{checkout_manifest}"
     if not frozen:
         return None
     prompt = frozen["execute_prompt"]
@@ -2896,17 +2937,32 @@ def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
 
 
 def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:
-    override = _doordash_food_plan_prompt_override(task)
+    try:
+        override = _doordash_food_plan_prompt_override(task)
+    except DoorDashFoodPlanManifestUnavailable:
+        # The goal already failed closed at run time; a judge process without the
+        # frozen fixture judges against the catalog prompt.
+        override = None
     return override if override else task.prompt
 
 
 def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
-    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+    if not _uses_doordash_food_plan_manifest(task):
         return ""
     frozen = _doordash_food_plan_frozen_fixture()
     if not frozen:
         return ""
     sections: list[str] = []
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        # Siblings receive only the checkout table (appended to their own prompt),
+        # never the order task's execute prompt.
+        if frozen.get("checkout_manifest"):
+            sections.append(
+                "Authoritative checkout manifest table (prod-derived; the agent received exactly this table "
+                "in its goal; every Safeway and conditional 99 Ranch line must be satisfied or "
+                "manifest-allowed omitted/substituted):\n" + frozen["checkout_manifest"]
+            )
+        return "\n\n".join(sections)
     if frozen.get("checkout_manifest"):
         sections.append(
             "Authoritative checkout manifest table (prod-derived; every Safeway and conditional "
@@ -4690,14 +4746,19 @@ def _validate_tool_count_expectations(
     return None
 
 
-async def post_message(base_url: str, agent_id: str, message: str) -> bool:
+async def post_message(
+    base_url: str, agent_id: str, message: str, metadata: Optional[dict[str, Any]] = None
+) -> bool:
     """POST /api/agents/:id/messages — send a user message (unblocks send_message_to_user waits)."""
     headers = await _api_headers()
+    body: dict[str, Any] = {"message": message, "role": "USER"}
+    if metadata:
+        body["metadata"] = metadata
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{base_url}/api/agents/{agent_id}/messages",
             headers=headers,
-            json={"message": message, "role": "USER"},
+            json=body,
         )
         return resp.status_code in (200, 201)
 
@@ -5248,7 +5309,7 @@ async def _poll_agent(
     prev_root_message_count = 0
     approvals_triggered = 0
     approvals_resolved = 0
-    replied_waiting_msgs: set = set()  # track isWaitingForUser messages we've already replied to
+    replied_waiting_msgs: set = set()  # questions (toolCallId, else row id) already auto-replied to
     last_tree_poll = 0.0  # timestamp of last tree-level poll
     last_progress_print = 0.0  # timestamp of last progress log
     last_tree_stats: dict = {}  # cached tree stats
@@ -5799,6 +5860,10 @@ async def _poll_agent(
         # Auto-reply to send_message_to_user questions (isWaitingForUser)
         # These block the workflow until a user message is posted back.
         # The flag can be at metadata.isWaitingForUser OR metadata.sendMessageToUser.isWaitingForUser
+        # One reply per question: key on the question's toolCallId (its waiting
+        # state may be persisted on more than one row) and stamp the reply with
+        # the question it answers, so replies to distinct questions are distinct
+        # rows while a double-persisted reply still trips no_duplicate_messages.
         for m in messages:
             meta = m.get("metadata", {})
             if not isinstance(meta, dict):
@@ -5807,8 +5872,9 @@ async def _poll_agent(
             is_waiting = meta.get("isWaitingForUser") or (
                 isinstance(meta.get("sendMessageToUser"), dict) and meta["sendMessageToUser"].get("isWaitingForUser")
             )
-            if is_waiting and msg_id and msg_id not in replied_waiting_msgs:
-                replied_waiting_msgs.add(msg_id)
+            question_key = meta.get("toolCallId") or msg_id
+            if is_waiting and question_key and question_key not in replied_waiting_msgs:
+                replied_waiting_msgs.add(question_key)
                 question = (m.get("text") or m.get("message") or "")[:200]
                 print(f"    💬 Agent asked a question: {question}")
                 print("    → Auto-replying to unblock workflow")
@@ -5819,6 +5885,7 @@ async def _poll_agent(
                         "Please do not ask me anymore questions. I trust your judgment, intuition, "
                         "and ability to make reasonable assumptions. Please proceed with the task. "
                         "All files have been uploaded as attachments and should be available in your context.",
+                        metadata={"benchmarkAutoReply": {"toolCallId": question_key, "questionMessageId": msg_id}},
                     )
                 except Exception as e:
                     print(f"    ⚠ Auto-reply failed: {e}")
@@ -12577,6 +12644,13 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
     """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
     compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps", "judge_audits"}}
+    if isinstance(raw.get("display_artifacts"), list):
+        # Their bounded text is already a displayed_to_user evidence row.
+        compact["display_artifacts"] = [
+            {key: value for key, value in artifact.items() if key != "text"}
+            for artifact in raw["display_artifacts"]
+            if isinstance(artifact, dict)
+        ]
     tree = _judge_source_tree(data)
     compact_tree: dict[str, dict] = {}
     if tree:
@@ -13178,9 +13252,7 @@ async def _call_declared_llm_judge(
 
     criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
     task_requirement = (
-        _doordash_food_plan_task_requirement_for_judge(task)
-        if task.name == DOORDASH_FOOD_PLAN_TASK_NAME
-        else task.prompt
+        _doordash_food_plan_task_requirement_for_judge(task) if _uses_doordash_food_plan_manifest(task) else task.prompt
     )
     manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
     manifest_block = (
@@ -13206,7 +13278,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     if evidence is None:
         evidence = _declared_evaluator_evidence(data)
-    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+    if _uses_doordash_food_plan_manifest(task):
         cart_evidence = _doordash_food_plan_supplemental_cart_evidence(data)
         if cart_evidence:
             evidence.append(
@@ -15314,9 +15386,13 @@ async def _run_declared_evaluators(
     if needs_tree_evidence and base_url:
         await _hydrate_semantic_evaluator_tree(data, base_url)
 
-    if base_url and any(
-        _task_declares_static_check(task, check_type)
-        for check_type in ("display_media_shown", "display_artifact_figures")
+    # Displayed items are part of the answer the user saw, so semantic judges get them too.
+    if base_url and (
+        needs_tree_evidence
+        or any(
+            _task_declares_static_check(task, check_type)
+            for check_type in ("display_media_shown", "display_artifact_figures")
+        )
     ):
         await _hydrate_display_artifacts(data, base_url)
 
@@ -15709,12 +15785,7 @@ async def _run_single_task_as_run_user(
             f"{google_workspace_manifest.get('event_count', '?')} events, "
             f"{google_workspace_manifest.get('file_count', '?')} files"
         )
-    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
-        if not _is_local_base_url(base_url):
-            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
-        doordash_manifest = _run_doordash_food_plan_fixture("apply")
-        prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
-        print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
+    _prepare_doordash_food_plan_fixture(task, base_url)
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
@@ -16027,7 +16098,7 @@ async def _run_single_task_as_run_user(
                 start_fixture_ref, result = await asyncio.gather(archive, observation)
             finally:
                 for pending in (archive, observation):
-                    if not pending.done():
+                    if not pending.done() and not pending.cancelling():
                         pending.cancel()
                 await asyncio.gather(archive, observation, return_exceptions=True)
             if start_fixture_ref:
