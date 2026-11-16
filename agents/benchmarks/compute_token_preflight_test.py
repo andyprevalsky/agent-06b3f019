@@ -17,12 +17,14 @@ These tests pin the tolerance on both paths without needing a live DB.
 """
 
 import asyncio
+import inspect
 import os
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -423,49 +425,65 @@ def test_sync_fails_before_seed_when_no_explicit_source_exists():
     assert calls == []
 
 
-def test_blanket_preflight_uses_tolerant_sync():
-    captured: dict[str, object] = {}
+def _recording_sync(captured: dict[str, object]):
+    """Record one _sync_compute_tokens call through its exact real call contract."""
 
     def fake_sync(
         *,
         tolerate_gpt_code_unavailable: bool = False,
         tolerate_claude_code_unavailable: bool = False,
         required_token_types: tuple[str, ...] | None = None,
+        allow_missing_claude_for_non_claude_tasks: bool | None = None,
     ) -> bool:
         captured["gpt"] = tolerate_gpt_code_unavailable
         captured["claude"] = tolerate_claude_code_unavailable
         captured["required"] = required_token_types
+        captured["non_claude_tasks"] = allow_missing_claude_for_non_claude_tasks
         return True
 
-    with (
-        patch.object(rb, "_is_local_base_url", return_value=True),
-        patch.object(
-            rb,
-            "_has_usable_anthropic_api_key_fallback",
-            new=AsyncMock(return_value=True),
-        ),
-        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
-        patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=True),
-    ):
-        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
+    # A later signature change fails here instead of hiding behind a permissive fake.
+    def contract(function):
+        return [(p.name, p.kind, p.default) for p in inspect.signature(function).parameters.values()]
 
-    assert captured == {"gpt": True, "claude": True, "required": None}
+    assert contract(fake_sync) == contract(rb._sync_compute_tokens)
+    return fake_sync
+
+
+def test_blanket_preflight_uses_tolerant_sync():
+    captured: dict[str, object] = {}
+
+    fake_sync = _recording_sync(captured)
+
+    def run_preflight(tasks):
+        captured.clear()
+        with (
+            patch.object(rb, "_is_local_base_url", return_value=True),
+            patch.object(
+                rb,
+                "_has_usable_anthropic_api_key_fallback",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+            patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=True),
+        ):
+            asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999", tasks=tasks))
+        return dict(captured)
+
+    # No selected tasks keeps the strict run-level Claude seed default.
+    assert run_preflight(()) == {"gpt": True, "claude": True, "required": None, "non_claude_tasks": False}
+    # Only non-Claude selected tasks may seed without a Claude code credential.
+    non_claude = SimpleNamespace(name="browser-task", requires_claude_code=False)
+    assert run_preflight((non_claude,)) == {"gpt": True, "claude": True, "required": None, "non_claude_tasks": True}
+    # Any selected Claude Code task withdraws that permission.
+    mixed = (non_claude, SimpleNamespace(name="code-task", requires_claude_code=True))
+    assert run_preflight(mixed)["non_claude_tasks"] is False
 
 
 def test_claude_code_required_preflight_tolerates_funded_anthropic_key():
     """Claude Code tasks may proceed on ANTHROPIC_API_KEY when OAuth sync is empty."""
     captured: dict[str, object] = {}
 
-    def fake_sync(
-        *,
-        tolerate_gpt_code_unavailable: bool = False,
-        tolerate_claude_code_unavailable: bool = False,
-        required_token_types: tuple[str, ...] | None = None,
-    ) -> bool:
-        captured["gpt"] = tolerate_gpt_code_unavailable
-        captured["claude"] = tolerate_claude_code_unavailable
-        captured["required"] = required_token_types
-        return True
+    fake_sync = _recording_sync(captured)
 
     with (
         patch.object(rb, "_is_local_base_url", return_value=True),
@@ -485,23 +503,15 @@ def test_claude_code_required_preflight_tolerates_funded_anthropic_key():
             )
         )
 
-    assert captured == {"gpt": True, "claude": True, "required": None}
+    # A Claude Code run never seeds without a Claude code credential.
+    assert captured == {"gpt": True, "claude": True, "required": None, "non_claude_tasks": False}
 
 
 def test_claude_code_required_preflight_is_strict_without_anthropic_key():
     """Without a funded Anthropic key, code-agent tasks require Claude OR Codex."""
     captured: dict[str, object] = {}
 
-    def fake_sync(
-        *,
-        tolerate_gpt_code_unavailable: bool = False,
-        tolerate_claude_code_unavailable: bool = False,
-        required_token_types: tuple[str, ...] | None = None,
-    ) -> bool:
-        captured["gpt"] = tolerate_gpt_code_unavailable
-        captured["claude"] = tolerate_claude_code_unavailable
-        captured["required"] = required_token_types
-        return True
+    fake_sync = _recording_sync(captured)
 
     with (
         patch.object(rb, "_is_local_base_url", return_value=True),
@@ -521,7 +531,7 @@ def test_claude_code_required_preflight_is_strict_without_anthropic_key():
             )
         )
 
-    assert captured == {"gpt": True, "claude": False, "required": ("any",)}
+    assert captured == {"gpt": True, "claude": False, "required": ("any",), "non_claude_tasks": False}
 
 
 def test_claude_code_required_preflight_fails_closed_when_sync_fails():

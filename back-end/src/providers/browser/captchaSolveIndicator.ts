@@ -5,7 +5,10 @@
  *   idle ──► solving ──► succeeded|failed ──(hold ~2.2s)──► idle
  *
  * Steel: isSolving + terminal task status (solved / failed_to_*).
- * Kernel: widget probe for in-flight + captcha_solve_result for terminal.
+ * Kernel: captcha_solve_result for terminal only (no in-flight solve state).
+ * Tilion: no per-session solver telemetry, so the chip stays idle.
+ * A challenge widget on the page is never evidence that a solver is working:
+ * the chip is in-page DOM that the browser agent reads as fact.
  *
  * Keep the script body byte-identical to
  * `agents/browser_tools/captcha_solve_indicator.py` (enforced by unit test).
@@ -259,25 +262,17 @@ function mapOutcomeStatusToPhase(status: string): CaptchaIndicatorPhase | null {
 }
 
 /**
- * Decide whether the live-view chip should be on (solving only).
+ * Decide whether the live-view chip should claim "solving".
  *
- * Steel exposes a real in-flight `isSolving` flag. Kernel only emits terminal
- * `captcha_solve_result` events (`isSolving` is always null), so callers may
- * pass `kernelChallengeWidgetsPresent` from a live CDP probe as the Kernel
- * stand-in for "solver is engaged on a challenge".
+ * Only a provider's own in-flight flag (Steel `isSolving`) is evidence that a
+ * solver is working. Kernel emits only terminal `captcha_solve_result` events
+ * and Tilion reports no solver state (`isSolving` is null for both), so they
+ * never claim solving; their terminal outcomes still drive the chip.
  */
 export function resolveCaptchaAutoSolveActive(
-  telemetry: Pick<BrowserCaptchaTelemetry, 'provider' | 'isSolving'>,
-  options: { kernelChallengeWidgetsPresent?: boolean } = {}
+  telemetry: Pick<BrowserCaptchaTelemetry, 'provider' | 'isSolving'>
 ): boolean {
-  if (telemetry.isSolving === true) return true;
-  if (telemetry.isSolving === false) return false;
-  // Kernel and Tilion (cdp_observe) expose no in-flight solve flag, so a live
-  // challenge-widget probe stands in for "solver is engaged".
-  if (telemetry.provider === 'kernel' || telemetry.provider === 'tilion') {
-    return options.kernelChallengeWidgetsPresent === true;
-  }
-  return false;
+  return telemetry.isSolving === true;
 }
 
 const TERMINAL_AWAIT_MS = 5_000;
@@ -292,10 +287,9 @@ const FRESH_OUTCOME_MS = 15_000;
  */
 export function resolveCaptchaIndicatorPhase(
   telemetry: Pick<BrowserCaptchaTelemetry, 'provider' | 'isSolving' | 'latestOutcome'>,
-  options: { kernelChallengeWidgetsPresent?: boolean } = {},
   memory: CaptchaIndicatorMemory = emptyCaptchaIndicatorMemory()
 ): { phase: CaptchaIndicatorPhase; memory: CaptchaIndicatorMemory } {
-  const solving = resolveCaptchaAutoSolveActive(telemetry, options);
+  const solving = resolveCaptchaAutoSolveActive(telemetry);
   const outcome = telemetry.latestOutcome;
   const key = outcome ? outcomeKey(outcome) : null;
   const now = Date.now();
@@ -362,29 +356,6 @@ export function resolveCaptchaIndicatorPhase(
   };
 }
 
-/** Expression that returns whether common CAPTCHA widgets are present (Kernel synth). */
-export const CAPTCHA_WIDGET_PRESENT_SCRIPT = String.raw`(() => {
-  const HOST_MARKERS = [
-    'hcaptcha.com', 'newassets.hcaptcha.com', 'recaptcha.net', 'recaptcha/',
-    'google.com/recaptcha', 'gstatic.com/recaptcha', 'challenges.cloudflare.com',
-    'turnstile', 'geetest.com', 'captcha-delivery.com', 'funcaptcha.com', 'arkoselabs.com',
-  ];
-  try {
-    const frames = document.querySelectorAll('iframe');
-    for (const frame of frames) {
-      const src = String(frame.getAttribute('src') || frame.src || '').toLowerCase();
-      if (HOST_MARKERS.some((m) => src.includes(m))) return true;
-      const title = String(frame.getAttribute('title') || '').toLowerCase();
-      if (title.includes('captcha') || title.includes('hcaptcha')) return true;
-    }
-    return !!(
-      document.querySelector('.h-captcha, .g-recaptcha, .cf-turnstile, #cf-turnstile, [data-hcaptcha-widget-id]')
-    );
-  } catch (_) {
-    return false;
-  }
-})()`;
-
 async function installOnContext(context: BrowserContext): Promise<void> {
   await context.addInitScript(CAPTCHA_SOLVE_INDICATOR_SCRIPT);
   for (const page of context.pages()) {
@@ -405,10 +376,9 @@ export async function installCaptchaSolveIndicator(browser: Browser): Promise<vo
 export async function applyCaptchaSolveIndicatorFromTelemetry(
   browser: Browser,
   telemetry: Pick<BrowserCaptchaTelemetry, 'provider' | 'isSolving' | 'latestOutcome'>,
-  options: { kernelChallengeWidgetsPresent?: boolean } = {},
   memory: CaptchaIndicatorMemory = emptyCaptchaIndicatorMemory()
 ): Promise<{ phase: CaptchaIndicatorPhase; memory: CaptchaIndicatorMemory }> {
-  const resolved = resolveCaptchaIndicatorPhase(telemetry, options, memory);
+  const resolved = resolveCaptchaIndicatorPhase(telemetry, memory);
   const script = captchaSolveIndicatorSetPhaseScript(resolved.phase);
   for (const context of browser.contexts()) {
     for (const page of context.pages()) {

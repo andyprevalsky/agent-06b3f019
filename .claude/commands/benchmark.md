@@ -36,6 +36,7 @@ Over 32 simultaneous copies (most `full` runs) route to the sharded operator, wh
 - A Benchmark Hub infrastructure experiment does not wait for `/deploy`, never writes outside its isolated prefix, and follows **Hub infrastructure experiments** in `agents/benchmarks/README.md`.
 - Every launch stops itself through its normal controller and traps when `20 * infra_failed_jobs >= scheduled_total` (30 of 600); never recompute it from completed attempts, and let that stop and its cleanup finish instead of signalling the run.
 - Cloud startup, recovery, image builds and LIVE acceptance details are in the Operations Runbook in `agents/benchmarks/README.md`.
+- On boxes.dev, add `--durable` to any long campaign, fleet or recovery launch instead of `setsid`/`nohup`. A session restart SIGKILLs the agent session's whole cgroup, including detached children. `--durable` runs the controller as a transient system service (`sudo -n systemd-run`, `KillMode=process`), prints its unit, MainPID and log, and returns. Stop it with `sudo -n systemctl stop <unit>`; its own traps clean up. A `DURABLE LAUNCH UNAVAILABLE` warning means it fell back to setsid and is not restart-durable.
 
 ### Monitoring
 - A sub-agent owns each run, and its handoff names every duty: launch or adoption, operational monitoring, infra-failure `/RCA` delegation and exact-owner cleanup; adoption counts only after its own first sample of that run's printed handle.

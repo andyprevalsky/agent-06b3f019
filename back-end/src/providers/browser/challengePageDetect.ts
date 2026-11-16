@@ -153,6 +153,8 @@ export async function waitForProviderSolver(
   reason: string | null;
   title: string;
   usage: ChallengeClassifierLlmUsage | null;
+  /** Every classification's usage (a busy challenged page is classified twice). */
+  usages?: ChallengeClassifierLlmUsage[];
 }> {
   const result = await classifyPageAfterSettle(page, response, undefined, billing, {
     recoveryReason: options?.recoveryReason,
@@ -164,6 +166,7 @@ export async function waitForProviderSolver(
     reason: result.clean ? null : result.reason,
     title: result.title,
     usage: result.usage,
+    usages: result.usages,
   };
 }
 

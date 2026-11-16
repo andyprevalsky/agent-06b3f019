@@ -218,6 +218,23 @@ function groupByProfile(cookies: SanitizedCookie[]) {
   }));
 }
 
+/**
+ * The profiles an upload replaces: every uploaded profile, plus the
+ * profile-less ('') snapshot once the upload names its profiles. '' only comes
+ * from an uploader that could not tell profiles apart (the Mac app before it
+ * tagged Chrome profiles), so a profile-aware upload of the same browser
+ * supersedes it; leaving it in place kept months-old cookies, including
+ * never-expiring session cookies, looking live forever. Named profiles stay
+ * isolated from each other.
+ */
+function replacedProfileSnapshots(profileGroups: ReturnType<typeof groupByProfile>) {
+  const namesProfiles = profileGroups.some((group) => group.browserProfile !== '');
+  const hasProfileLess = profileGroups.some((group) => group.browserProfile === '');
+  return namesProfiles && !hasProfileLess
+    ? [...profileGroups, { browserProfile: '', cookies: [] as SanitizedCookie[] }]
+    : profileGroups;
+}
+
 /** Every dot-suffix of a cookie host (`a.b.com` → a.b.com, b.com, com). */
 function domainSuffixes(domain: string): string[] {
   const labels = domain.toLowerCase().replace(/^\.+/, '').split('.');
@@ -352,7 +369,7 @@ async function upsertCookieBatches(
   const BATCH_SIZE = 100;
   let processedCount = 0;
   const groups = groupByProfileAndRealm(sanitizedCookies);
-  const profileGroups = groupByProfile(sanitizedCookies);
+  const profileGroups = replacedProfileSnapshots(groupByProfile(sanitizedCookies));
   const realmKey = (group: { authRealm: string; browserProfile: string }) =>
     `${group.authRealm}\u0000${group.browserProfile}`;
 

@@ -5,6 +5,7 @@ import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { processCookiesUpload } from '../../domains/integrations/uploadService.browser';
 import { processPasswordsUpload } from '../../domains/integrations/uploadService.passwords';
+import { registerProfileSnapshotCases } from './browser-credential-sync.profile-snapshot.cases';
 
 config();
 
@@ -528,6 +529,8 @@ test('password upload persists browserProfile and clears disabled state', async 
     await cleanup(userId);
   }
 });
+
+registerProfileSnapshotCases(test, { createUser, cleanup });
 
 async function main() {
   const results: Array<{ name: string; passed: boolean; error?: string }> = [];

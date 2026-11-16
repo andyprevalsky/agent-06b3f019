@@ -1051,6 +1051,12 @@ class Selector:
 # run concurrently.
 
 STABILITY_RUNS = 5
+# A proc-observation unit scans this user's whole /proc table and refuses on any same-user
+# process it cannot read (a non-dumpable child: a browser sandbox, a setgid exec, a test fixture).
+# Under the stability load every other lane is an arbitrary test, so such a unit runs alone:
+# nothing launches beside it, and it waits for running units to drain. Other exclusive groups
+# keep the structural runner's rule (never overlap each other, run beside everything else).
+STABILITY_SOLO_GROUPS = frozenset({"proc-observation"})
 STABILITY_RUN_TIMEOUT_SECONDS = 1200
 # Explicit whole-suite budget; inner scenario deadlines and five loaded runs remain unchanged.
 # Effective-budget approval: PR1682-STABILITY-COMPOSITE-BUDGET.
@@ -1888,8 +1894,16 @@ def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: i
             while pending or running:
                 with done:
                     held = {group for group in running.values() if group}
-                    launch = next((item for item in pending if not item[1].exclusive or item[1].exclusive not in held),
-                                  None) if len(running) < lanes else None
+                    launch = None
+                    if len(running) < lanes and not held & STABILITY_SOLO_GROUPS:
+                        for item in pending:
+                            if item[1].exclusive in STABILITY_SOLO_GROUPS:
+                                if not running:
+                                    launch = item
+                                break  # drain the lanes first; never start later units ahead of it
+                            if not item[1].exclusive or item[1].exclusive not in held:
+                                launch = item
+                                break
                     if launch is None:
                         done.wait(timeout=1.0)
                         continue

@@ -28,6 +28,7 @@ import {
   documentPreviewKind,
   documentTypeLabel,
 } from '@/features/terminal-component-group/components/documentPreview.utils';
+import { signedUrlOptions } from '@/features/terminal-component-group/components/documentPreview.load';
 
 const API_BASE = 'http://localhost:3001/api';
 const createSignedUrl = vi.fn(async (path: string) => ({
@@ -230,6 +231,41 @@ describe('inline media by default', () => {
     expect(unavailable).toHaveTextContent('gone.png');
     await user.click(unavailable);
     expect(await screen.findByTestId('document-preview-drawer')).toBeInTheDocument();
+  });
+});
+
+describe('SVG display (owner decision 2026-11-08)', () => {
+  // An SVG may carry <script> or onload. It is only ever an <img> (browsers never run
+  // scripts in an image) and its markup is never inlined into the app DOM.
+  const scripted =
+    '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script></svg>';
+
+  it('renders an SVG as an inline <img>, never as inline markup, inline and in the drawer', async () => {
+    const user = userEvent.setup();
+    downloadBlobMock.mockResolvedValueOnce(new Blob([scripted], { type: 'image/svg+xml' }));
+    const { container } = renderWithProviders(
+      <AttachmentDisplay attachments={[file('chart.svg', 'image/svg+xml')]} agentId="agent-1" />,
+    );
+    const img = await screen.findByRole('img', { name: 'chart.svg' });
+    expect(img.tagName).toBe('IMG');
+    expect(container.querySelector('svg script, script, foreignObject')).toBeNull();
+    expect(container.innerHTML).not.toContain('alert(');
+    await user.click(screen.getByRole('button', { name: 'Open chart.svg' }));
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    const preview = await within(drawer).findByTestId('document-preview-image');
+    expect(preview.querySelector('img')).not.toBeNull();
+    expect(document.body.innerHTML).not.toContain('alert(');
+    expect(document.querySelector('iframe[data-testid="document-preview-html"]')).toBeNull();
+  });
+
+  it('signs an SVG URL as a download, so opening it never renders it as a page', async () => {
+    renderWithProviders(<AttachmentDisplay attachments={[file('chart.svg', 'image/svg+xml')]} />);
+    await screen.findByRole('img', { name: 'chart.svg' });
+    expect(createSignedUrl).toHaveBeenCalledWith('user/chart.svg', expect.any(Number), {
+      download: true,
+    });
+    expect(signedUrlOptions('user/shot.png')).toBeUndefined();
+    expect(signedUrlOptions('user/CHART.SVG')).toEqual({ download: true });
   });
 });
 

@@ -488,6 +488,16 @@ class ReleaseReport(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'single failed case'):
             q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'real_model_controls'},
                                    self.root)
+        # PR #1865 2026-11-13: a domain returning a bare bool reports no counts prefix
+        # ("FAIL (1 failed case(s): X; first error: ..."); the single failed case still binds.
+        bare = detail.replace('121 passed, 1 failed; ', '')
+        recorded = q.validate_attribution({**occurrence, 'detail': bare}, {**entry, 'case': 'real_model_controls'},
+                                          self.root)
+        self.assertEqual('dom', recorded['post_merge']['unit'])
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': bare.replace('1 failed case(s): real_model_controls',
+                                                                         '2 failed case(s): real_model_controls, other')},
+                                   {**entry, 'case': 'real_model_controls'}, self.root)
 
     def test_typescript_domain_flake_binds_the_marker_of_its_single_failed_native_case(self):
         occurrence_id = 'd' * 32

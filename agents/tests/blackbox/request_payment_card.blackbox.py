@@ -164,15 +164,10 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         else:
             raise AssertionError(f"PaymentLineItem accepted non-positive {field_name}")
 
-    for required_field in ("product_url", "rating", "review_count"):
-        invalid_item = {**valid_item}
-        invalid_item.pop(required_field)
-        try:
-            PaymentLineItem.model_validate(invalid_item)
-        except ValidationError:
-            pass
-        else:
-            raise AssertionError(f"PaymentLineItem accepted missing {required_field}")
+    # Product URL, rating and review count are optional (owner decisions 2026-11-08).
+    for optional_field in ("product_url", "rating", "review_count"):
+        item_without = {key: value for key, value in valid_item.items() if key != optional_field}
+        assert getattr(PaymentLineItem.model_validate(item_without), optional_field) is None, optional_field
 
     # product_url is validated for WELL-FORMEDNESS ONLY. Page-type inference
     # (product vs checkout vs storefront) was removed by decision: every merchant
@@ -263,14 +258,13 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
 
 
 def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
-    """H-01: a review-less service/ticket page must be satisfiable with '0'.
+    """H-01: a review-less service/ticket page must be satisfiable.
 
-    The validators already accept '0 stars'/'0 reviews' — the failure mode was the
-    agent emitting 'N/A' (rejected) because nothing told it the canonical zero
-    value. This cements the zero case AND that every LLM-facing surface (tool
-    schema + Pydantic descriptions + retry error) teaches it, so the model stops
-    hallucinating or hunting a rating that a booking page never shows. Placeholder
-    rejection stays intact (asserted above), so this is guidance, not relaxation.
+    The failure mode was the agent emitting 'N/A' (rejected) because nothing told it
+    what to do on a page without reviews. Rating and review count are now optional
+    (owner decision 2026-11-08): every LLM-facing surface (tool schema + Pydantic
+    descriptions + retry error) teaches omitting them, '0 stars'/'0 reviews' still
+    validate, and placeholder rejection stays intact (asserted above).
     """
     from browser_tools.schemas import PaymentLineItem
 
@@ -282,7 +276,12 @@ def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
     assert zeroed.rating == "0 stars"
     assert zeroed.review_count == "0 reviews"
 
-    # 1) Rose browser-use tool schema teaches the zero case for both fields.
+    omitted = PaymentLineItem.model_validate(
+        {key: value for key, value in valid_item.items() if key not in ("rating", "review_count")}
+    )
+    assert omitted.rating is None and omitted.review_count is None
+
+    # 1) Rose browser-use tool schema teaches omitting both fields.
     from providers.rose.browser_use import BROWSER_USE_TOOLS
 
     props = BROWSER_USE_TOOLS["request_payment_card"]["params"]["line_items"]["items"][
@@ -290,22 +289,303 @@ def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
     ]
     for field in ("rating", "review_count"):
         desc = props[field]["description"].lower()
-        assert "0 stars" in desc or "0 reviews" in desc
+        assert "omit it" in desc
         assert "made-up" in desc  # forbids hallucinated / placeholder values
 
     # 2) Pydantic field descriptions carry the same guidance.
     fields = PaymentLineItem.model_fields
-    assert "0 stars" in (fields["rating"].description or "")
-    assert "0 reviews" in (fields["review_count"].description or "")
+    assert "omit it" in (fields["rating"].description or "")
+    assert "omit it" in (fields["review_count"].description or "")
 
-    # 3) The retry error tells the agent to pass 0 (self-correction), not to keep hunting.
+    # 3) The retry error tells the agent to omit them (self-correction), not to keep hunting.
     import inspect
 
     from domains.spawn_browser_agent_v3 import service_actions
 
     action_src = inspect.getsource(service_actions)
-    assert "0 stars" in action_src and "0 reviews" in action_src
+    assert "omit rating and review_count" in action_src
     assert "do not keep searching" in action_src
+
+
+# Captured verbatim from browser-hotel-booking r001-j0020 (agent 3e9daf89, step 63).
+# hotels.com shows "9.2 out of 10" for Hotel Kabuki; the validator only accepted 0-5,
+# so the truthful receipt was rejected and no payment approval was ever requested.
+_HOTELS_COM_KABUKI_REQUEST = {
+    "merchant": (
+        "Hotels.com — Hotel Kabuki, part of JdV by Hyatt (guest checkout; payment-boundary "
+        "benchmark only; USD 358.85 payable today and USD 40.69 due at property; no booking "
+        "or payment will be submitted)"
+    ),
+    "currency": "USD",
+    "line_items": [
+        {
+            "name": (
+                "Hotel Kabuki, part of JdV by Hyatt — Room, 1 King Bed, non-refundable, no extras; "
+                "1 adult; check-in Saturday November 7, 2026, check-out Sunday November 8, 2026 (1 night)"
+            ),
+            "image_url": (
+                "https://images.trvl-media.com/lodging/1000000/10000/1100/1003/26001c4e.jpg"
+                "?impolicy=fcrop&w=1200&h=800"
+            ),
+            "product_url": (
+                "https://www.hotels.com/ho129640/"
+                "hotel-kabuki-part-of-jdv-by-hyatt-san-francisco-united-states-of-america/"
+            ),
+            "rating": "9.2 out of 10",
+            "review_count": "1,000 reviews",
+            "unit_price_cents": 30800,
+            "quantity": 1,
+            "line_total_cents": 30800,
+        }
+    ],
+    "fees": [
+        {"label": "Taxes & fees", "amount_cents": 5085},
+        {"label": "Destination fee — due at property", "amount_cents": 3492},
+        {"label": "Tax on fees — due at property", "amount_cents": 577},
+    ],
+    "subtotal_cents": 30800,
+    "total_cents": 39954,
+}
+
+
+def test_rating_keeps_the_merchant_scale_shown_on_the_page():
+    """H-22: a truthful rating on a non-5-point scale must be representable.
+
+    hotels.com shows "9.2 out of 10". The approval renders the rating string to the
+    user as written, so a first score above 5 is kept exactly as the page shows it
+    instead of being rejected or rescaled. Every 5-point input keeps its existing
+    "<score> stars" output, byte for byte, so receipt fingerprints are unchanged.
+    """
+    from browser_tools.schemas import (
+        PaymentLineItem,
+        WriteLockPurchaseItem,
+        validate_browser_tool_args,
+    )
+    from domains.request_payment_card.service import (
+        build_payment_question,
+        normalize_payment_payload,
+    )
+
+    # 1) The exact captured hotels.com call passes the production browser-tool boundary.
+    parsed = validate_browser_tool_args("request_payment_card", _HOTELS_COM_KABUKI_REQUEST)
+    assert parsed["line_items"][0]["rating"] == "9.2 out of 10", parsed["line_items"][0]["rating"]
+
+    # 2) The approval the user sees carries the page's own rating, not invented stars.
+    payload = normalize_payment_payload(_HOTELS_COM_KABUKI_REQUEST, "user-123")
+    assert payload["lineItems"][0]["rating"] == "9.2 out of 10"
+    question = build_payment_question(payload)
+    assert "9.2 out of 10" in question.replace("\\", ""), question
+
+    valid_item = _sample_tool_call()["line_items"][0]
+    unchanged_five_point = {
+        "4.8 stars": "4.8 stars",
+        "4.8 out of 5 stars": "4.8 stars",
+        "4.5/5": "4.5 stars",
+        "0 stars": "0 stars",
+        "5.0 stars": "5.0 stars",
+        "4.8 (2,345)": "4.8 stars",
+        "Rated 4.7 of 5": "4.7 stars",
+        "4.5 of 5": "4.5 stars",
+        "4.6 stars out of 5": "4.6 stars",
+        "4.5 (1.2K)": "4.5 stars",
+        "4.7 (2k+)": "4.7 stars",
+        "4.9 ⭐ (2.1k)": "4.9 stars",
+        "4.5 stars, 98% recommend": "4.5 stars",
+        "4.5 stars · 20% off": "4.5 stars",
+        "4.7★ · Top 5%": "4.7 stars",
+        "4.8 stars · 1 of 3 left": "4.8 stars",
+        "4.5 – #1 of 25": "4.5 stars",
+        "#12 in Hotels · 4.5 stars": "4.5 stars",
+        "Top 10 · 4.6 stars": "4.6 stars",
+        "250 guests · 4.5 stars": "4.5 stars",
+        "4 out of 5": "4 stars",
+        "4.5/5": "4.5 stars",
+    }
+    # Owner decision 2026-11-08: no fixed-scale limit, so any other scale is kept as written.
+    other_scales_kept_as_written = ("9.2 out of 10", "9.2/10 Wonderful", "Rated 8.7 of 10", "94%",
+                                    # A low score on a non-5 scale keeps its scale (CodeRabbit PR #1865).
+                                    "3 out of 10", "3/10", "2 / 10 rating", "3%", "5 %")
+    still_rejected = ("N/A", "312 reviews", "250 guests", "#1 of 25")
+    for model in (PaymentLineItem, WriteLockPurchaseItem):
+        # 3) 5-point outputs are identical to the pre-fix validator.
+        for submitted, normalized in unchanged_five_point.items():
+            item = {**valid_item, "title": valid_item["name"], "rating": submitted}
+            assert model.model_validate(item).rating == normalized, (model.__name__, submitted)
+        # 4) A first score above 5 is kept exactly as the page shows it.
+        for submitted in other_scales_kept_as_written:
+            item = {**valid_item, "title": valid_item["name"], "rating": submitted}
+            assert model.model_validate(item).rating == submitted, (model.__name__, submitted)
+        # 5) No score, placeholders and review counts are still rejected.
+        for submitted in still_rejected:
+            item = {**valid_item, "title": valid_item["name"], "rating": submitted}
+            try:
+                parsed_item = model.model_validate(item)
+            except ValueError:
+                continue
+            raise AssertionError(f"{model.__name__} accepted {submitted!r} as {parsed_item.rating!r}")
+
+
+def test_card_request_without_rating_or_reviews_is_accepted():
+    """Owner decision (2026-11-08): rating and review count are optional per line item.
+
+    A booking or service page often shows neither. The card request, the approval the
+    user sees and the write-lock purchase item must accept an item without them, with
+    no invented "0 stars" and no "None" in the approval text. Product URL, name,
+    prices, quantity and totals stay required.
+    """
+    from browser_tools.schemas import WriteLockPurchaseItem, validate_browser_tool_args
+    from domains.request_payment_card.service import build_payment_question, normalize_payment_payload
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    request = _sample_tool_call()
+    for item in request["line_items"]:
+        item.pop("rating")
+        item.pop("review_count")
+
+    parsed = validate_browser_tool_args("request_payment_card", request)
+    assert parsed["line_items"][0].get("rating") is None, parsed["line_items"][0]
+    assert parsed["line_items"][0].get("review_count") is None, parsed["line_items"][0]
+
+    payload = normalize_payment_payload(request, "user-123")
+    item = payload["lineItems"][0]
+    assert "rating" not in item and "reviewCount" not in item, item
+    assert item["productUrl"] == "https://example.com/products/desk-lamp"
+    question = build_payment_question(payload)
+    assert "Reviews:" not in question and "None" not in question, question
+    assert "Product: <https://example.com/products/desk-lamp>" in question, question
+
+    write_lock_item = WriteLockPurchaseItem.model_validate(
+        {"title": "Desk Lamp", "product_url": "https://example.com/products/desk-lamp"}
+    )
+    assert write_lock_item.rating is None and write_lock_item.review_count is None
+
+    line_item_schema = BROWSER_USE_TOOLS["request_payment_card"]["params"]["line_items"]["items"]
+    assert "rating" not in line_item_schema["required"], line_item_schema["required"]
+    assert "review_count" not in line_item_schema["required"], line_item_schema["required"]
+    for still_required in ("name", "unit_price_cents", "quantity", "line_total_cents"):
+        assert still_required in line_item_schema["required"], line_item_schema["required"]
+
+
+def test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected():
+    """Owner decision (2026-11-08): no 0-5 or fixed-scale limit on a given rating.
+
+    "9.2 out of 10" and "94%" are kept exactly as the page shows them. A review
+    count passed as the rating and placeholders are still rejected.
+    """
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import PaymentLineItem, WriteLockPurchaseItem
+
+    valid_item = _sample_tool_call()["line_items"][0]
+    for model in (PaymentLineItem, WriteLockPurchaseItem):
+        base = {**valid_item, "title": valid_item["name"]}
+        for shown in ("9.2 out of 10", "94%", "Rated 8.7 of 10"):
+            assert model.model_validate({**base, "rating": shown}).rating == shown, (model.__name__, shown)
+        assert model.model_validate({**base, "rating": "4.8 stars"}).rating == "4.8 stars"
+        for nonsense in ("312 reviews", "1,284 ratings", "N/A", "unknown"):
+            try:
+                parsed = model.model_validate({**base, "rating": nonsense})
+            except ValidationError:
+                continue
+            raise AssertionError(f"{model.__name__} accepted {nonsense!r} as rating {parsed.rating!r}")
+
+
+def test_rating_requires_a_score_expression_without_imposing_a_scale():
+    from pydantic import ValidationError
+    from browser_tools.schemas import PaymentLineItem, WriteLockPurchaseItem
+
+    valid_item = _sample_tool_call()["line_items"][0]
+    for model in (PaymentLineItem, WriteLockPurchaseItem):
+        base = {**valid_item, "title": valid_item["name"]}
+        for value in ("In stock: 12", "2026", "In stock: 4", "250 guests", "#1 of 25", "In stock 1 of 3 left"):
+            try:
+                model.model_validate({**base, "rating": value})
+            except ValidationError:
+                continue
+            raise AssertionError(f"{model.__name__} accepted non-score {value!r}")
+        for value in ("9.2 out of 10", "94%", "Score: 2026", "2026/3000", "3 of 10", "Rated 8.7 of 10", "4.8 stars out of 10", "4.8⭐/10", "8.7 score", "8.7 rating", "3.5 points out of 10", "Score: 3 on a scale of 10", "Score: 3", "3 stars (out of 10)"):
+            assert model.model_validate({**base, "rating": value}).rating == value
+        assert model.model_validate({**base, "rating": "Stock 4 · 4.8 stars"}).rating == "4.8 stars"
+        assert model.model_validate({**base, "rating": None}).rating is None
+
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+
+    for value in ("In stock: 12", "2026"):
+        request = _sample_tool_call()
+        request["line_items"][0]["rating"] = value
+        try:
+            validate_browser_tool_args("request_payment_card", request)
+        except BrowserToolArgsValidationError:
+            continue
+        raise AssertionError(f"provider boundary accepted non-score {value!r}")
+
+
+def test_card_request_without_product_url_is_accepted_and_given_urls_stay_checked():
+    """Owner decision (2026-11-08): product_url is optional.
+
+    An item without a page of its own (a hotel night, a fee, a service) is sent with
+    its image or nothing; the approval then shows no product link. When a URL is
+    given, the existing checks still apply: well-formed absolute http(s), and a host
+    the browser actually visited.
+    """
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import (
+        GenerateWriteLockNotificationTool,
+        PaymentLineItem,
+        WriteLockPurchaseItem,
+        validate_browser_tool_args,
+    )
+    from domains.request_payment_card.service import build_payment_question, normalize_payment_payload
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+    from utils.purchase_approval import validate_product_url_for_pages
+
+    request = _sample_tool_call()
+    for item in request["line_items"]:
+        item.pop("product_url")
+
+    parsed = validate_browser_tool_args("request_payment_card", request)
+    assert parsed["line_items"][0].get("product_url") is None, parsed["line_items"][0]
+    payload = normalize_payment_payload(request, "user-123")
+    item = payload["lineItems"][0]
+    assert "productUrl" not in item, item
+    assert item["imageUrl"] == "https://example.com/lamp.png"
+    question = build_payment_question(payload)
+    assert "Product:" not in question and "None" not in question, question
+
+    assert WriteLockPurchaseItem.model_validate({"title": "King room, 1 night"}).product_url is None
+    GenerateWriteLockNotificationTool.model_validate(
+        {
+            "tool": "generate_write_lock_notification",
+            "trigger_type": "purchase",
+            "action": "book room",
+            "service": {"name": "Hotel", "domain": "hotel.example", "url": "https://hotel.example/checkout"},
+            "purchase": {"items": [{"title": "King room, 1 night"}]},
+        }
+    )
+
+    line_item_schema = BROWSER_USE_TOOLS["request_payment_card"]["params"]["line_items"]["items"]
+    assert "product_url" not in line_item_schema["required"], line_item_schema["required"]
+    write_lock_item_schema = BROWSER_USE_TOOLS["generate_write_lock_notification"]["params"]["purchase"][
+        "properties"
+    ]["items"]["items"]
+    assert write_lock_item_schema["required"] == ["title"], write_lock_item_schema["required"]
+
+    # A given URL is still checked: malformed is rejected...
+    valid_item = _sample_tool_call()["line_items"][0]
+    for malformed in ("not a url", "/checkout/session/123", "ftp://example.com/p/1"):
+        try:
+            PaymentLineItem.model_validate({**valid_item, "product_url": malformed})
+        except ValidationError:
+            continue
+        raise AssertionError(f"PaymentLineItem accepted malformed product_url {malformed!r}")
+    # ...and so is a host the browser never visited.
+    try:
+        validate_product_url_for_pages("https://attacker.example/p/1", ["https://example.com/checkout"])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unvisited product_url host was accepted")
 
 
 def test_payment_tool_accepts_flexible_merchant_labels():
@@ -1112,6 +1392,23 @@ async def run_all_tests():
     result.record(
         "reviewless_bookings_pass_with_zero",
         test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it,
+    )
+    result.record(
+        "rating_keeps_merchant_scale",
+        test_rating_keeps_the_merchant_scale_shown_on_the_page,
+    )
+    result.record(
+        "card_request_without_rating_or_reviews",
+        test_card_request_without_rating_or_reviews_is_accepted,
+    )
+    result.record(
+        "rating_any_scale_kept_nonsense_rejected",
+        test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected,
+    )
+    result.record("rating_score_expression", test_rating_requires_a_score_expression_without_imposing_a_scale)
+    result.record(
+        "card_request_without_product_url",
+        test_card_request_without_product_url_is_accepted_and_given_urls_stay_checked,
     )
     result.record(
         "flexible_merchant_labels",
