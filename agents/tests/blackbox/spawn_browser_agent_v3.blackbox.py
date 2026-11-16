@@ -28668,7 +28668,7 @@ async def test_spawn_browser_activity_tilion_cost_row_bills_live_session_bytes_n
 
 
 @_in_browser_activity_context
-async def test_spawn_browser_activity_failure_completion_message_leads_with_goal():
+async def test_spawn_browser_activity_failure_completion_message_leads_with_goal(_phone_custody=False):
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
     session_data = {
@@ -28688,9 +28688,11 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
         release_paths.append(request.url.path)
         return httpx.Response(200, json={"lease": {"id": "error-lease", "status": "RELEASED"}})
     import httpx
-    setup_mock_fn(response)
+    if _phone_custody:
+        setup_mock_fn(response)
     async def init_with_custody(*args, **kwargs):
-        _retain_phone_lease("user-1", "task-1", {"id": "error-lease", "browserTaskId": "task-1", "status": "ACTIVE"})
+        if _phone_custody:
+            _retain_phone_lease("user-1", "task-1", {"id": "error-lease", "browserTaskId": "task-1", "status": "ACTIVE"})
         return session_data
     with (
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
@@ -28719,12 +28721,17 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
             raise AssertionError("expected missing cdp_url to raise")
 
     await drain_background_browser_cleanups()
-    assert release_paths.count("/api/iphone/leases/error-lease/release") == 1
+    if _phone_custody:
+        assert release_paths.count("/api/iphone/leases/error-lease/release") == 1
     completions = [c for c in _completion_messages(save_mock) if c["title"] == "Task Failed"]
     assert len(completions) == 1, _completion_messages(save_mock)
     assert completions[0]["message"].startswith(
         "**Goal**: Buy socks\n\n**Status**: \u274c FAILED\n\n**Outcome**: No CDP URL provided"
     ), completions[0]["message"]
+
+
+async def test_terminal_phone_custody_on_activity_error():
+    await test_spawn_browser_activity_failure_completion_message_leads_with_goal(_phone_custody=True)
 
 
 @_in_browser_activity_context
@@ -39053,6 +39060,7 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    await r.record_async("terminal_phone_custody_on_activity_error", test_terminal_phone_custody_on_activity_error)
     await r.record_async("phone_cleanup_response_contract", test_phone_cleanup_response_contract_and_no_pending_retry)
     await r.record_async("actual_phone_success_auth", test_actual_phone_custody_success_and_auth_pause)
     await r.record_async("actual_cap_phone_cleanup_receipts", test_actual_cap_reports_pending_and_unknown_phone_cleanup_to_parent)

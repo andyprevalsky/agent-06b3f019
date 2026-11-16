@@ -21,7 +21,7 @@ sources:
   - memory: browser task 91a0ff73-a8e8-5c2f-8444-04f2262a0725
   - commit 16e079f926f8e69c716c20070561d3ed23344d5e
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_terminal_browser_cleanup_releases_only_recorded_phone_custody
-status: open
+status: mitigated
 ---
 
 ## Problem
@@ -65,7 +65,7 @@ not set paused_session_id. Explicit resumable and sealed paths remain excluded.
 
 ## Solution
 
-Candidate only; parent owns review and deployment. Existing BrowserCleanupOwners
+Locally verified repair in PR #2349; parent owns deployment. Existing BrowserCleanupOwners
 retains exact backend-returned lease IDs for this user/task, including an acquire
 whose following command fails. Existing encrypted resume continuity carries
 these IDs and restores only matching user/task bindings. Confirmed explicit
@@ -91,9 +91,14 @@ Owning focused command (from agents with venv active):
 `BLACKBOX_CASE_FUNCTIONS=test_terminal_browser_cleanup_releases_only_recorded_phone_custody python scripts/run_blackbox_tests.py spawn-browser-agent-v3`.
 Original source: exit 1. Candidate: exit 0. Additional negative controls and
 actual-cap checks run in the same normal suite. Test-map lane:
-`agents-blackbox spawn-browser-agent-v3`. Integrated commit 093f1bb88b5f passed all eleven focused controls five times
-(11.0, 11.2, 9.9, 9.3, 10.8 seconds). The full owning suite and independent
-review are pending; no production outcome is claimed.
+`agents-blackbox spawn-browser-agent-v3`. Integrated runtime from commit 093f1bb88b5f with the final isolated test fixture
+passed fifteen focused functions five times (33.2, 32.3, 35.1, 34.8, 34.3 seconds)
+and the complete owning suite in 305.7 seconds. An earlier full run exposed
+introduced test pollution: an inner phone mock replaced the outer cleanup
+failure transport in a reused fixture. The identical four-case command failed
+in 10.0 seconds, then passed in 22.2 seconds after making phone custody opt-in;
+all original assertions remain. Independent runtime/code review is clean and
+the parent obtained golden-reference approval. No production outcome is claimed.
 
 Golden analogs inspected: OpenClaw
 `src/agents/session-placement-forced-terminal-settlement.ts:4` carries an exact
