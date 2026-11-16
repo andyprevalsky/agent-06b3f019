@@ -323,6 +323,10 @@ export async function newerReleaseControllerCases(ctx: Ctx) {
     );
     const cli = path.resolve(__dirname, '../../../scripts/worker-deployment-queue.ts');
     const env = { ...process.env, WORKER_DEPLOYMENT_ANCESTRY_REPOSITORY: repo.folder };
+    const checkout = (sha: string) =>
+      execFileSync('git', ['-C', repo.folder, 'checkout', '-q', sha]);
+    // The older release's own CI checkout: controller c1.
+    checkout(repo.c1);
     const marker = (name: string) => path.join(folder, name);
     // Each controller's child records which release's controller ran which job.
     const child = (release: string) => [
@@ -330,6 +334,16 @@ export async function newerReleaseControllerCases(ctx: Ctx) {
       '-e',
       `require('node:fs').appendFileSync(${JSON.stringify(marker('ran'))}, ${JSON.stringify(release)}+':'+process.env.WORKER_DEPLOYMENT_JOB_ID+'\\n')`,
     ];
+    // --if-idle runs return at once on a busy lease (the older run holds it briefly
+    // every 5 s), so each is retried until it reaches its decision.
+    const idleRun = (jobId: string, release: string) =>
+      execTypeScript([cli, 'run', '--job-id', jobId, '--if-idle', '--', ...child(release)], {
+        timeout: 30000,
+        env,
+      }).then(
+        (done) => done.stdout,
+        (error: { stdout?: string }) => error.stdout ?? ''
+      );
     // The older release's run, in its real (non-idle) mode, starts first.
     const olderRun = spawnTypeScript(
       [cli, 'run', '--job-id', older.jobId, '--', ...child('older')],
@@ -367,16 +381,6 @@ export async function newerReleaseControllerCases(ctx: Ctx) {
       );
       assert.equal((await api.readWorkerDeployment(older.jobId)).stage, 'SUPERSEDED');
       assert.equal(existsSync(marker('ran')), false, 'older controller never spawned a child');
-      // --if-idle runs return at once on a busy lease (the older run holds it briefly
-      // every 5 s), so each is retried until it reaches its decision.
-      const idleRun = (jobId: string, release: string) =>
-        execTypeScript([cli, 'run', '--job-id', jobId, '--if-idle', '--', ...child(release)], {
-          timeout: 30000,
-          env,
-        }).then(
-          (done) => done.stdout,
-          (error: { stdout?: string }) => error.stdout ?? ''
-        );
       // The scheduled recovery path (--if-idle) defers the same way.
       const idle = await retryWithBackoff(() => idleRun(older.jobId, 'older-idle'), {
         maxRetries: 20,
@@ -386,18 +390,22 @@ export async function newerReleaseControllerCases(ctx: Ctx) {
       });
       assert.match(idle, /NEWER_RELEASE_CONTROLLER/);
       assert.equal(existsSync(marker('ran')), false, 'idle older controller never spawned a child');
-      // The newer release's own run executes its job with its own controller.
-      await retryWithBackoff(() => idleRun(newer.jobId, 'newer'), {
-        maxRetries: 20,
-        fixedDelays: Array(20).fill(100),
-        shouldRetryResult: () => !existsSync(marker('ran')),
-        component: 'NewerControllerFixture',
-      });
-      assert.equal((await readFile(marker('ran'), 'utf8')).trim(), `newer:${newer.jobId}`);
     } finally {
       olderRun.kill('SIGTERM');
+      const killer = setTimeout(() => olderRun.kill('SIGKILL'), 20000);
       await ended;
+      clearTimeout(killer);
     }
+    // A resume of the same older job from a checkout that contains the newer release
+    // (deploy.md's manual resume from main) runs the head instead of deferring.
+    checkout(repo.c3);
+    await retryWithBackoff(() => idleRun(older.jobId, 'main'), {
+      maxRetries: 20,
+      fixedDelays: Array(20).fill(100),
+      shouldRetryResult: () => !existsSync(marker('ran')),
+      component: 'NewerControllerFixture',
+    });
+    assert.equal((await readFile(marker('ran'), 'utf8')).trim(), `main:${newer.jobId}`);
     assert.equal(
       (await readFile(marker('ran'), 'utf8')).includes('older'),
       false,
