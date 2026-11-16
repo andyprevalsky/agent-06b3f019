@@ -27,10 +27,12 @@ sources:
   - commit b7ea782519edf3234e93d187a657d06cd98233fe
   - PR #2221
   - commit 55655e654472c4ae54edcb4540ae16a808e142b6
+  - PR #2331
+  - commit 6f956dd35cc6fea5e75552f60e7a1a89e8cef4e8
   - PR #2110
   - PR #1951
 repro: front-end/tests-e2e/entry-load-recovery.spec.ts, front-end/tests-e2e/sidebar-agent-tree.spec.ts, front-end/tests-e2e/app-reload-helper.spec.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -250,6 +252,17 @@ live alias directly can still meet an undeployed build.
 - Production promoted about twice a minute during this repair.
 
 10k-agent behavior: test-only; no runtime path changes.
+
+Shipped in PR #2331 (merge 6f956dd35cc6, 2026-11-16).
+- Deploy gates: three rounds, all 11 selected gates PASS on the final source
+  e1f52784b9. Rounds 1–2 hit two main-red `deploy-command-structural`
+  failures, attributed NOT_INTRODUCED with evidence and fixed on main by #2324
+  and #2342. Each was integrated by a sync and re-executed, never waived.
+- The original failing command, `scripts/deploy production --sha <merge>`
+  (lanes vercel + semantic), passed. Production semantic run 43830479795
+  bound exactly to the merge SHA. "Semantic frontend flows": 69 passed, 6
+  skipped, 0 failed, including `:156` "an entry 404 cached as immutable…",
+  sidebar "…at 320px" and all three regressions.
 
 ## Human feedback
 
