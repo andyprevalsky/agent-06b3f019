@@ -2928,14 +2928,26 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     #     only on the live pointer's own job, SUCCEEDED, same app and a descendant of
     #     the merge, with its monitor --verify; anything else stays blocked.
     live_id = "e" * 64
+
+    def write_monitor(target_id: str, updated_by: str) -> None:
+        # What monitor-cooperative-cutover.ts --json really prints on stdout+stderr:
+        # Prisma INFO log lines, then JSON.stringify(report, null, 2) (multi-line).
+        (fake / f"monitor-{target_id}.json").write_text(
+            "\x1b[36m[2026-11-16T09:02:16.291Z] INFO [Prisma] db.query model=ToolSideEffect operation=findUnique\x1b[0m\n"
+            + json.dumps({"phase": "managed_deployment_pending", "deploymentJobId": target_id,
+                          "pointerMatchesExpected": False,
+                          "livePointer": {"surfaceHash": "beef", "updatedBy": updated_by},
+                          "messages": ["A managed predecessor requires its durable qualified retirement certificate."]},
+                         indent=2) + "\n"
+            # A later structured log line must not displace the report.
+            + '{"level": "info", "msg": "monitor done"}\n')
+
     newest = subprocess.run([*git, "commit-tree", tree, "-p", later, "-m", "newest main merge"], check=True,
                             stdout=subprocess.PIPE, text=True).stdout.strip()
 
     def write_replaced(live_stage: str, live_source: str) -> None:
         write_superseded("SUCCEEDED", later)
-        (fake / f"monitor-{descendant_id}.json").write_text(json.dumps({
-            "phase": "managed_deployment_pending", "pointerMatchesExpected": False,
-            "livePointer": {"surfaceHash": "beef", "updatedBy": live_id}}) + "\n")
+        write_monitor(descendant_id, live_id)
         (fake / f"job-{live_id}.json").write_text(json.dumps({
             "jobId": live_id, "stage": live_stage,
             "identity": {"app": "app", "sourceCommit": live_source, "attempt": "140-1", "surfaceHash": "beef"}}))
@@ -2962,6 +2974,26 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         assert ran.returncode == 1 and expected in ran.stdout, (expected, ran.stdout)
         assert "dispatch" not in call_lines(), call_lines()
         assert f"--job-id {live_id} --verify" not in (fake / "node-calls.log").read_text(), "no live verify before proof"
+    # 7c. The merge's own job SUCCEEDED (never superseded) and a later cutover then
+    #     moved the pointer (production 11-16, #2328: d345a37c at 765eb3abe5 overtaken
+    #     by live dc4b75d6 at 20f67b1ca9). The live successor verifies it.
+    succeeded_env = {**prod_env, "FAKE_MONITOR_FAIL_JOB": job_id}
+    reset([running], [done], log)
+    (fake / "job.json").write_text(json.dumps({"jobId": job_id, "stage": "SUCCEEDED", "identity": {
+        "app": "app", "sourceCommit": runtime, "attempt": "123-1"}}))
+    write_monitor(job_id, live_id)
+    (fake / f"job-{live_id}.json").write_text(json.dumps({
+        "jobId": live_id, "stage": "SUCCEEDED",
+        "identity": {"app": "app", "sourceCommit": newest, "attempt": "140-1", "surfaceHash": "beef"}}))
+    ran = run_production(runtime, tmp / "production-state-7c", env=succeeded_env)
+    assert ran.returncode == 0, ran.stdout
+    assert call_lines()[-1] == "dispatch", call_lines()
+    verified = json.loads((tmp / "production-state-7c" / "production.json").read_text())["cutover_verify"]
+    assert verified["verified_by"] == "live-successor-cutover" and verified["live_job_id"] == live_id, verified
+    assert verified["replaced_job_id"] == job_id and verified["job_stage"] == "SUCCEEDED", verified
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert node_calls[-2].endswith(f"read --job-id {live_id}"), node_calls
+    assert node_calls[-1].endswith(f"monitor-cooperative-cutover.ts --job-id {live_id} --verify"), node_calls
     assert subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
                           text=True).stdout.strip() == head, "the descendant fixture must not move HEAD"
     # 8. The queue refused an older/diverged release instead of rolling the live one
