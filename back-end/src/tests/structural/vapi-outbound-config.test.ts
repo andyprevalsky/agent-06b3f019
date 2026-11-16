@@ -56,8 +56,8 @@ test('buildCallAssistantConfig preserves dtmf tool on outbound calls', () => {
     assistant.model as { messages?: { role?: string; content?: string }[] }
   ).messages?.find((message) => message.role === 'system')?.content;
   assert.match(String(systemMessage), /Collect the contact name\./);
-  assert.equal(assistant.firstMessage, 'Hello, how are you today?');
-  assert.equal(assistant.firstMessageMode, undefined);
+  assert.equal(assistant.firstMessage, undefined);
+  assert.equal(assistant.firstMessageMode, 'assistant-speaks-first-with-model-generated-message');
 });
 
 test('buildCallAssistantConfig waits for IVR callee to speak first', () => {

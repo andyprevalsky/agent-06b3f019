@@ -55,21 +55,25 @@ export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   model: {
     provider: 'openai',
     model: OUTBOUND_ASSISTANT_MODEL,
-    tools: [{ type: 'endCall' }, { type: 'dtmf' }],
+    // The model says goodbye using the call brief. Suppress Vapi's additional
+    // default goodbye (which otherwise has its own language selection).
+    tools: [
+      { type: 'endCall', messages: [{ type: 'request-start', content: '' }] },
+      { type: 'dtmf' },
+    ],
   },
   voice: {
     provider: '11labs',
     voiceId: DEFAULT_OUTBOUND_VOICE_ID,
+    model: 'eleven_turbo_v2_5',
   },
   transcriber: {
     provider: 'deepgram',
-    model: 'flux-general-en',
-    language: 'en',
-    eotThreshold: 0.7,
-    eotTimeoutMs: 5000,
+    model: 'nova-3',
+    language: 'multi',
   },
-  firstMessage: 'Hello, how are you today?',
-  endCallMessage: 'Thank you for your time. Goodbye.',
+  // Generate the opening from the same per-call instructions as later turns.
+  firstMessageMode: 'assistant-speaks-first-with-model-generated-message',
   silenceTimeoutSeconds: 30,
   maxDurationSeconds: 600,
   analysisPlan: {
