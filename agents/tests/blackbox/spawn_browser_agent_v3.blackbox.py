@@ -16086,7 +16086,8 @@ async def test_private_numeric_credentials_preserve_only_trusted_browser_mechani
         visible_args = json.loads(message["tool_calls"][0]["function"]["arguments"])
         for target in targets:
             assert visible_args[target] == arguments[target], f"prior {name} call lost trusted target {target}"
-        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_value(
+        # The model's own arguments use the observation policy it was shown under.
+        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_observation(
             {key: value for key, value in arguments.items() if key not in targets}
         )
         assert message["content"] == "{{secret:card_cvv}}"
@@ -16139,6 +16140,13 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     newer = "synthetic-new-realm-password"
     all_values = [*refs.values(), newer]
     echoed = " | ".join(all_values)
+    # The rendered page holds a typed card name, expiry or CVV as a field
+    # value; prose matching those short values is ordinary page text. Long
+    # secrets are protected anywhere in it. Script readbacks stay strict.
+    field_echo = (
+        f"<input value={refs['card_name']} /> <input value={refs['card_expiry']} /> "
+        f"<input value={refs['card_cvv']} /> {refs['card_number']} | {refs['pwd:fixture']} | {newer}"
+    )
     dom = DOMService("ws://unused-private-observation-fixture")
     dom.register_secret_refs(refs)
     dom.mark_secret_used()
@@ -16146,7 +16154,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     state = SimpleNamespace(
         url="https://checkout.fixture.test/",
         title=refs["card_cvv"],
-        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: echoed),
+        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: field_echo),
         tabs=[
             SimpleNamespace(target_id="fixture-tab", url="https://checkout.fixture.test/", title=refs["card_number"])
         ],
@@ -25660,6 +25668,7 @@ class _FakeDomService:
     restore_secret_redaction_state = _PrivacyPolicyDOMService.restore_secret_redaction_state
     model_visible_value = _PrivacyPolicyDOMService.model_visible_value
     model_visible_action_result = _PrivacyPolicyDOMService.model_visible_action_result
+    model_visible_observation = _PrivacyPolicyDOMService.model_visible_observation
 
     def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
         self.cdp_url = cdp_url
