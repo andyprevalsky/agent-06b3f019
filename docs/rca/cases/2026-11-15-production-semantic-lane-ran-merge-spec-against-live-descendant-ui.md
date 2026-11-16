@@ -26,6 +26,11 @@ sources:
   - PR #2097
   - commit 7bc451659c
   - fleet run 43681354141
+  - PR #2206
+  - commit 96c6c1ad04d5c7b4a3b9b23f6ae23425caade656
+  - PR #2230
+  - fleet run 43690277150
+  - fleet run 43690260324
 repro: scripts/tests/run-deploy-pipeline.test.py check_production_semantic case 16 (red before the fix, green after); end to end, /var/tmp/semskew/bin/repro.sh runs the real production-semantic code for 5156d47533 against the real live /version.json and then that source's teams-flow spec against https://www.roselabs.ai (Playwright exit 1 before, 0 after)
 status: fixed
 ---
@@ -87,6 +92,20 @@ spec, assertion, timeout or concurrency changed.
 Siblings prevented: every semantic spec (UI flows and the chat lifecycle ratchet) that a live descendant intentionally
 changed. Not covered, and owned elsewhere: a build promoted while the run is already executing (the related threads
 for that class).
+
+Shipped in PR #2206 (merged 96c6c1ad04, 2026-11-15). Production proof:
+
+- **The original failing command.** `scripts/deploy production --sha 5156d47533 --lanes semantic` was rerun against the
+  originating deploy's restored state dir (PR #2133 closeout private archive). It printed `DEPLOY_PRODUCTION PASS
+  lanes=fly:PASS,workflow-migration:PASS,semantic:PASS-verified-by-descendant`. Run 43690277150 bound live descendant
+  31641a670910, and in it `teams-flow.spec.ts:21:3 ... at 1280px (API fixture)` passed, 60 of 60.
+- **#2206's own merge.** It first bound `source-equivalent`, because its build was not yet promoted. That dispatch hit a
+  REST quota 403. Rerun after the reset, run 43690260324 passed as PASS-verified-by-descendant.
+
+Those two verifications ran concurrently and both bound the same live commit, so their run titles were identical. The
+watcher adopts the newest matching title after its own dispatch, so a slower poll would have adopted the other
+dispatch's run. PR #2230 closes this: every dispatch sends a `dispatch_id` that the workflow's run-name echoes, and the
+watcher requires it (merged c77b537709, 2026-11-16).
 
 ## Human feedback
 

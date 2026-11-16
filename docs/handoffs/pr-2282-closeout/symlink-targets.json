@@ -1,0 +1,20 @@
+[
+  {
+    "path": "/home/boxes/rose/.context/deploy-cloud/c819e83e58136f2e90bea17c0cafea270e4ed8e8293ce7fdac7d6e087e937b38/campaigns/deploy-c819e83e58136f2e90bea17c0cafea270e4ed8e8293ce7fdac7d6e087e937b38/shared-inventory/inventory/.generation-vfzit3yb",
+    "link": "/home/boxes/rose/.context/deploy-cloud/c819e83e58136f2e90bea17c0cafea270e4ed8e8293ce7fdac7d6e087e937b38/campaigns/deploy-c819e83e58136f2e90bea17c0cafea270e4ed8e8293ce7fdac7d6e087e937b38/shared-inventory/inventory/current",
+    "target": ".generation-vfzit3yb",
+    "target_inside_context": true
+  },
+  {
+    "path": "/home/boxes/rose/.context/deploy-cloud/4d74573ee7e81ba67777c3e7b0dff577f637398c5393ca2ecdd75d1db8d642bc/campaigns/deploy-4d74573ee7e81ba67777c3e7b0dff577f637398c5393ca2ecdd75d1db8d642bc/shared-inventory/inventory/.generation-85m2k5no",
+    "link": "/home/boxes/rose/.context/deploy-cloud/4d74573ee7e81ba67777c3e7b0dff577f637398c5393ca2ecdd75d1db8d642bc/campaigns/deploy-4d74573ee7e81ba67777c3e7b0dff577f637398c5393ca2ecdd75d1db8d642bc/shared-inventory/inventory/current",
+    "target": ".generation-85m2k5no",
+    "target_inside_context": true
+  },
+  {
+    "path": "/home/boxes/rose/.context/deploy-cloud/0d9f4586afddeb071dc498e7409f675b5a08784194fbef6f1f4dc38ca7bc7325/campaigns/deploy-0d9f4586afddeb071dc498e7409f675b5a08784194fbef6f1f4dc38ca7bc7325/shared-inventory/inventory/.generation-u5qq4qqd",
+    "link": "/home/boxes/rose/.context/deploy-cloud/0d9f4586afddeb071dc498e7409f675b5a08784194fbef6f1f4dc38ca7bc7325/campaigns/deploy-0d9f4586afddeb071dc498e7409f675b5a08784194fbef6f1f4dc38ca7bc7325/shared-inventory/inventory/current",
+    "target": ".generation-u5qq4qqd",
+    "target_inside_context": true
+  }
+]
