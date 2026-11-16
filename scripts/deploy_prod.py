@@ -40,6 +40,7 @@ import uuid
 
 from run_deploy_pipeline import _dotenv_values  # scripts/ is sys.path[0]: one env-file parser
 from run_deploy_pipeline import gh_token_pool_argv  # one GitHub token pool pick for read-only gh calls
+from run_deploy_pipeline import deploy_agents_push_matches  # deploy-agents.yml's own push filter
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable or 'python3'
@@ -188,23 +189,29 @@ def _list(paths: list[str], limit: int = 3) -> str:
 
 
 def plan_lanes(changed: list[str], runtime_files: list[str], mac: dict | None, pr: int | None = None,
-               mac_error: str | None = None) -> dict[str, Lane]:
-    """deploy.md Step 13 lane rules for the merge commit's changed files."""
+               mac_error: str | None = None, push_files: list[str] = ()) -> dict[str, Lane]:
+    """deploy.md Step 13 lane rules for the merge commit's changed files.
+
+    ``push_files`` are the changed paths deploy-agents.yml's own push filter
+    matches: they start a cutover even when they ship nothing in the worker
+    image (the cutover controller scripts)."""
     backend = [p for p in changed if BACKEND_RE.match(p)]
     frontend = [p for p in changed if p.startswith('front-end/')]
     workflow = AGENTS_WORKFLOW_PATH in changed
     agentcard = [p for p in changed if not p.startswith(LEDGER_PREFIX) and AGENTCARD_RE.match(p)]
     wmh = [p for p in changed if any(fragment in p for fragment in WMH_PATHS)]
     wmh_build = [p for p in changed if any(fragment in p for fragment in WMH_BUILD_INPUTS)]
+    controller = [p for p in push_files if p not in runtime_files and p != AGENTS_WORKFLOW_PATH]
     fly_reason = '; '.join(filter(None, ['agent runtime files: ' + _list(runtime_files) if runtime_files else '',
-                                         f'{AGENTS_WORKFLOW_PATH} changed' if workflow else '']))
+                                         f'{AGENTS_WORKFLOW_PATH} changed' if workflow else '',
+                                         'deploy-agents.yml push paths: ' + _list(controller) if controller else '']))
     pr_name = f'PR #{pr}' if pr else 'the merged PR'
     lanes = {
         'render': Lane('render', bool(backend), 'back-end changed: ' + _list(backend) if backend
                        else 'no back-end/ or scripts/run-bench-hub-poller change'),
         'backend-probes': Lane('backend-probes', bool(backend), 'back-end changed (Step 13a probes + log scan)'
                                if backend else 'no back-end change'),
-        'fly': Lane('fly', bool(fly_reason), fly_reason or 'no agent runtime or deploy-agents.yml change'),
+        'fly': Lane('fly', bool(fly_reason), fly_reason or 'no agent runtime or deploy-agents.yml push-path change'),
         'workflow-migration': Lane('workflow-migration', bool(fly_reason), 'agent cutover required (Step 13ac)'
                                    if fly_reason else 'no agent cutover'),
         'vercel': Lane('vercel', bool(frontend), 'front-end/ changed: ' + _list(frontend) if frontend
@@ -1266,10 +1273,18 @@ def main(argv: list[str] | None = None, *, io: IO | None = None, root: Path = RO
         out(f'DEPLOY_PRODUCTION FAIL {CLASSIFY} failed: {err.strip()}')
         return 2
     runtime = [line for line in classified.splitlines() if line]
+    code, workflow_text, err = io.capture(['git', 'show', f'{sha}:{AGENTS_WORKFLOW_PATH}'], root, environ)
+    try:
+        if code != 0:
+            raise ValueError(err.strip())
+        push_files = deploy_agents_push_matches(changed, workflow_text)
+    except (ValueError, ImportError) as error:
+        out(f'DEPLOY_PRODUCTION FAIL cannot read {AGENTS_WORKFLOW_PATH} push paths at {sha[:12]}: {error}')
+        return 2
     pr = merged.get('pr') if merged.get('merged_sha') == sha else None
     labels, label_error = pr_labels(ctx, merged, pr)
     mac, mac_error = mac_release_decision(io.capture, root, environ, changed, labels, label_error)
-    ctx.plan = plan_lanes(changed, runtime, mac, pr=pr, mac_error=mac_error)
+    ctx.plan = plan_lanes(changed, runtime, mac, pr=pr, mac_error=mac_error, push_files=push_files)
     if args.skip_agentcard is not None and ctx.plan['agentcard'].applicable:
         ctx.plan['agentcard'].elected = args.skip_agentcard
     selected = set(args.lanes or LANES)

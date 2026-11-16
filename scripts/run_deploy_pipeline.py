@@ -3658,9 +3658,43 @@ def merged_changes(merged_sha: str, root: Path | None = None) -> list[str]:
     return [line for line in output.splitlines() if line]
 
 
-def agent_cutover_required(changed: list[str], root: Path | None = None) -> dict:
+def _github_path_glob(pattern: str) -> re.Pattern[str]:
+    """GitHub Actions ``paths`` glob: ``**`` spans directories, ``*`` and ``?`` stay within one."""
+    if re.search(r"[\[\]{}+]", pattern):
+        raise ValueError(f"unsupported {AGENTS_WORKFLOW_PATH} push path pattern: {pattern!r}")
+    regex = re.escape(pattern).replace(r"\*\*/", "(?:.*/)?").replace(r"\*\*", ".*")
+    return re.compile("^" + regex.replace(r"\*", "[^/]*").replace(r"\?", "[^/]") + "$")
+
+
+def deploy_agents_push_matches(changed: list[str], workflow_text: str) -> list[str]:
+    """Changed paths that start a deploy-agents.yml run, and so a cutover, under its own
+    ``on.push.paths`` filter (ordered; a later ``!`` pattern excludes, a later pattern re-includes)."""
+    import yaml
+
+    try:
+        config = yaml.safe_load(workflow_text)
+    except yaml.YAMLError as error:
+        raise ValueError(f"could not parse {AGENTS_WORKFLOW_PATH}: {error}") from error
+    trigger = config.get("on", config.get(True)) if isinstance(config, dict) else None  # YAML 1.1: on -> True
+    paths = trigger.get("push", {}).get("paths") if isinstance(trigger, dict) else None
+    if not isinstance(paths, list) or not paths or not all(isinstance(item, str) for item in paths):
+        raise ValueError(f"{AGENTS_WORKFLOW_PATH} has no on.push.paths list")
+    rules = [(not item.startswith("!"), _github_path_glob(item.removeprefix("!"))) for item in paths]
+    matched = []
+    for path in changed:
+        included = False
+        for include, pattern in rules:
+            if pattern.match(path):
+                included = include
+        if included:
+            matched.append(path)
+    return matched
+
+
+def agent_cutover_required(changed: list[str], root: Path | None = None, merged_sha: str | None = None) -> dict:
     """deploy.md Step 13's rule: runtime files selected by
-    ``scripts/classify-agent-runtime-changes.sh`` or the workflow file itself
+    ``scripts/classify-agent-runtime-changes.sh``, the workflow file itself, or
+    any path in the workflow's own push filter (the cutover controller scripts)
     require the exact deploy-agents.yml run; tests, benchmarks, docs and
     coverage harnesses under agents/ never do."""
     root = SOURCE_ROOT if root is None else root
@@ -3670,7 +3704,14 @@ def agent_cutover_required(changed: list[str], root: Path | None = None) -> dict
     ).stdout
     runtime = [line for line in classified.splitlines() if line]
     workflow = AGENTS_WORKFLOW_PATH in changed
-    return {"required": bool(runtime or workflow), "runtime_files": runtime, "workflow_changed": workflow}
+    # The filter that governed the merge's push is the one committed in it.
+    workflow_text = subprocess.run(
+        ["git", "show", f"{merged_sha}:{AGENTS_WORKFLOW_PATH}"], cwd=root, check=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
+    ).stdout if merged_sha else (root / AGENTS_WORKFLOW_PATH).read_text(encoding="utf-8")
+    triggers = [path for path in deploy_agents_push_matches(changed, workflow_text) if path not in runtime]
+    return {"required": bool(runtime or workflow or triggers), "runtime_files": runtime,
+            "workflow_changed": workflow, "trigger_files": triggers}
 
 
 def _gh_executable() -> str:
@@ -4074,7 +4115,7 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
 
     try:
         changed = merged_changes(merged_sha, root)
-        cutover = agent_cutover_required(changed, root)
+        cutover = agent_cutover_required(changed, root, merged_sha)
         receipt["changed_files"] = len(changed)
         receipt["agent_cutover"] = cutover
         if cutover["required"]:
@@ -4102,7 +4143,8 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
                   f"hash={expected}" + (f" verified_by=descendant-cutover descendant={carried}" if carried else ""),
                   flush=True)
         else:
-            receipt["fly"] = {"required": False, "reason": "no agent runtime or deploy-agents.yml change in the merge"}
+            receipt["fly"] = {"required": False,
+                              "reason": "no agent runtime or deploy-agents.yml push-path change in the merge"}
             print(f"PIPELINE_PRODUCTION fly=not-required head={merged_sha} ({len(changed)} changed files, "
                   "no agent runtime change): no deploy-agents.yml wait", flush=True)
     except ProductionGateError as error:
