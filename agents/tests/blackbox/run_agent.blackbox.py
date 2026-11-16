@@ -1041,15 +1041,30 @@ async def test_no_tool_calls_nudges_then_errors_after_3_consecutive():
     tool_calls = []
     detected_tools = []
 
+    seen_notice_counts = []
+    def build_messages(context, prompt):
+        seen_notice_counts.append(sum(m.get("role") == "SYSTEM" for m in context))
+        return [{"role": "system", "content": prompt}]
+
     result, posted, _ = await _run_single_iteration(
         tool_calls,
         detected_tools,
         skip_verification=True,
         max_iterations=5,
+        build_messages_override=build_messages,
     )
 
+    assert seen_notice_counts == [0, 1, 2], "Controls must appear only after each empty response"
     assert result["status"] == "error"
     assert "no tool calls" in result["message"].lower()
+    notices = [m for m in result["context"] if m.get("role") == "SYSTEM"]
+    assert len(notices) == 2
+    assert all(m.get("metadata", {}).get("internal_instruction") is True for m in notices)
+    assert all(m["text"] == (
+        "You MUST call tools to make progress. Available tools: web_search, web_fetch, attempt_completion, set_plan. "
+        "Call one of the listed tools — do not respond with text only."
+    ) for m in notices)
+
 
 
 async def test_no_tool_turn_with_background_agents_gets_normal_no_tool_handling():
@@ -4110,16 +4125,42 @@ async def test_winddown_injects_one_message_near_cap():
     tool_calls = [{"tool": "web_search", "query": "x"}]  # never completes -> loops to cap
     detected_tools = [("web_search", "tc-1", 1.0)]
 
+    seen_winddown_counts = []
+    def build_messages(context, prompt):
+        seen_winddown_counts.append(_count_winddown_msgs(context))
+        return [{"role": "system", "content": prompt}]
+
     result, _, _ = await _run_single_iteration(
         tool_calls,
         detected_tools,
         skip_verification=True,  # explore-like
         max_iterations=3,
         winddown_window=1,
+        build_messages_override=build_messages,
     )
 
+    assert seen_winddown_counts == [0, 1, 1], "Winddown timing must stay at max_iterations - window"
     assert result["status"] == "max_iterations"
     assert _count_winddown_msgs(result["context"]) == 1, "wind-down must inject exactly once"
+
+    winddown = next(m for m in result["context"] if "final turn" in m.get("text", ""))
+    assert winddown.get("metadata", {}).get("internal_instruction") is True
+    assert winddown["text"] == (
+        "You are on your final turn. Do not search further — synthesize the "
+        "grounded evidence you already have and call attempt_completion_with_result "
+        "now with your best answer, explicitly noting any gaps you could not fill."
+    )
+    notices = [m for m in result["context"] if m.get("role") == "SYSTEM" and "same tool(s)" in m.get("text", "")]
+    assert len(notices) == 1, "Repetition control starts after exactly three identical turns"
+    assert notices[0].get("metadata", {}).get("internal_instruction") is True
+    assert notices[0]["text"] == (
+        "WARNING: You have called the same tool(s) with identical arguments "
+        "3 times in a row without making progress. "
+        "The previous approach is not working. You MUST try a fundamentally different strategy: "
+        "use different arguments, a different tool, or decompose the problem differently. "
+        "Do not repeat the same call again."
+    )
+    assert result["context"].index(winddown) < result["context"].index(notices[0])
     assert "best_effort_response" in result
     assert "final_response" in result
 

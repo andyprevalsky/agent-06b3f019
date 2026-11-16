@@ -61,7 +61,7 @@ flowchart LR
   B -->|bug: role user| C[Responses input]
   C --> D[Foundry content_filter]
   B -->|fix: preserve role system| E[Responses instructions]
-  E --> F[Same model returns completion tool call]
+  E --> F[Same model accepts request]
 ```
 
 What: valid explore work dies at its final synthesis turn. Where:
@@ -83,9 +83,11 @@ reproducing requests rather than claimed as historical wire evidence.
 
 Changing only the final message role, keeping every text byte including its
 timestamp and `[SYSTEM]:` prefix, succeeds 3/3 on the same model and region.
-The corrected source builder also produces those exact texts and passes all
-three complete-conversation live replays, requests `71fcf59d1a59`,
-`fdaf3ac748df`, and `1307ac466583`. Model, tool schemas, task, provider filters,
+The initial corrected builder produces those exact texts and avoids refusal
+in all three complete-conversation live replays, requests `71fcf59d1a59`,
+`fdaf3ac748df`, and `1307ac466583`. Two returned synthesis completion; the
+third requested more grep calls. These prove provider acceptance, not complete
+end-to-end child recovery. Model, tool schemas, task, provider filters,
 budgets and generation settings are unchanged. A healthy greeting on the same
 route succeeds, and removing tools from the original request still refuses.
 
@@ -94,21 +96,25 @@ its relevant Python files match the local `562cc8c490` baseline. Production
 logs identify Foundry/model; region is established by the local wire capture.
 
 The why ladder stops at role projection, not provider policy or model choice.
-The existing alternate `convert_context_to_messages` already preserves SYSTEM
-authority. Internal message ingress permits SYSTEM only for internal callers;
-external callers become USER. Known SYSTEM producers are internal control
-notices and reference-blueprint wrappers. No role is inferred from text.
+The existing alternate `convert_context_to_messages` preserves SYSTEM
+authority, but this is not sufficient provenance for every historical SYSTEM
+row: an unreachable blueprint-injection path wraps user/model/tool reference
+material in SYSTEM. External ingress permits SYSTEM only for internal callers;
+ordinary callers become USER. The final repair narrows authority to explicitly
+identified loop-control instructions and leaves generic historical/reference
+SYSTEM material at its existing projection. No role is inferred from text.
 The more general proposal to promote any text labeled `[SYSTEM]` is incoherent
 and unsafe: arbitrary user/tool content can contain that label. Preserve the
 declared role instead. No prompt edit is needed.
 
 ## Solution
 
-The message builder retains the declared SYSTEM role and every existing
-content byte. User and tool text remain at their original authority, including
-literal `[SYSTEM]` strings. This corrects all same-class SYSTEM projections,
-including internal wind-down, repetition and no-tool notices, rather than
-special-casing one final-turn string. No fallback, prompt rewrite, model switch,
+The message builder preserves system authority only for typed internal
+loop-control instructions, retaining every content byte. Generic historical
+SYSTEM rows, blueprint/reference material, user and tool text retain their
+existing authority, including literal `[SYSTEM]` strings. The loop identifies
+its existing wind-down, repetition and no-tool notices explicitly; no text
+matching or instruction-specific keyword rule is used. No fallback, prompt rewrite, model switch,
 budget change, synthetic trajectory message or keyword classifier is added.
 
 The registered `llm` blackbox regression exercises the real message builder,
@@ -117,20 +123,35 @@ provider fixture returns the observed content-filter terminal event for the
 bad projection. It asserts one request on the intended original model, exact
 instructions, untrusted user/tool negative controls, reference identity,
 unchanged main prompt/cache marker, original context order and no mutation.
+The role correction moves the control into provider instructions before
+conversation history. Where the base system prompt has a dynamic boundary,
+its cache prefix is unchanged; the actual incident prompts lacked that
+boundary, so the newly authoritative notice also changes `prompt_cache_key`.
+That known cache consequence is not claimed invariant. Message-level role-only
+controls are not single-field-only wire mutations: `input`, `instructions`
+and cache identity all change. No unique stochastic-model cause is claimed.
 The identical focused command `source agents/venv/bin/activate && python
 /tmp/047fff-run-role-regression.py` exited 1 before the fix with the observed
 content-filter cause, then exited 0 five consecutive times with five focused
-assertion cases. The permanent regression is registered in `run_all_tests`;
+assertion cases. The initial broad-projection regression was registered in `run_all_tests`;
 `select_affected_tests.py --lanes-for agents/tests/blackbox/llm.blackbox.py`
-resolves to `agents-blackbox llm`. The full Rose suite passed 314 cases, Rose browser-use passed 131 and LLM
+resolves to `agents-blackbox llm`. Before the provenance refinement, the full Rose suite passed 314 cases, Rose browser-use passed 131 and LLM
 passed 278 (28.9 seconds combined). The supported stability runner passed
 all three changed cases five consecutive times under eight occupied load
-slots (7 seconds). Independent review and deployment remain pending.
+slots (7 seconds). Independent review identified broader trust, cache and evidence-claim gaps.
+A narrower typed-control revision and its validation are in progress;
+deployment remains pending.
 
 Private evidence retains exact requests, SSE, commands, provider/model
 observations and the discarded downstream recovery experiment. A flag-only
 recovery control returned a final answer contaminated with refusal text,
 which is additional evidence against that proposed repair. It is not shipped.
+The set-plan serializer treats old SYSTEM rows as historical user reference
+data; this repair intentionally preserves that behavior and does not change
+its prompt assembly. The original production viewer has no benchmark run UUID,
+so the canonical publisher refuses it. An equivalent read-only complete API,
+HTTP viewer and shared browser-recording validator audit passed; this means
+verified reachable, not rendered or a fabricated benchmark share.
 
 At 10,000 agents the change replaces one scalar role value in an existing
 linear projection. It adds no I/O, shared state, locks, requests or retries.
@@ -146,3 +167,43 @@ incident-specific correction was recorded.
 When a provider flags an internal notice as prompt injection, compare its
 declared source role with the actual provider-body role before adding retries
 or rewriting the notice.
+
+
+## Provenance refinement after independent review
+
+The first independent reviewer confirmed the first bad boundary, then rejected
+the broad role correction. Its blanket trust rule also promoted untagged
+reference material, overstated three successful summaries, and omitted actual
+cache consequences. The final implementation adds optional boolean
+`metadata.internal_instruction` only at the three existing fixed loop-control
+producers and requires `role == SYSTEM` plus literal `True` in the renderer.
+Unknown/imported SYSTEM rows, blueprint/reference and attachment data retain
+the old user projection. USER/TOOL rows cannot gain authority by spoofing the
+flag, and string `true` is not accepted. No instruction text, insertion timing,
+agent limit or tool/model selection changes. Existing historical untagged
+controls are not inferred or migrated.
+
+The unchanged seven-case `/tmp/047fff-typed-regression.py` fails on the broad
+first candidate because untagged blueprint material enters instructions, and
+passes on the narrowed candidate five consecutive times. Current permanent
+transport assertions also fail against original `562cc8c490` loaded read-only
+in a separate process: the tagged instruction is absent from instructions.
+This is direct projection evidence; the original full-request replay supplies
+the independently observed content-filter reproduction. No source checkout or
+canonical context is mutated for the baseline control.
+
+The narrowed full suites pass Rose314, browser-use131, LLM278, run-agent104
+in46.4s. The supported stability runner passes five changed cases across both
+owning domains five consecutive times under eight occupied CPU slots in7s.
+The live typed-builder replays avoid content_filter3/3: two provide usable
+completion summaries; third request `395f949a7edb` reaches its original8192
+output limit with invalid tool arguments. This is not a complete-child outcome
+pass, and no budget or parser assertion was changed to hide it.
+
+Reference review must distinguish base-policy authority from reminders: Claude
+critical reminders and Hermes final-turn reminders use user messages; Codex
+typed rollout-budget controls use developer authority. Rose follows the latter
+provenance pattern for fixed internal controls because the existing SYSTEM
+label in user input reproduces the Foundry rejection, while reference/history
+data remain untrusted. The source retains the original three notices rather
+than adding new runtime nudges.
