@@ -32,8 +32,10 @@ sources:
   - agent dd14af83-6910-48a0-a74d-722195e767e7 (production chat grep ERROR row)
   - agent a776e196-9606-42cf-8723-86361365562a (production chat grep ERROR row)
   - commit 562cc8c49008708918d15ee9844ab1c8c333062c (pre-fix main; replay reproduces all 9 errors)
+  - PR #2427 (this fix; merged as b213386fd727185de5e4f6b0f61610a77d4bc5fd)
+  - commit dede566e1fbf842985e4516f4c1ebbfa3d3f0fe0 (live Render deploy dep-dbto1j8ae00c739p8n2g, descendant of the merge)
 repro: back-end/src/tests/unit/regex-safety.test.ts testWildcardLiteralAlternations (deterministic, 0 ms analyzer deadline); back-end/src/tests/blackbox/data-grep-contract.cases.ts chat-router cases and back-end/src/tests/blackbox/data-agent-task-path.cases.ts mergedNewestFirst (registered by data-grep.blackbox.ts / data.blackbox.ts)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -142,6 +144,17 @@ lesson applies directly to class 2).
 - 10k-agent behavior: an O(pattern length ≤ 1000) scan with no state, query or
   worker; it removes up to 1 s of analyzer wait and an analyzer slot per such
   grep from the shared backend.
+
+### Shipped and verified (2026-11-16)
+
+- PR #2427 merged as `b213386fd727185de5e4f6b0f61610a77d4bc5fd` through `scripts/deploy merge`: 17/17 gates PASS and CodeRabbit cycle 1 clean.
+- Cloud smoke first failed before admitting any task. This sandbox's preinstalled flyctl v0.5.10 was refused by the relay ("unsupported Fly agent version"; the relay pins v0.4.115). The fix was the documented remediation from `2026-11-06-unlaunched-campaign-retained-cleanup-owner`: install the pinned client with `scripts/cloudbench-install-controller-client.py` and verify its SHA256. The zero-admission campaign was reconciled with a `campaign-startup-v1` proof (zero credit), and the rerun passed 7/7.
+- Render service `srv-d3jga77diees73cgrvk0`: Render superseded and cancelled the merged deploy `dep-dbtnrq0ae00c739othu0` and the `31bc8e8d9` deploy. Live deploy `dep-dbto1j8ae00c739p8n2g` serves `dede566e1fbf`, a git-verified descendant containing the fix; it finished at 22:24:03Z.
+- `scripts/deploy production`: PASS. Render passed verified-by-descendant. backend-probes passed 16/16 with no post-deploy log errors. Semantic passed via chat-lifecycle-ratchet run 43969750450.
+- Production `POST /api/data/grep` replay (the chat router's validator) on the three formerly failing chat-router inputs:
+  - Before the deploy (20:37Z): 400, 400 and 400.
+  - After the deploy (22:24Z): 200, 200 and 200, with 36, 209 and 53 matches.
+  - A normal grep returned 200. Merged `oldest_first`, `(a+)+$` and a degree-3 union still return 400.
 
 ## Human feedback
 
