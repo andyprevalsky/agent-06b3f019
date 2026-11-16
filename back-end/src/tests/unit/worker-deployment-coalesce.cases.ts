@@ -9,6 +9,7 @@ import path from 'node:path';
 import type * as API from '../../providers/workerDeploymentQueue';
 import { retryWithBackoff } from '../../providers/retry';
 import { execTypeScript, spawnTypeScript, typeScriptProcess } from '../../providers/processSafety';
+import { waitFor } from '../helpers/waitFor';
 
 type Ctx = {
   api: typeof API;
@@ -391,10 +392,16 @@ export async function newerReleaseControllerCases(ctx: Ctx) {
       assert.match(idle, /NEWER_RELEASE_CONTROLLER/);
       assert.equal(existsSync(marker('ran')), false, 'idle older controller never spawned a child');
     } finally {
+      let closed = false;
+      void ended.then(() => {
+        closed = true;
+      });
       olderRun.kill('SIGTERM');
-      const killer = setTimeout(() => olderRun.kill('SIGKILL'), 20000);
+      // The probe cannot throw, so the only rejection is the grace-period timeout.
+      await waitFor('older controller closes after SIGTERM', () => closed, {
+        timeoutMs: 20_000,
+      }).catch(() => olderRun.kill('SIGKILL'));
       await ended;
-      clearTimeout(killer);
     }
     // A resume of the same older job from a checkout that contains the newer release
     // (deploy.md's manual resume from main) runs the head instead of deferring.
