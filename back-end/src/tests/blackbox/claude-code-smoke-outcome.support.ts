@@ -1,3 +1,6 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 /**
  * Outcome contract for the Claude Code E2B smoke (deploy.md 6c).
  *
@@ -84,5 +87,24 @@ export function summarizeResults(results: TestResult[]): {
   const skipped = results.filter((r) => r.skipped !== undefined).length;
   const passed = results.filter((r) => r.passed).length;
   const failed = results.length - passed - skipped;
-  return { passed, failed, skipped, exitCode: failed > 0 || skipped > 0 ? 1 : 0 };
+  const summary = { passed, failed, skipped, exitCode: failed > 0 || skipped > 0 ? 1 : 0 } as const;
+  const directory = process.env.BLACKBOX_TEST_ARTIFACT_DIR;
+  if (
+    directory &&
+    process.env.BLACKBOX_TEST_DOMAIN === 'claude-code' &&
+    process.env.BLACKBOX_SMOKE === '1'
+  ) {
+    writeFileSync(
+      join(directory, `claude-code-completion-${process.pid}.json`),
+      JSON.stringify({
+        runId: process.env.BLACKBOX_TEST_RUN_ID,
+        domain: 'claude-code',
+        completedAt: Date.now(),
+        results,
+        summary,
+      }),
+      { flag: 'wx' }
+    );
+  }
+  return summary;
 }

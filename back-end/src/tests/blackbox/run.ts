@@ -294,6 +294,12 @@ interface Result {
   /** Failed once, then passed its single rerun. */
   flaky?: boolean;
   attempts?: number;
+  termination?: {
+    kind: 'exited' | 'timeout' | 'spawn-error';
+    code: number | null;
+    signal: string | null;
+  };
+  terminations?: Result['termination'][];
 }
 
 // A domain's own failed-case lines (`FAIL <case>: <message>`, `❌ ...`, `✗ ...`).
@@ -342,6 +348,7 @@ async function runScheduledDomain(
       output,
       flaky: second.passed,
       attempts: 2,
+      terminations: [first.termination, second.termination],
     };
     if (second.passed) {
       // Not a free pass: the row and stdout line ask the deploy for /RCA attribution.
@@ -437,6 +444,7 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
         res({
           domain,
           passed: false,
+          termination: { kind: 'timeout', code: null, signal: null },
           duration: Date.now() - start,
           output: `${Buffer.concat(chunks).toString()}\n[runner] ${phase} timed out after ${limitMs}ms`,
         });
@@ -467,6 +475,7 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
       res({
         domain,
         passed: false,
+        termination: { kind: 'spawn-error', code: null, signal: null },
         duration: Date.now() - start,
         output: `${Buffer.concat(chunks).toString()}\n[runner] Failed to spawn: ${error.message}`,
       });
@@ -482,6 +491,7 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
       res({
         domain,
         passed: code === 0,
+        termination: { kind: 'exited', code, signal },
         duration,
         output:
           code === 0 ? output : `${output}\n${domainExitLine(code, signal, duration, output)}`,
@@ -603,6 +613,7 @@ async function main(): Promise<void> {
             aborted: result.aborted === true,
             flaky: result.flaky === true,
             attempts: result.attempts ?? (result.aborted === true ? 0 : 1),
+            terminations: result.terminations ?? [result.termination],
             duration: result.duration,
             logPath: result.logPath,
           })),
