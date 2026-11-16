@@ -476,7 +476,7 @@ test(
   quarantine(
     {
       since: '2026-11-16',
-      repair: 'pending-handoff:909d3b3614724842a6a17f54e04a0ef7',
+      repair: 'https://boxes.dev/thread/thr_5447e3f5e7c04372acb9f3b05b3144f1',
       error:
         'not ok 8 - a limit on one own account marks only it; the answer lists every account and the next lease',
       evidence: '.context/browser-chip-repair/usage-limit-rca/REPORT.md',

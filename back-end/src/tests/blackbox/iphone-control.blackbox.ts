@@ -121,7 +121,7 @@ const iphoneControlUnit = 'iphone-control';
 quarantine(
   {
     since: '2026-11-16',
-    repair: 'pending-handoff:4cb7636d7f1d4792b51743551e888478',
+    repair: 'https://boxes.dev/thread/thr_936e5f263b93487ca3480f41deb517c8',
     error: 'RERUN: iphone-control failed (158451ms); rerunning once',
     evidence: '.context/browser-chip-repair/iphone-control-rca/RCA.md',
   },
