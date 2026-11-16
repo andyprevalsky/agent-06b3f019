@@ -68,14 +68,16 @@ looked like an anonymous stuck owner and could not be attributed.
 (entrypoint script or explicit purpose), acquiredAt, githubRunId, githubRunAttempt,
 githubWorkflow}` on acquire and keeps it on every renew. The existing `leaseMs` and
 `renewedAt` fields are unchanged. Contention throws `WorkflowDeploymentLeaseBusyError`,
-whose message names the current holder. The validator matches that class instead of
-the message string, logs each holder change, and its timeout reports the last holder.
+whose message names the current holder. PR #2336 (merged first) removed the validator's
+use of the cutover lease altogether: each run now admits on its own per-run key, so the
+validator neither waits on nor blocks real cutovers. That removed the validator
+contention, and #2318 kept only the provider-level holder identity.
 This adds no queries and grows one row by a few bytes, so behavior at 10k agents is
 unchanged.
 
-Not changed: fair FIFO queueing of waiters, and a wait budget at least as long as one
-cutover hold (about 28 min observed). These are recommended follow-ups and are out of
-scope here.
+FIFO waiter queueing was considered and dropped: after #2336 the only remaining waiter
+is worker-deployment-queue, which retries every 1 s with no deadline. That queue still
+matches the busy message prefix, which is unchanged.
 
 ## Human feedback
 
