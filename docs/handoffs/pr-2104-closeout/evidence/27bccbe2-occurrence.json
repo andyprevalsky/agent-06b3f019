@@ -1,0 +1,20 @@
+{
+  "id": "27bccbe224b44535a662b172d1f728c3",
+  "gate": "backend-coverage-blackbox",
+  "unit": "indexeddb-upload-memory",
+  "check": "backend-coverage-blackbox/blackbox:indexeddb-upload-memory",
+  "native_result": "FLAKY",
+  "attempts": 2,
+  "detail": "",
+  "evidence": null,
+  "source": {
+    "head": "2d1c94c461714455c3a4edcfd2cb83d21db1f89b",
+    "digest": "b44705aa31f67cc4e327ef0d827083af1a56065cb389f949eaa37bb04fa9a452"
+  },
+  "phase": "final",
+  "round": 6,
+  "detected_at": 1794713668.5699267,
+  "unit_finished_at": 1794713646.997,
+  "attribution": null,
+  "instruction": "/RCA: this unit FAILED and passed its single rerun on the same source (FLAKY). Return the evidence-backed INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. INTRODUCED: fix before merge, no quarantine. NOT_INTRODUCED: add the quarantine marker with its repair link (.claude/commands/deploy.md). UNKNOWN blocks the merge. Do not weaken assertions/timeouts."
+}
