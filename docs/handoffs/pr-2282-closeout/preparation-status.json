@@ -1,0 +1,94 @@
+{
+  "format": "B82-CLOSEOUT-PREPARATION-V1",
+  "observed_at": "2026-11-16T06:29:00Z",
+  "source_sha": "9bfefe22414e6e86c470b99bc9299d78aedec9eb",
+  "deletion_ready": false,
+  "live_files_archived": true,
+  "inherited_manifest": "docs/handoffs/pr-2225-closeout/closeout-manifest.json",
+  "inherited_manifest_sha256": "ed3fa591be53c94107940d247d4d0d778c8d8ca5e584aff9664ba85e3fc72ccc",
+  "inherited_branch_count": 72,
+  "all_inherited_branch_tips_match": true,
+  "local_only_ref_count": 73,
+  "new_or_changed_unpreserved_refs": [],
+  "protected_instructions": [
+    {
+      "path": "/home/boxes/.codex/AGENTS.md",
+      "sha256": "e1b83a2abd1216551fabfc00bdd5d712531b3aa11ef8eb81dc4b6f5ca236d9aa",
+      "mode": "0o644",
+      "uid": 1002,
+      "gid": 1002,
+      "freedom_standing_text_present": true
+    },
+    {
+      "path": "/home/boxes/.claude/CLAUDE.md",
+      "sha256": "5d2c9ec335e84757bc590e802b48c20b1659afc290f85c9062860a653a71b385",
+      "mode": "0o644",
+      "uid": 1002,
+      "gid": 1002,
+      "freedom_standing_text_present": true
+    },
+    {
+      "path": "/home/boxes/rose/AGENTS.md",
+      "sha256": "9d8df9926136e588334b7e77ee01ca7cb8675591e7ab576258da67887938c9da",
+      "mode": "0o644",
+      "uid": 1002,
+      "gid": 1002,
+      "freedom_standing_text_present": false
+    },
+    {
+      "path": "/home/boxes/rose/CLAUDE.md",
+      "sha256": "77a24cdc9312475fb28ea112e6b8736641df551dc9de6451fbb7b4ea903c0264",
+      "mode": "0o644",
+      "uid": 1002,
+      "gid": 1002,
+      "freedom_standing_text_present": false
+    }
+  ],
+  "freedom_disposition": "No Freedom or protected instruction mutation performed. Existing historical protected copies fully authenticated from remote encrypted archive; current home instruction files contain standing Freedom rule. No Mac app/service state inspection on Linux.",
+  "secret_policy": "Managed env files remain managed; do not upload contents. Inventory records presence/size only, no hashes for env files. Final snapshot file list excludes managed env paths and secret-named files. Raw diagnostic evidence may contain credentials: encrypted archive only; never public or Git.",
+  "current_private_evidence": "Frozen snapshot captured at 2026-11-16T06:25:17Z, uploaded and independently fully authenticated. Exact membership and hashes: source-manifest.json. Later public status/scorecard metadata is derived and separately published.",
+  "final_checks_required": [
+    "Reviewed records-only publication and merge",
+    "Canonical deletion-check on clean published branch"
+  ],
+  "remote_verifications": {
+    "refs71": {
+      "receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+      "result": "PASS",
+      "log": "/tmp/b82-preservation/verify-pr1989.txt"
+    },
+    "branch72_and_stash": {
+      "receipt": "docs/handoffs/pr-1932-closeout/private-archive-receipt.json",
+      "result": "PASS",
+      "log": "/tmp/b82-preservation/verify-pr1932.txt"
+    },
+    "inherited_context": {
+      "receipt": "docs/handoffs/pr-2225-closeout/private-archive-receipt.json",
+      "result": "PASS",
+      "log": "/tmp/b82-preservation/verify-pr2225.txt"
+    },
+    "inherited_logs": {
+      "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+      "result": "PASS",
+      "log": "/tmp/b82-preservation/verify-pr2192.txt"
+    },
+    "protected_instructions": {
+      "receipt": "docs/handoffs/whm-b07d9037-preservation/protected-instructions-receipt.json",
+      "result": "PASS",
+      "log": "/tmp/b82-preservation/verify-protected-instructions.txt"
+    }
+  },
+  "git_bundle_readback": {
+    "PR1989": "71 exact branch tips; bundle verified",
+    "PR1932": "exact remaining branch and stash heads; bundle verified"
+  },
+  "stage_script": "docs/handoffs/pr-2282-closeout/stage_final_snapshot.py",
+  "metadata_publication": "Sanitized metadata copied into this handoff; private logs and raw trajectories remain encrypted. Canonical deletion receipt follows records commit.",
+  "benchmark_runs_disposition": "two final-eval files have byte-identical context copies; see benchmark-run-dispositions.json",
+  "symlink_disposition": "three context inventory/current links recorded in symlink-targets.json; targets inside context covered",
+  "local_only_branch_count": 72,
+  "current_branch_tip": "9bfefe22414e6e86c470b99bc9299d78aedec9eb",
+  "ref_inventory_scope": "605 current refs/heads plus refs/stash; all72 inherited unpublished branch tips and one stash match verified prior archives; unrelated internal checkpoint refs excluded.",
+  "ref_audit_keys": "full refname plus kind; heads map branch:<name>, refs/stash maps stash:<tip>",
+  "archive_status": "complete authenticated upload and independent full readback; parent records merge and checker pending"
+}

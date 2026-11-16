@@ -20,6 +20,8 @@ tags:
   - load-sensitive
   - flake
 sources:
+  - PR #2258
+  - commit 2d99b77abfd3ae2f23fbcb16e48ef9c3d41a702d
   - PR #2104
   - commit 31641a67091091fa3920a6049773281b827fd2aa
 repro: scripts/tests/cloudbench-cohort-reconcile.test.py
@@ -71,6 +73,8 @@ the first fix). The macOS `ps` path is unchanged. The regression's negative cont
 with no terminal receipt and asserts the successor is still refused with
 `live reconciliation winner lost lock`, without rescanning. 10k agents: one
 extra integer parse per takeover.
+
+Shipped in PR #2258 (merged 2d99b77abf, 2026-11-16); all 17 deploy gates passed on 8277c90e7e and production semantics passed (verified by descendant 530b71fe93).
 
 ## Human feedback
 

@@ -20,8 +20,9 @@ tags:
 sources:
   - commit 61126ffe11261e6f67eed343914d81859ba3fcbb
   - agent b82a6edb-e5e9-4b17-834d-0aa8f1171057
+  - agent 98fef614-249f-4866-a482-6e3c29c36b08
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py test_phone_canonical_receipts_survive_window_and_observation_budget
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -74,7 +75,7 @@ this repair does not prove overall task completion or justify a100% score.
 
 ## Solution
 
-Candidate adds independently attributed phone request/result receipts from all
+The repair adds independently attributed phone request/result receipts from all
 recorded actions, through existing privacy projection and unchanged12000/160000
 caps. It keeps the latest native browser observation and latest phone screen,
 then merges phone receipts with other per-operation evidence by descending step. Receipt identity, cursor, request arguments, actual result, failures,
@@ -86,7 +87,7 @@ exact text45, Send47 and first Read48 at all four boundaries. The102/122/132
 requests still hit the unchanged160000 cap. Actual later IM/SMS receipts93/95/101/105 also survive122/132. Older or sufficiently
 large histories can still exceed the unchanged caps: this is not a claim that
 arbitrary history fits. The original run was not resumed or resent.
-Deployment, paired exact-model replay and production outcome remain parent-owned.
+The repair merged in PR #2282; the shipment and replay evidence below records its verified scope.
 
 Registered controls cover old input plus first observation under75 bounded newer reads,
 an explicit75x7000-character capacity negative retaining latest evidence while
@@ -99,7 +100,7 @@ spawn-browser-agent-v3. Captured local command:
 The unchanged49-action command failed on original source (step45 missing) and
 passes candidate; full102/122/132 candidate projections preserve all three
 critical operation IDs. No full-task success claim follows from this transport
-replay. Parent owns final publication and golden-reference review.
+replay. Independent projection and serialization reviews were GROUNDED on the shipped bytes.
 
 ## Human feedback
 
@@ -114,7 +115,7 @@ and preserving the actual Read observation rather than fabricating Delivered/Sen
 
 Preserve native operation identity and its first observed result outside lossy compact history while keeping context limits and incomplete-evidence claims honest.
 
-## Full141-action admission follow-up (proposed compact JSON repair)
+## Full141-action admission follow-up (compact JSON repair)
 
 The per-operation projection alone remains incomplete at the actual141-action
 archive boundary. At source50439c411c1f580542c521a7761e76b1f0fa92f0, the unchanged
@@ -123,7 +124,7 @@ generic TOOL_RESULT serializer inserts JSON separator spaces before applying the
 input45/Send47/Read48 are omitted. This is a second owned admission boundary,
 not evidence that the phone operation itself failed.
 
-The proposed generic one-line repair uses compact JSON separators while keeping
+The generic one-line repair uses compact JSON separators while keeping
 all keys, values, string whitespace, ordering, default=str and both caps intact.
 It admits100 intact receipts at141. Entire decoded request/result values for
 45/47/48/93/95/101/105/139/141 match the captured original. Existing49/102/122/132
@@ -154,3 +155,95 @@ compact canonical argument JSON, but is not a result-admission analog. Contrary
 OpenClaw agents/tools/tool-results.ts10 pretty-prints JSON; this repair therefore
 does not claim unanimous reference formatting. It follows Codex's lossless
 structured-result mechanism within Rose's existing character budget.
+
+## DoorDash recurrence — 2026-11-16
+
+Agent `98fef614-249f-4866-a482-6e3c29c36b08` repeated a completed fresh Google
+sign-in on cloud iPhone Safari after six completion rejections. Its supported
+R2 archive contains 292 calls and 292 updates. The canonical resume has 113
+actions; the last actual verifier consumes actions through 110. Its six
+requests omit 28,210–36,380 characters from `action_history`, while the full
+receipts record logout at 53–57, Google account chooser/selection at 59–60,
+Safari launch at 72, repeated logout at 78–82, Continue with Google at 84–85,
+and final account identity at 97/108. This reaches the same first-bad boundary
+as the original case: canonical phone results are recorded, then lost by the
+30-entry projection and per-tool cap. It is a relative of October18's missing
+ActionHistory recording, not that earlier defect recurring.
+
+The private portable command `python repro.py <revision>` failed with exit1
+on `56d6bc1d5e7b94a7fdaed1325f23862b90221392` (missing canonical receipt53)
+and passed with exit0 on `4a8576932cae45631b4a0aabd675b81575b39e24`, five times
+unchanged and once in an independent parent replay. It checks exact decoded
+step, parameters and complete result equality for 53–61,67,72,78–86,97,108,
+and preserves the original final DOM/error. The aggregate cap still omits
+older operations; this is not a claim of unlimited history retention.
+
+A matched strict-schema replay through the original GPT-auth gpt-6.1-sol path
+returned score0.5/task_completed=false for the old projection (request
+`d278540aabb9`,58.973s) and score1.0/task_completed=true for the repaired
+projection (`4cb5073f781e`,64.315s), one trial per condition. Both retain the
+original native response-model schema, two system messages, six image messages,
+generation settings, and local reconstruction conventions, including an empty
+final-screenshot text receipt alongside the unchanged real images. The phone
+evidence projection is the varied input. An earlier trial omitted the strict
+transport schema and remains supportive only, excluded from this paired proof.
+No live phone operation, new benchmark, or original-run success is claimed.
+
+All three parent status requests reached actual actor model inputs: step48
+`a8a135c58803`, step79 `8a98b2bee3e4`, and step103 `9f5e9997498e`. The browser
+registry has no outbound agent-reply action; missing replies do not establish
+lost delivery. The searches were `phone harness evidence truncated verifier`
+and `browser agent messages sign in completion`. The active-input correction
+case is a relative, but its loss mechanism is not established here.
+
+Private evidence bundle SHA256:
+`a0c610687dd28c2fc60dc475985e55c05d96fde43f8dabb35c1321f1e1d96975`.
+The bundle contains portable fixtures, logs, schema provenance, paired verdicts
+and its own file manifest; retain it privately with deployment closeout.
+
+## Shipment and acceptance scope
+
+[PR #2282](https://github.com/Rose-Ai-Labs/rose/pull/2282) merged as
+`888b6e40bde0f70c3f090675be500a82707ce882`. All17 selected gates passed on the
+frozen reviewed source `60f72992887bab99109105cfc702054dae516df2`. The eight
+current-source cloud smoke tasks passed and their native resource release was
+verified. The final-runtime post-harness browser eval also passed1/1 with live
+judging and verified cleanup; this does not replay the original phone task.
+
+The exact applied-source command
+`source agents/venv/bin/activate; PYTHONPATH=agents python /tmp/b82-preservation/compact-proposal/full-repro-141.py`
+failed before compact admission at141 with missing45/47/48 and passed afterward
+at all five unchanged checkpoints. The original49-action command
+`PYTHONPATH=agents python /tmp/rca-b82/repro.py` failed before the projection
+repair with canonical operation30 absent, then passed with all49 operations.
+The private captured fixtures and complete envelopes are preserved in deployment
+closeout; no raw trajectory is committed here.
+
+The b82 compact model trials removed a duplicate final Evaluate instruction
+that remained in uncompressed trials. Their completion counts therefore do not
+isolate serialization as the cause of a latency improvement. The separate
+strict-schema98 paired comparison above states its held variables explicitly.
+
+Fly durable job `c0935364354a79cbccd66c85786d110ef6db8ce3a4b4507ae3c920e077963b70`
+reached SUCCEEDED and live verification passed after supported recovery of an
+old-worker retirement HTTP500. The initial failed workflow remains failed;
+recovery reused the same job. Every workflow migration row and fixture cleanup
+passed. Production semantic acceptance is tracked separately by the closeout
+receipts; it is not inferred from transport replay. The repaired symptom is
+canonical evidence loss. Neither original deleted phone run is relabelled a
+successful live acceptance, and no message was resent.
+
+The final native production command returned PASS at06:06:57Z on2026-11-16.
+Semantic run43813691792, attempt1, passed all five jobs against live frontend
+`530b71fe93a6bc39dc73b771c8e6e2b4f405abef`, a verified strict descendant of the
+release. Both runtime fix files are byte-identical between that source and the
+release. The first semantic attempt failed before dispatch because its live
+commit was absent locally and the managed Git wrapper was quota-blocked; a
+same-primary Git fetch repaired the object cache. The next attempt failed on
+GitHub's workflow metadata GET before any dispatch. One same-primary official
+REST dispatch then returned HTTP200 and exact run43813691792. An independently
+reviewed factual checkpoint preserved previous failures and recorded only this
+confirmed pending run; the unchanged native watcher resumed it and verified
+actual success without sending another POST. It did not manufacture a PASS or
+borrow an unrelated run. The differing quota observations remain diagnostic
+history, without a claimed provider root cause.

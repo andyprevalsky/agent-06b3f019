@@ -3406,15 +3406,18 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
         '  case "$1 $2" in "run view"|"run list") echo "$FAKE_GH_DENY_MESSAGE" >&2; exit 1 ;; esac\n'
         'fi\n'
         'case "$1 $2" in\n'
-        '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }; exit 0 ;;\n'
+        '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }\n'
+        '    for a in "$@"; do case "$a" in dispatch_id=*) echo "${a#dispatch_id=}" > "$FAKE_GH_DIR/dispatch-id" ;; esac; done; exit 0 ;;\n'
         '  "run list") [ -f "$FAKE_GH_DIR/list-fail" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }\n'
         '    n=$(cat "$FAKE_GH_DIR/list-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/list-count"\n'
-        '    f="$FAKE_GH_DIR/list-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/list-last.json"; cat "$f" ;;\n'
+        '    f="$FAKE_GH_DIR/list-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/list-last.json"\n'
+        '    sed "s/__DISPATCH__/$(cat "$FAKE_GH_DIR/dispatch-id" 2>/dev/null)/g" "$f" ;;\n'
         '  "run rerun") [ -f "$FAKE_GH_DIR/rerun-fail" ] && { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }\n'
         '    touch "$FAKE_GH_DIR/rerun-done"; exit 0 ;;\n'
         '  "run view") prefix=view; [ -f "$FAKE_GH_DIR/rerun-done" ] && prefix=rerun-view\n'
         '    n=$(cat "$FAKE_GH_DIR/$prefix-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/$prefix-count"\n'
-        '    f="$FAKE_GH_DIR/$prefix-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/$prefix-last.json"; cat "$f" ;;\n'
+        '    f="$FAKE_GH_DIR/$prefix-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/$prefix-last.json"\n'
+        '    sed "s/__DISPATCH__/$(cat "$FAKE_GH_DIR/dispatch-id" 2>/dev/null)/g" "$f" ;;\n'
         '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
         "esac\n")
     (bin_dir / "gh").chmod(0o755)
@@ -3454,8 +3457,11 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     later = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def row(run_id: int, created: str, sha: str | None, head: str, status: str = "in_progress") -> dict:
-        title = f"Production semantic gate source_sha={sha}" if sha else "Production semantic gate deployment=77"
+    def row(run_id: int, created: str, sha: str | None, head: str, status: str = "in_progress",
+            dispatch: str = "__DISPATCH__") -> dict:
+        """``__DISPATCH__`` is the fake gh's latest dispatch_id: the run that dispatch created."""
+        title = (f"Production semantic gate source_sha={sha} dispatch={dispatch}" if sha
+                 else "Production semantic gate deployment=77")
         return {"databaseId": run_id, "createdAt": created, "headSha": head, "status": status, "conclusion": None,
                 "event": "workflow_dispatch", "url": f"https://github.com/acme/rose/actions/runs/{run_id}",
                 "displayTitle": title}
@@ -3468,6 +3474,10 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     old_other = row(101, past, "3" * 40, "3" * 40, "completed")
     ours = row(200, future, merged, other_head)
     newer_other = row(300, later, "4" * 40, "4" * 40)
+    # Another dispatch's run of the same source, created after ours (two
+    # verifications bound to one live commit, 2026-11-15 runs 43690260324 and
+    # 43690277150): its dispatch id differs, so it is never adopted.
+    twin = row(250, later, merged, other_head, dispatch="f" * 32)
     decoy = row(400, later, None, merged)
 
     def job(name: str, conclusion: str | None, status: str = "completed") -> dict:
@@ -3534,19 +3544,22 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     state = tmp / "semantic-state"
     gate = run_gate(state)
     assert gate["status"] == "passed" and gate["fly"]["required"] is False and "semantic" not in gate, gate
-    reset([[old_other, old_same, decoy], [newer_other, decoy, ours, old_other, old_same]],
+    reset([[old_other, old_same, decoy], [newer_other, twin, decoy, ours, old_other, old_same]],
           [view("queued", None, 1, []), view("in_progress", None, 1, running_jobs), view("completed", "success", 1, all_success)])
     ran = run_semantic(state, "--frontend-url", "https://preview.roselabs.ai", "--backend-url", "https://api.roselabs.ai")
     assert ran.returncode == 0, ran.stdout
     lines = call_lines()
+    dispatch_id = receipt_of(state)["semantic"]["dispatch"]["inputs"]["dispatch_id"]
+    assert re.fullmatch(r"[0-9a-f]{32}", dispatch_id), dispatch_id
     assert lines[0] == ("workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha=" + merged +
-                        " -f frontend_url=https://preview.roselabs.ai -f backend_url=https://api.roselabs.ai"), lines
+                        " -f frontend_url=https://preview.roselabs.ai -f backend_url=https://api.roselabs.ai"
+                        " -f dispatch_id=" + dispatch_id), lines
     list_calls = [line for line in lines if line.startswith("run list")]
     assert len(list_calls) == 2 and "--workflow chat-lifecycle-ratchet.yml" in list_calls[0], list_calls
     assert "--event workflow_dispatch" in list_calls[0] and "--branch main" in list_calls[0], list_calls
     view_calls = [line for line in lines if line.startswith("run view")]
     assert len(view_calls) == 3 and all(line.startswith("run view 200 --json") for line in view_calls), lines
-    assert not any(f" {decoy_id} " in f" {line} " for line in lines for decoy_id in (100, 101, 300, 400)), lines
+    assert not any(f" {decoy_id} " in f" {line} " for line in lines for decoy_id in (100, 101, 250, 300, 400)), lines
     assert not any(line.startswith("run rerun") for line in lines), lines
     assert "SEMANTIC_RUN_ID=200" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
     assert ran.stdout.index("SEMANTIC_RUN_ID=200") < ran.stdout.index("SEMANTIC_LANE_END"), ran.stdout
@@ -3556,12 +3569,13 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     entry = receipt["semantic"]
     assert entry["outcome"] == "passed" and entry["run_id"] == "200" and entry["url"] == ours["url"], entry
     assert entry["head_sha"] == other_head and entry["source_sha"] == merged, entry
-    assert entry["display_title"] == ours["displayTitle"] and entry["created_at"] == future, entry
+    assert entry["display_title"] == ours["displayTitle"].replace("__DISPATCH__", dispatch_id), entry
+    assert entry["created_at"] == future, entry
     assert entry["completed_at"] == later and entry["conclusion"] == "success" and entry["attempt"] == 1, entry
     assert entry["status"] == "completed" and entry["retry"] is None, entry
     assert entry["dispatch"]["ref"] == "main" and entry["dispatch"]["at"], entry["dispatch"]
     assert entry["dispatch"]["inputs"] == {"source_sha": merged, "frontend_url": "https://preview.roselabs.ai",
-                                           "backend_url": "https://api.roselabs.ai"}, entry["dispatch"]
+                                           "backend_url": "https://api.roselabs.ai", "dispatch_id": dispatch_id}, entry["dispatch"]
     assert [(j["name"], j["conclusion"]) for j in entry["jobs"]] == [(j["name"], "success") for j in all_success], entry["jobs"]
     waits = semantic_waits(receipt)
     assert [w["kind"] for w in waits] == ["run-start", "run-complete"], waits
@@ -3573,7 +3587,8 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     reset([[ours, old_same]], [view("completed", "failure", 1, semantic_failed)])
     ran = run_semantic(state)
     assert ran.returncode == 1, ran.stdout
-    assert call_lines()[0].endswith("-f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"), call_lines()
+    assert "-f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com -f dispatch_id=" in call_lines()[0], call_lines()
+    assert receipt_of(state)["semantic"]["dispatch"]["inputs"]["dispatch_id"] != dispatch_id, "every dispatch gets a fresh id"
     assert "PIPELINE_SEMANTIC status=failed exit=1 run=200" in ran.stdout and "conclusion=failure" in ran.stdout, ran.stdout
     assert "Semantic frontend flows=failure" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
     assert 'retry=available (--retry-failed-once "<justification>")' in ran.stdout, ran.stdout
@@ -3783,7 +3798,9 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     entry = receipt_of(state13)["semantic"]
     assert entry["status"] == "dispatched" and entry["run_id"] is None and entry["outcome"] == "failed", entry
     assert entry["dispatch"]["at"] and entry["dispatch"]["inputs"] == {
-        "source_sha": merged, "frontend_url": "https://www.roselabs.ai", "backend_url": "https://navi-j9a9.onrender.com"}, entry
+        "source_sha": merged, "frontend_url": "https://www.roselabs.ai", "backend_url": "https://navi-j9a9.onrender.com",
+        "dispatch_id": entry["dispatch"]["inputs"]["dispatch_id"]}, entry
+    assert call_lines()[0].endswith(" -f dispatch_id=" + entry["dispatch"]["inputs"]["dispatch_id"]), call_lines()
     dispatch13 = entry["dispatch"]
     reset([[ours]], [view("completed", "success", 1, all_success)])
     ran = run_semantic(state13)
@@ -3966,7 +3983,8 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     assert ran.returncode == 0, ran.stdout
     lines = call_lines()
     assert lines[0] == ("workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha=" + descendant +
-                        " -f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"), lines
+                        " -f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"
+                        " -f dispatch_id=" + receipt_of(state16)["semantic"]["dispatch"]["inputs"]["dispatch_id"]), lines
     assert [line for line in lines if line.startswith("run view")] and all(
         line.startswith("run view 500 ") for line in lines if line.startswith("run view")), lines
     requests = (fake / "version-requests.log").read_text().splitlines()
@@ -4100,6 +4118,19 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     assert pipeline.semantic_select_run(rows[:2], merged, dispatched)["databaseId"] == 2
     assert pipeline.semantic_select_run(rows[:1] + rows[2:4] + rows[7:], merged, dispatched) is None
     assert pipeline.semantic_select_run(None, merged, dispatched) is None
+    # With a dispatch id, only the run whose title echoes that id matches (the
+    # newer twin of the same source from another dispatch never does); an
+    # entry recorded before ids existed (None) keeps the source-only rule.
+    mine, other = "a" * 32, "b" * 32
+    titled = [
+        {"databaseId": 11, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged} dispatch={mine}"},
+        {"databaseId": 12, "createdAt": "2026-10-31T12:00:09Z", "displayTitle": f"x source_sha={merged} dispatch={other}"},
+        {"databaseId": 13, "createdAt": "2026-10-31T12:00:10Z", "displayTitle": f"x source_sha={merged} dispatch={mine}x"},
+        {"databaseId": 14, "createdAt": "2026-10-31T12:00:11Z", "displayTitle": f"x source_sha={merged}"},
+    ]
+    assert pipeline.semantic_select_run(titled, merged, dispatched, mine)["databaseId"] == 11
+    assert pipeline.semantic_select_run(titled[1:], merged, dispatched, mine) is None
+    assert pipeline.semantic_select_run(titled, merged, dispatched)["databaseId"] == 14
     print("production semantic: ok")
 
 
@@ -4122,11 +4153,17 @@ def check_semantic_workflow_source_sha() -> None:
     inputs = triggers["workflow_dispatch"]["inputs"]
     assert "source_sha" in inputs and inputs["source_sha"].get("required") is False, inputs
     assert inputs["source_sha"].get("default", "") == "", "source_sha must default to the dispatched ref's head"
+    assert "dispatch_id" in inputs and inputs["dispatch_id"].get("required") is False, inputs
+    assert inputs["dispatch_id"].get("default", "") == "", "an undispatched or legacy run names no dispatch id"
     run_name = workflow["run-name"]
     assert "github.event_name == 'workflow_dispatch'" in run_name, "deployment runs must not claim a source_sha"
     marker = re.search(r"format\('([a-z_]+=)\{0\}', inputs\.source_sha \|\| github\.sha\)", run_name)
     assert marker, f"run-name must format the source commit marker from inputs.source_sha || github.sha: {run_name}"
+    suffix = "${{ inputs.dispatch_id && format(' dispatch={0}', inputs.dispatch_id) || '' }}"
+    assert run_name.endswith(suffix), f"run-name must end with the dispatch id marker {suffix}: {run_name}"
     pipeline = load_module("pipeline_semantic_marker", DRIVER)
+    sample = "Production semantic gate source_sha=" + "1" * 40 + " dispatch=" + "c" * 32
+    assert pipeline.SEMANTIC_DISPATCH_PATTERN.search(sample).group(1) == "c" * 32, pipeline.SEMANTIC_DISPATCH_PATTERN.pattern
     assert pipeline.SEMANTIC_TITLE_PATTERN.pattern == marker.group(1) + "([0-9a-f]{40})", (
         f"CLI marker {pipeline.SEMANTIC_TITLE_PATTERN.pattern!r} must match the workflow run-name marker {marker.group(1)!r}")
     jobs = workflow["jobs"]
