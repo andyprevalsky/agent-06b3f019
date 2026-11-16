@@ -7080,7 +7080,7 @@ release_registry_recovery_lock() {
     release_registry_recovery_guard
 }
 
-reserve_cleanup_disk_space() {
+reserve_cleanup_disk_space() {  # [capacity wait seconds; default 0 refuses at once]
     if [ -n "${RUN_BENCH_CLEANUP_COHORT_DIR:-}" ]; then
         local ticket_amount ticket_job="${RUN_BENCH_CLEANUP_JOB:-${RUN_BENCH_CAMPAIGN_JOB_ID:-}}"
         local -a ticket_nested=() ticket_deadline=()
@@ -7108,6 +7108,18 @@ reserve_cleanup_disk_space() {
     [ "$headroom_mb" -le 16384 ] || return 1
     [ "$minimum_mb" -le 4096 ] || return 1
     [ "$minimum_mb" -le "$reserve_mb" ] || minimum_mb="$reserve_mb"
+    # A disk shortage (allocator exit 75, nothing held) is capacity: wait for
+    # peer fleets to release their reserves instead of failing as infra. A
+    # sealed startup cohort keeps its own barrier clock and never waits here.
+    local wait_seconds="${1:-0}" retry_seconds="${CLOUDBENCH_CLEANUP_RESERVE_RETRY_SECONDS:-10}"
+    local status deadline remaining
+    case "$wait_seconds" in ''|*[!0-9]*) return 1 ;; esac
+    case "$retry_seconds" in ''|*[!0-9]*|0) return 1 ;; esac
+    [ "$wait_seconds" -le 86400 ] || return 1
+    [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] || wait_seconds=0
+    deadline=$((SECONDS + wait_seconds))
+    while :; do
+    status=0
     allocated_mb="$(python3 - "$CLEANUP_DISK_RESERVE_FILE" "$reserve_mb" \
         "$headroom_mb" "$minimum_mb" \
         "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" \
@@ -7790,6 +7802,7 @@ try:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
     print(amount)
 except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+    rolled_back = opened_reserve is None
     if opened_reserve is not None:
         # Keep the kernel FD lock until exact physical cleanup and ledger
         # rollback finish. Failed rollback leaves the durable debit recoverable.
@@ -7806,13 +7819,18 @@ except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as
                     if inflight.get(debit_id) == debit_record:
                         retire_debit(groups, inflight, failures, debit_id, "allocation-failed: " + str(exc))
                         persist(state_file, groups, inflight, failures)
+                rolled_back = True
             finally:
                 if lock_fd is not None:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
         except (OSError, ValueError, TypeError, KeyError) as rollback_error:
             print("cleanup reserve rollback pending: " + str(rollback_error), file=sys.stderr)
     print("cleanup reserve admission failed: " + str(exc), file=sys.stderr)
-    raise SystemExit(1)
+    # Exit 75 only for a disk shortage whose exact file and debit are gone: the
+    # caller may wait for peers to release space. Integrity, identity and
+    # unrecovered rollback failures stay fatal.
+    capacity = isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT)
+    raise SystemExit(75 if capacity and rolled_back else 1)
 finally:
     if opened_reserve is not None:
         os.close(opened_reserve)
@@ -7820,10 +7838,49 @@ finally:
         os.close(lock_fd)
 
 PY
-)" || return 1
+)" || status=$?
+    [ "$status" -ne 0 ] || break
+    [ "$status" -eq 75 ] || return 1
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+        echo "CLOUDBENCH_RETRYABLE_CAPACITY=cleanup_disk_reserve" >&2
+        echo "❌ local disk could not hold the ${reserve_mb}MB emergency teardown reserve plus ${headroom_mb}MB controller headroom within the ${wait_seconds}s capacity wait; no provider mutation was attempted. Free disk or lower campaign concurrency." >&2
+        return 75
+    fi
+    [ "$retry_seconds" -le "$remaining" ] || retry_seconds="$remaining"
+    echo "⏳ local disk cannot hold the emergency teardown reserve yet; no provider mutation. Waiting for peer fleets to release reserves: retry in ${retry_seconds}s (${remaining}s left of ${wait_seconds}s)" >&2
+    sleep "$retry_seconds"
+    done
     if [ "$allocated_mb" -lt "$reserve_mb" ]; then
         echo "⚠️  cleanup reserve scaled to ${allocated_mb}MB to preserve ${headroom_mb}MB controller headroom and pending cohort floors" >&2
     fi
+}
+
+admit_cleanup_disk_reserve() {
+    # Startup reserve admission. A shortage that outlasts the bounded wait is
+    # recorded as an explicit capacity deferral, which the aggregate reports as
+    # CAPACITY_DEFERRED instead of INFRA_ERROR; every other refusal is unchanged.
+    local wait_seconds="${CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS:-1800}" status=0
+    case "$wait_seconds" in
+        ''|*[!0-9]*) echo "❌ CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS must be a nonnegative integer" >&2; return 1 ;;
+    esac
+    reserve_cleanup_disk_space "$wait_seconds" || status=$?
+    [ "$status" -ne 0 ] || return 0
+    if [ "$status" -eq 75 ]; then
+        python3 - "$FLEET_DIR/_batch" "$wait_seconds" <<'PY' || status=1
+import json, os, sys, time
+from pathlib import Path
+batch = Path(sys.argv[1])
+batch.mkdir(parents=True, exist_ok=True)
+marker = batch / "capacity-deferred.json"
+temporary = batch / (".capacity-deferred." + str(os.getpid()) + ".tmp")
+temporary.write_text(json.dumps({"schema": "cloudbench-capacity-deferred-v1", "reason": "cleanup_disk_reserve",
+                                 "wait_seconds": int(sys.argv[2]), "observed_at_epoch": time.time()}) + "\n")
+os.replace(temporary, marker)
+PY
+    fi
+    echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
+    return "$status"
 }
 
 release_cleanup_disk_reserve() {  # [exact reserve path for a proven-dead registry]
@@ -17033,10 +17090,7 @@ fleet_scorecard_report() {
         --goal "$goal" "${fields[@]}" >/dev/null 2>&1 || true
 }
 fleet_scorecard_report launch
-reserve_cleanup_disk_space || {
-    echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
-    exit 1
-}
+admit_cleanup_disk_reserve || exit $?
 # Visibility can fail on imports, credentials, or HTTP. Publish controller
 # authority and arm its finalizer before those calls so startup failures get
 # the same durable teardown as failures after allocation.

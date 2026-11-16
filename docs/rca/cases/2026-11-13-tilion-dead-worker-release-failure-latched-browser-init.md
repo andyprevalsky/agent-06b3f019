@@ -370,6 +370,12 @@ both failing layers are ours: the adapter's skipped second create and the
 coalescer's permanent `FAILED` receipt. An owned recovery path that is broken is
 never an external blocker.
 
+Shipped: PR #2276 (merged `e3416343194e`, 2026-11-16) released the marker and carried the
+fixture correction. Its gates passed 17 of 17 after one NOT_INTRODUCED structural failure:
+main's stale `provider_capacity_refusal` stubs, fixed on main by `41a8cc0362`. Production
+render, backend probes and semantic checks passed (semantic run 43804741510, verified by
+live descendant `e338087dfd7c`).
+
 Still open on main by design. Each of these latches the receipt for the root's
 lifetime and can produce this same exact-count symptom:
 

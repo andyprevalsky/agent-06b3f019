@@ -439,7 +439,7 @@ void (runsSuite
   ? quarantine(
       {
         since: '2026-11-15',
-        repair: 'pending-handoff:27bccbe224b44535a662b172d1f728c3',
+        repair: 'https://boxes.dev/thread/thr_2ef81e27d9b348459856e26692998212',
         error: 'RERUN: indexeddb-upload-memory failed (813ms); rerunning once',
         evidence:
           '.context/deploy-pipeline-pr2104/attempts/6/final/backend-coverage-blackbox/remote-artifact/files/back-end/coverage/blackbox-run-shard1/indexeddb-upload-memory.log (PR2104 FLAKY 27bccbe2)',
