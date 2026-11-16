@@ -1,0 +1,7 @@
+{
+  "origin": "/home/boxes/rose/.context/factory-events.jsonl",
+  "sha256": "6e0f45a88b60db6737c5045a1d934a864558f4d814e631af287d35375b7f762b",
+  "bytes": 97856,
+  "lines": 72,
+  "note": "Parent must separately preserve any later appended factory events; these are the exact captured bytes."
+}

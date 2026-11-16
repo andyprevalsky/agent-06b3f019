@@ -1,0 +1,10 @@
+{
+  "archive": "devbox-closeout-private/pr2347/d35a3fe4-preparation-20261116T-preserved-originals.tar.gz.aesgcm",
+  "ciphertext_sha256": "085a1e756fe3b76c812575110f70b1159b4bf3999d439e0323b2813c4e7832c6",
+  "manifest_sha256": "315ac592f26a468ef0e21ca4893a8f9f88b6e600e95cf529eb7f6e2e5984b8d3",
+  "restored_files": 107,
+  "restored_bytes": 3889742,
+  "all_member_hashes_and_sizes_verified": true,
+  "destination": "/tmp/phone2347-preservation/final/baseline-restore",
+  "source_postcheck_claim": false
+}

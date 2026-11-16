@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr2347/d35a3fe4-completed-final-gates-20261116T.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "b647a60affd3836e7f85795560469cf36a523ca8322e83a0b35e521ece4442c9",
+  "gzip_sha256": "70bfae1cc04ad97a0872ba27ea14941dfdcd28609e49d46a6bc68465f2286577",
+  "stored_bytes": 99892572,
+  "frames": 12,
+  "files": 14289,
+  "original_bytes": 425254682,
+  "manifest_sha256": "c4bf610cf0cc72f291a43cd20bf28edb18d30956f3edf5da346d1e36c5cbfcec",
+  "full_readback_verified": true
+}

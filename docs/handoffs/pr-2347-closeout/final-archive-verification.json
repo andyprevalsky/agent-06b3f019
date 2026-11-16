@@ -1,0 +1,11 @@
+{
+  "verified_at": "2026-11-16T09:29:40.996443+00:00",
+  "manifest_authenticated": true,
+  "every_restored_member_hash_and_size_verified": true,
+  "restored_files": 5404,
+  "restored_bytes": 863906858,
+  "catalog_entries_verified": 36266,
+  "original_sources_rehashed": 36233,
+  "original_changes": 0,
+  "restore_destination": "/tmp/phone2347-preservation/final/restore-independent"
+}
