@@ -1,0 +1,20 @@
+Deploy validation: ready
+Source: 30558b794e25845d77a1b2b8537ea146d491c948
+Pending RCA: 0
+Pending post-merge: 0
+Resource warnings: 0
+Tests skipped (quarantined): 10 — 0 failed (non-blocking), 10 passed
+
+
+QUARANTINED (non-blocking; the test ran)
+- live-probes :: chat-router-failover::testLiveFailoverEscalates — QUARANTINED_PASS · since 2026-11-11 · repair pending-handoff:3ce7aeb5336647dfa379f0bb04ed45a9
+- live-probes :: browser-provider::browser-provider — QUARANTINED_PASS · since 2026-11-15 · repair https://boxes.dev/thread/ph7af24jetqdjbjrdfqhnf9f6x8j8mqc
+- live-probes :: browser-provider::browser-provider — QUARANTINED_PASS · since 2026-11-16 · repair https://boxes.dev/thread/ph71waf8yk2knd7gsc0yy3sfh18jbfy2
+- backend-coverage-blackbox :: code-session-usage-limit::a limit on one own account marks only it; the answer lists every account and the next lease — QUARANTINED_PASS · since 2026-11-16 · repair https://boxes.dev/thread/thr_5447e3f5e7c04372acb9f3b05b3144f1
+- backend-coverage-blackbox :: iphone-control::iphone-control — QUARANTINED_PASS · since 2026-11-16 · repair https://boxes.dev/thread/thr_936e5f263b93487ca3480f41deb517c8
+- backend-coverage-blackbox :: code-preview::Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview DOM in ≤ 3 s — QUARANTINED_PASS · since 2026-11-11 · repair pending-handoff:cf9d391de1d0465683bbe6265b42351b
+- backend-coverage-blackbox :: treasury-rails::treasury-rails — QUARANTINED_PASS · since 2026-11-13 · repair https://boxes.dev/thread/ph75k13xzhes1bcm32q38mqq3n8j6pmj
+- agents-coverage-blackbox :: browser-tilion::test_full_chromium_port_cannot_be_stolen_after_parent_reservation — QUARANTINED_PASS · since 2026-11-15 · repair pending-handoff:5cb2ca0e07ae42fdbee8a8033fd2157c
+- smoke :: background-agent-message-smoke — QUARANTINED_PASS · since 2026-11-16 · repair https://boxes.dev/thread/ph726rz537t23hzq6ec6e0ye018jbmh6
+- smoke :: claude-code-agent — QUARANTINED_PASS · since 2026-11-16 · repair pending-handoff:0cfdb15f797a4ff59d817905cf623e23
+- smoke :: browser-biometrics-webdecoy — QUARANTINED_PASS · since 2026-11-16 · repair pending-handoff:dde1843d76714899ba2cff244c0a6541

@@ -1,0 +1,2 @@
+OK — Claude Code CLI 2.1.311 is the newest stable release
+OK — Codex CLI 0.169.0 is the newest stable release

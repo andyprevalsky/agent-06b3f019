@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private-preservation/pr2420/gates-20261116T203300Z.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "6bbcb5fe331deea73c77ece070643526ec35a6de6a8d8de45793ccba89fe04c8",
+  "gzip_sha256": "8bda01741e28aac74a3fe7b4690c86ac3aaaabd979cff18e60a0496eb574481b",
+  "stored_bytes": 189990583,
+  "frames": 23,
+  "files": 22719,
+  "original_bytes": 758913146,
+  "manifest_sha256": "db93052392893b1618da037226e8e79f039c09af280452ec718c7bbaa3161e36",
+  "full_readback_verified": true
+}

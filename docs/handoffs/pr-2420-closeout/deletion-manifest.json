@@ -1,0 +1,35 @@
+{
+  ".cloud-env": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  ".devbox/": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  ".env.npm": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  ".llm-dumps/": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "agents/.context/": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "agents/.env": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "agents/.env.benchmark-temporal": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "agents/.env.cloudbench-upsert.lock": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "agents/navi-worker-log.txt": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "agents/providers/fast_cache/": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "back-end/.env": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "back-end/.env.cloudbench-upsert.lock": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "back-end/backend-logs.log": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "docs/rca/INDEX.md": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "front-end/.env": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "front-end/frontend-logs.log": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "hub-poller-logs.log": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "mac-app/.env": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "package-lock.json": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "research/.env": "archived in encrypted config carrier private-preservation/pr2420/config-20261116T194300Z.tar.gz.gcm",
+  "branch:backup/cerebras-chat-quota-prepush-20261002": {
+    "disposition": "archived",
+    "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca",
+    "archive": "private-preservation/pr2420/initial-20261116T194200Z.tar.gz.gcm",
+    "sha256": "1ed1b004d3e7988c409ac460da95992a22b564391e049554766434b3714b773d"
+  },
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "disposition": "archived",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2",
+    "archive": "private-preservation/pr2420/initial-20261116T194200Z.tar.gz.gcm",
+    "sha256": "1ed1b004d3e7988c409ac460da95992a22b564391e049554766434b3714b773d"
+  },
+  ".context/": "archived: initial/config/gates/supplemental receipts in docs/handoffs/pr-2420-closeout; late records tracked in records-only PR; generated restores/snapshots reproducible from those carriers"
+}
