@@ -160,9 +160,9 @@ The fix is test-only, in `front-end/tests-e2e`:
   order (it uncounts the in-flight counted request, or skips the next one).
   Entry-recovery reloads, chunk reloads and every other document still count.
   `versionReloads` lists each announced target.
-- **`serveDeploySwitchAfterFirstDocument`.** Its documents come from the pinned
-  build: later ones are the pinned HTML with the entry renamed to the simulated
-  next build.
+- **`serveDeploySwitchAfterFirstDocument` (main's lazily binding version).**
+  Later documents are the first document's captured HTML with the entry renamed
+  to the simulated next build, not the live alias.
 - **A third mechanism, from PR #2221's repair thread (run 43691173465).** An
   edge served freshly promoted HTML before that node held its assets, so the
   recovery's revalidate got a real immutable 404. Their `edge-sim.mjs` (a proxy
@@ -171,12 +171,16 @@ The fix is test-only, in `front-end/tests-e2e`:
   build under test's assets, so origin 404s never reach it. The proxy answers `/version.json` with 404. Before this, a real
   promote at 04:53:50Z on 2026-11-16 handed its third document a newer build
   (`nextRequests` 2, expected 3).
-- **`pinLiveBuild` / `servesPinnedBuild` / `servePinnedBuild` (every
-  entry-load test).** The test reads the live build's HTML and crawls every
+- **Merge with main's `c4fd71af9d`** ("bind entry-load faults to the navigated
+  document across deploy switches", prod run 43686704518). Main's
+  `routeEntry`/`bindEntry` approach is kept for the page.route-based tests, and
+  so are its two new tests. This change's `servePinnedBuild` for those tests was
+  dropped in its favour. The pin below covers only the proxy-based
+  cached-immutable test and this case's two regressions.
+- **`pinLiveBuild` / `servesPinnedBuild`.** The test reads the live build's HTML and crawls every
   module and stylesheet its documents can load: 28 files, about 13 MB, on
-  2026-11-16. It re-reads if the origin already lacks one. Each test's proxy serves every
-  document and every pinned asset from that snapshot. The page.route tests
-  navigate to the proxy too.
+  2026-11-16. It re-reads if the origin already lacks one. That proxy serves every document
+  and every pinned asset from the snapshot.
   - Why: verification on the merged source caught another window. At 04:45:21Z
     on 2026-11-16 a promote undeployed the build under test; its entry
     `index-DWgLaNQK.js` returned 404 at the origin. A Vercel edge kept serving its
