@@ -92,7 +92,12 @@ async function loadSources(
       proof: { body, metadata, plaintext: plaintextProof },
     });
   }
-  return sources.sort((a, b) => a.createdAtMs - b.createdAtMs || a.path.localeCompare(b.path));
+  // Equal clocks (a call that starts and finishes within one millisecond) keep
+  // the base record before its updates; path order alone would list updates first.
+  const kind = (source: Source): number => (source.path.startsWith('llm/') ? 0 : 1);
+  return sources.sort(
+    (a, b) => a.createdAtMs - b.createdAtMs || kind(a) - kind(b) || a.path.localeCompare(b.path)
+  );
 }
 function mergeUpdate(base: Payload, patch: Payload): void {
   for (const [key, value] of Object.entries(patch)) {
@@ -130,19 +135,42 @@ function isPythonAsyncPatch(base: Source, update: Source): boolean {
     /^llm-updates\/([a-f0-9]{12})-([1-9][0-9]*)-([\p{L}\p{N}_.-]{1,64})\.json\.gz\.enc$/u
   );
   if (!name || name[1] !== dump || !Number.isSafeInteger(Number(name[2]))) return false;
-  const patchKeys = new Set([
-    'agent_id',
-    'root_agent_id',
-    'span_id',
-    'dump_id',
-    'model',
-    'config',
-    'response_format',
-    'tools',
-    'output',
-    'extra',
-  ]);
+  const v2 = 'schema_version' in update.payload || 'record' in update.payload;
+  if (v2 && !isPythonV2Final(base.payload, update.payload, name[3])) return false;
+  const patchKeys = v2 ? new Set([...PATCH_KEYS, ...V2_FINAL_KEYS]) : new Set(PATCH_KEYS);
   return Object.keys(update.payload).every((key) => patchKeys.has(key));
+}
+const PATCH_KEYS = [
+  'agent_id',
+  'root_agent_id',
+  'span_id',
+  'dump_id',
+  'model',
+  'config',
+  'response_format',
+  'tools',
+  'output',
+  'extra',
+];
+const V2_FINAL_KEYS = ['schema_version', 'record', 'call_site', 'finished_at_ms', 'attempts'];
+// A v2 final (agents/helpers/llm_archive_record.py) carries its start's identity
+// unchanged, names its call_site in the object path, and its logical stamps order
+// start before finish even when encryption completion did not.
+function isPythonV2Final(start: Payload, final: Payload, pathCallSite: string): boolean {
+  const stamp = (value: unknown): value is number =>
+    Number.isSafeInteger(value) && (value as number) > 0;
+  return (
+    start.schema_version === 2 &&
+    final.schema_version === 2 &&
+    start.record === 'start' &&
+    final.record === 'final' &&
+    final.call_site === start.call_site &&
+    pathCallSite === start.call_site &&
+    final.span_id === start.span_id &&
+    stamp(start.started_at_ms) &&
+    stamp(final.finished_at_ms) &&
+    final.finished_at_ms >= start.started_at_ms
+  );
 }
 
 function groupCalls(sources: Source[]): { base: Source; payload: Payload; updates: Source[] }[] {

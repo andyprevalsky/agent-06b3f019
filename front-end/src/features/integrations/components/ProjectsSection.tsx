@@ -21,6 +21,8 @@
  *       plan the import, then shows the plan for approval (hooks/useLocalImport +
  *       components/local-import/LocalImportFlow); nothing to copy or paste
  *     [IMPORTING] --Cancel--> run cancelled; --done--> list refetched
+ *     each of the user's own GitHub rows the backend lists as shareable (github_repo
+ *     by `gh:owner/repo`) shows its team-sharing caption (AccountTeamShare) after its name
  *   GitHub repo --Connect--> [CONNECT OPEN] URL + Connect --201--> [CLOSED]
  *     (the repo is listed as a project) | inline error
  *     the GitHub account the import brought (`rose github import`) shows as a
@@ -32,7 +34,9 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Laptop, Loader2, Settings } from 'lucide-react';
 
 import { LocalImportFlow } from '@/components/local-import/LocalImportFlow';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
 import { hasLocalImport, useLocalImport } from '@/hooks/useLocalImport';
+import { useAccountShares, type AccountShareTarget } from '@/hooks/useTeams';
 import type { Project } from '@/lib/api/projects';
 import { cn } from '@/lib/utils';
 
@@ -48,7 +52,7 @@ import ConnectedAccountChip from './ConnectedAccountChip';
 import DropdownIconFrame from './DropdownIconFrame';
 import ProjectIcon from './ProjectIcon';
 import RemoveAccountDialog from './RemoveAccountDialog';
-import { githubRepoOwner } from './githubRepoOwner';
+import { githubCanonicalRef, githubRepoOwner } from './githubRepoOwner';
 
 export interface ProjectsSectionProps {
   /** Project settings shown under a row's ⚙ (the apps panel passes them in). */
@@ -118,6 +122,7 @@ function ProjectRow({
   settings,
   removing,
   onRemove,
+  share,
 }: {
   project: Project;
   open: boolean;
@@ -125,6 +130,8 @@ function ProjectRow({
   settings?: ReactNode;
   removing: boolean;
   onRemove: () => void;
+  /** Team-sharing caption of the user's own GitHub repo (github_repo by `gh:owner/repo`). */
+  share?: AccountShareTarget;
 }) {
   const [confirming, setConfirming] = useState(false);
   const github = githubRepoOwner(project.repoUrl) !== null;
@@ -141,7 +148,10 @@ function ProjectRow({
           </GlyphTile>
         )}
         <div className="flex min-w-0 flex-1 flex-col">
-          <span className={DESKTOP_ROW_NAME_CLASSES}>{project.name}</span>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={DESKTOP_ROW_NAME_CLASSES}>{project.name}</span>
+            {share && <AccountTeamShare {...share} />}
+          </div>
           <span className={DETAIL} data-testid="project-detail">
             {projectDetail(project)}
           </span>
@@ -265,6 +275,11 @@ export default function ProjectsSection({ projectSettings }: ProjectsSectionProp
   // The Mac app picks the folder and runs the import; elsewhere it needs the app.
   const desktop = hasLocalImport();
   const data = useIntegrationProjects(true);
+  const { shareTarget } = useAccountShares();
+  const shareOf = (project: Project) => {
+    const ref = project.shared == null ? githubCanonicalRef(project.repoUrl) : null;
+    return ref === null ? undefined : shareTarget('github_repo', ref);
+  };
   const importFlow = useLocalImport();
   const importing = BUSY_IMPORT.has(importFlow.state.status);
   const { refetch } = data;
@@ -294,6 +309,7 @@ export default function ProjectsSection({ projectSettings }: ProjectsSectionProp
           settings={projectSettings?.(project)}
           removing={data.removingId === project.id}
           onRemove={() => data.remove(project.id)}
+          share={shareOf(project)}
         />
       ))}
       {data.removeError !== null && (

@@ -2,8 +2,8 @@
  * Media helpers for the `display` tool: content-type sniffing, a bounded
  * SSRF-guarded URL fetch, and the object store the displayed bytes live in.
  *
- *   bytes ─► classifyDisplayMedia ─► image/* | video/* | application/pdf | model/* |
- *                                    text/html | text/javascript | null (rejected)
+ *   bytes ─► classifyDisplayMedia ─► image/* (incl. image/svg+xml) | video/* | application/pdf |
+ *                                    model/* | text/html | text/javascript | null (rejected)
  *   url   ─► fetchDisplayMedia (http(s) only, public addresses only — checked
  *            again at connect time — ≤ maxBytes, ≤ 5 redirects, timeout)
  *
@@ -15,7 +15,10 @@
  * JavaScript response) AND UTF-8 text that is not markup; text model formats
  * (.gltf JSON, .obj, ASCII .stl) and .usdz need their extension plus a
  * structural check. HTML, scripts and models are only ever served from the
- * sandboxed user-content origin (displayBundle.ts).
+ * sandboxed user-content origin (displayBundle.ts). SVG is an image: UTF-8 text
+ * whose root element is <svg> (a standalone .svg, never an HTML page). It is
+ * stored as image/svg+xml, rendered only through <img> (scripts never run in an
+ * image), and its signed URLs force a download so it is never opened as a page.
  *
  * Storage: Supabase Storage (providers/storage.ts) by default; with
  * DISPLAY_STORAGE_BACKEND=local (+ DISPLAY_STORAGE_LOCAL_DIR) objects go to
@@ -35,7 +38,7 @@ const ascii = (bytes: Buffer, offset: number, text: string) =>
   bytes.length >= offset + text.length &&
   bytes.subarray(offset, offset + text.length).toString('latin1') === text;
 
-/** Recognised image/video type from magic bytes, or null. SVG is deliberately excluded. */
+/** Recognised binary image/video type from magic bytes, or null. SVG is text; see looksLikeSvg. */
 export function sniffDisplayMediaType(bytes: Buffer): string | null {
   if (sig(bytes, 0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png';
   if (sig(bytes, 0, 0xff, 0xd8, 0xff)) return 'image/jpeg';
@@ -67,6 +70,20 @@ export function looksLikeHtml(bytes: Buffer): boolean {
   }
   if (text.includes('\u0000')) return false;
   return HTML_START.test(text.replace(/^\uFEFF/, '').slice(0, 4096));
+}
+
+/** Root element `<svg` after an optional BOM, XML declaration, comments and SVG doctype. */
+const SVG_START =
+  /^\s*(<\?xml\b[^>]*\?>\s*)?(<!--[\s\S]*?-->\s*)*(<!doctype\s+svg\b[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*<svg\b/i;
+const DECLARED_SVG_NAME = /\.svg$/i;
+const DECLARED_SVG_TYPE = /^image\/svg\+xml\b/i;
+
+/** True when `bytes` are UTF-8 text without NULs whose root element is `<svg>`. */
+export function looksLikeSvg(bytes: Buffer): boolean {
+  if (sniffDisplayMediaType(bytes) !== null) return false;
+  const text = utf8(bytes);
+  if (text === null || text.includes('\u0000')) return false;
+  return SVG_START.test(text.replace(/^\uFEFF/, '').slice(0, 4096));
 }
 
 const DECLARED_SCRIPT_NAME = /\.m?js$/i;
@@ -103,9 +120,13 @@ export function classifyDisplayMedia(
   if (ascii(bytes, 0, 'glTF')) return 'model/gltf-binary';
   const model = declaredModelType(bytes, hint.filename ?? '');
   if (model !== null) return model;
+  const declaredSvg =
+    DECLARED_SVG_NAME.test(hint.filename ?? '') || DECLARED_SVG_TYPE.test(hint.contentType ?? '');
+  if (declaredSvg) return looksLikeSvg(bytes) ? 'image/svg+xml' : null;
   const declaredHtml =
     /\.html?$/i.test(hint.filename ?? '') || /^text\/html\b/i.test(hint.contentType ?? '');
   if (declaredHtml) return looksLikeHtml(bytes) ? 'text/html' : null;
+  if (looksLikeSvg(bytes)) return 'image/svg+xml';
   const declaredScript =
     DECLARED_SCRIPT_NAME.test(hint.filename ?? '') ||
     DECLARED_SCRIPT_TYPE.test(hint.contentType ?? '');
@@ -163,6 +184,7 @@ export const DISPLAY_EXTENSIONS: Record<string, string> = {
   'image/bmp': 'bmp',
   'image/avif': 'avif',
   'image/heic': 'heic',
+  'image/svg+xml': 'svg',
   'video/webm': 'webm',
   'video/quicktime': 'mov',
   'video/mp4': 'mp4',

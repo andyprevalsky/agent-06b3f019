@@ -9,6 +9,7 @@ This module provides:
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import json
 import logging
@@ -171,6 +172,48 @@ def drop_browser_use_serial_dom_probes() -> None:
     from browser_use.dom.service import DomService
 
     DomService._get_all_trees = _get_all_trees_without_serial_probes
+
+
+def _dom_build_timing_ms(timing_info: Any) -> Optional[Dict[str, int]]:
+    if not isinstance(timing_info, dict):
+        return None
+    return {
+        key: int(round(value))
+        for key, value in timing_info.items()
+        if isinstance(value, (int, float)) and value >= 1.0
+    }
+
+
+_DOM_BUILD_TIMING_WRAPPERS: set = set()
+
+
+def record_browser_use_dom_build_timing() -> None:
+    """Keep browser-use's per-build DOM timing breakdown instead of debug-logging it.
+
+    ``DomService.get_serialized_dom_tree`` already measures the CDP trees,
+    cross-origin iframe recursion (inside ``construct_enhanced_tree_ms``) and
+    serialization. The breakdown is stored on the browser session so
+    ``DOMService`` can report it in ``browser.step.phases`` (H-61: 26s
+    observe_state phases had no sub-phase evidence).
+    """
+    from browser_use.dom.service import DomService
+
+    build = DomService.get_serialized_dom_tree
+    if build in _DOM_BUILD_TIMING_WRAPPERS:
+        return
+
+    @functools.wraps(build)
+    async def get_serialized_dom_tree(self: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await build(self, *args, **kwargs)
+        # Telemetry is best-effort: a changed return shape or a rejected attribute must not fail the build.
+        try:
+            self.browser_session._rose_dom_build_timing_ms = _dom_build_timing_ms(result[2])
+        except Exception:
+            logger.debug("DOM build timing unavailable", exc_info=True)
+        return result
+
+    _DOM_BUILD_TIMING_WRAPPERS.add(get_serialized_dom_tree)
+    DomService.get_serialized_dom_tree = get_serialized_dom_tree
 
 
 VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS = 10.0
@@ -980,6 +1023,8 @@ class DOMService:
         self.viewport_height = viewport_height
         self.downloads_path = downloads_path or browser_downloads_path_for_provider()
         self._session = None
+        # browser-use DOM build breakdown of the latest state read (browser.step.phases).
+        self.last_dom_build_timing_ms: Optional[Dict[str, int]] = None
         self._selector_map: Dict[int, Any] = {}
         self._runtime_current_url = ""
         # Image URLs rendered by any page this browser activity observed, oldest
@@ -1133,6 +1178,7 @@ class DOMService:
 
             disable_browser_use_pending_request_probe()
             drop_browser_use_serial_dom_probes()
+            record_browser_use_dom_build_timing()
 
             # Create profile with CDP URL for remote browser.
             # downloads_path must match the provider's session-file root:
@@ -1272,24 +1318,6 @@ class DOMService:
     async def set_captcha_auto_solve_active(self, solving: bool) -> None:
         """Back-compat: map boolean solving onto chip phase."""
         await self.set_captcha_indicator_phase("solving" if solving else "idle")
-
-    async def probe_captcha_widgets_present(self) -> bool:
-        """Kernel has no in-flight solver flag — probe challenge widgets via CDP."""
-        try:
-            from browser_tools.captcha_solve_indicator import CAPTCHA_WIDGET_PRESENT_SCRIPT
-
-            target_id = self._session.agent_focus_target_id if self._session else None
-            if not target_id:
-                return False
-            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
-            result = await cdp_session.cdp_client.send.Runtime.evaluate(
-                params={"expression": CAPTCHA_WIDGET_PRESENT_SCRIPT, "returnByValue": True},
-                session_id=cdp_session.session_id,
-            )
-            value = (result or {}).get("result", {}).get("value")
-            return value is True
-        except Exception:
-            return False
 
     def start_captcha_telemetry_indicator(
         self,
@@ -2599,12 +2627,17 @@ class DOMService:
         through browser-use's own reconnect and retries once.
         """
         session = self._session
+        # Set by record_browser_use_dom_build_timing() only when this read builds a DOM.
+        session._rose_dom_build_timing_ms = None
+        self.last_dom_build_timing_ms = None
         try:
-            return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+            state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
         except Exception:
             if session.is_cdp_connected or not await self._restore_cdp_connection(session):
                 raise
-        return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+            state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
+        self.last_dom_build_timing_ms = session._rose_dom_build_timing_ms
+        return state
 
     async def _restore_cdp_connection(self, session: Any) -> bool:
         """Wait for or start browser-use's reconnect; True once the socket is open.
@@ -2619,6 +2652,7 @@ class DOMService:
             f"reconnect_pending={session._reconnect_pending}"
         )
         started_here = False
+        ended_stale_reader = False
         deadline = time.monotonic() + session.RECONNECT_WAIT_TIMEOUT
         while not session.is_cdp_connected and time.monotonic() < deadline:
             if session.is_reconnecting:
@@ -2631,8 +2665,26 @@ class DOMService:
                 await asyncio.sleep(0.05)
             if session.is_cdp_connected or session.is_reconnecting:
                 continue
+            reader = getattr(session._cdp_client_root, "_message_handler_task", None)
+            if not ended_stale_reader and reader is not None and not reader.done():
+                # The closed client's reader is still running (a backlog under loop lag),
+                # so browser-use's drop callback has not fired. browser-use's reconnect
+                # would cancel this reader inside its reconnect window, where that
+                # callback records a pending reconnect; every later cycle then stops
+                # the next healthy client the same way (H-47: 470 reconnects). Ending
+                # the reader first lets the callback start browser-use's one reconnect.
+                ended_stale_reader = True
+                logger.warning(f"CDP socket is down but its reader is still running ({flags}); ending it")
+                reader.cancel()
+                await asyncio.wait({reader}, timeout=max(0.0, deadline - time.monotonic()))
+                continue
             if started_here:
                 break
+            # A reader that finished just now has its drop callback queued but not run;
+            # starting a reconnect first would let that callback re-arm a pending one.
+            await asyncio.sleep(0)
+            if session.is_cdp_connected or session.is_reconnecting or session._reconnect_pending:
+                continue
             started_here = True
             logger.warning(f"CDP socket is down and no reconnect is running ({flags}); starting browser-use reconnect")
             await session._auto_reconnect()

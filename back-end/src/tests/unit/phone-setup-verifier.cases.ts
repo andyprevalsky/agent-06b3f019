@@ -66,6 +66,13 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
     assert.equal(deadline, 60000);
     assert.equal(captured?.messages[0].content, PHONE_SETUP_PURPOSE);
     assert.equal(captured?.route_key, input.agentId);
+    // Archived in the agent tree's root bundle under the ledger's call site;
+    // the root is resolved off the call path from archive_scope.
+    assert.deepEqual(captured?.dump_context, {
+      call_site: 'phone_setup_identity',
+      agent_id: input.agentId,
+      archive_scope: { agentId: input.agentId },
+    });
     assert.deepEqual(JSON.parse(captured!.messages[1].content as string), {
       expectedAppleIdentity: input.expectedAppleIdentity,
       observations: input.evidence,
@@ -102,6 +109,8 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
           : {}),
       });
       assert.equal(check.status, 'confirmed');
+      assert.equal(captured?.dump_context?.call_site, `phone_setup_${verificationTarget}`);
+      assert.deepEqual(captured?.dump_context?.archive_scope, { agentId: input.agentId });
       assert.equal(captured?.messages[0].content, settingsPurpose(verificationTarget));
       assert.deepEqual(JSON.parse(captured!.messages[1].content as string), {
         expectedAppleIdentity: input.expectedAppleIdentity,
@@ -124,7 +133,40 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
           )
         );
         assert.ok(settingsPurpose(verificationTarget).includes('future Google sign-in challenge'));
+        assert.ok(
+          settingsPurpose(verificationTarget).includes('per-account Settings screen inside Gmail')
+        );
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'A Google Account page alone does not identify the Gmail app'
+          )
+        );
       }
+      if (verificationTarget === 'imessage' || verificationTarget === 'receive_address')
+        assert.ok(settingsPurpose(verificationTarget).includes('Caller ID'));
+      if (verificationTarget === 'receive_address')
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'inside the You Can Receive iMessages to and Reply From list'
+          )
+        );
+      if (verificationTarget === 'imessage')
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'on that Send and Receive screen clearly naming a different identity is disabled'
+          )
+        );
+      if (verificationTarget === 'imessage')
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'unless any observation shows Waiting for activation'
+          )
+        );
+      assert.ok(
+        settingsPurpose(verificationTarget).includes(
+          'counts as explicit selection only for that row; switches have no text'
+        )
+      );
       if (verificationTarget === 'google_passcode_exception') {
         assert.ok(settingsPurpose(verificationTarget).includes('account menu alone'));
         assert.ok(settingsPurpose(verificationTarget).includes('blocking Device Policy Alert'));
@@ -139,6 +181,11 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
         assert.ok(
           settingsPurpose(verificationTarget).includes(
             'Never infer complete contact-history synchronization'
+          )
+        );
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'services line explicitly listing Contacts establishes iCloud Contacts synchronization On'
           )
         );
       }

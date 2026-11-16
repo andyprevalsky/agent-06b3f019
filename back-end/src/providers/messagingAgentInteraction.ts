@@ -1,32 +1,36 @@
 /**
- * Which agent trees the SMS/WhatsApp agent (the messaging supervisor) has
- * interacted with.
+ * Which agent trees the user touched from the phone: the SMS/WhatsApp agent
+ * (the messaging supervisor) acted on them in response to the user's message.
  *
- * Completion notices on SMS/WhatsApp go only to those trees (Andy, 2026-11-12:
- * "Only show completed agents notif if the sms / whatsapp agent has interacted
- * w that agent"). An interaction is one of:
+ * Kickoff and completion notices on SMS/WhatsApp go only to those trees (Andy,
+ * 2026-11-12: "Only show completed agents notif if the sms / whatsapp agent has
+ * interacted w that agent"; 2026-11-14: "only trigger messaging notifs when an
+ * agent has been touched by the messaging client" and "a touch should be if I
+ * respond and we reply"). A touch is one of:
  *
- *   created   Agent.source SMS | WHATSAPP            (commitStartNewAgent)
- *   messaged  reply_to_agent / increase_budget commit (marker below)
- *   relayed   a question, approval, sign-in, AgentCard setup or budget-limit
- *             update delivered on the messaging thread (marker below)
+ *   created   Agent.source SMS | WHATSAPP   (commitStartNewAgent)
+ *   replied   reply_to_agent commit: an answer, approval or rejection (marker below)
+ *   budget    increase_budget commit (marker below)
  *
- * The kickoff receipt ("I'm on it") is deliberately NOT an interaction: every
- * root agent sends one, so counting it would keep texting completions for
- * agents started on the web.
+ * Relays are NOT touches: a question, approval, sign-in, AgentCard setup or
+ * budget-limit notice delivered to the phone is something the agent sent, not
+ * something the user did. The user's answer to one is a reply_to_agent touch.
+ * Neither is the kickoff receipt ("I'm on it"); it is itself gated on a touch.
+ * kill_agent deletes the agent, and a deleted agent sends nothing.
  *
- *   supervisor commit / relay delivered
- *        │  recordMessagingAgentInteraction(agentId)
+ *   supervisor reply_to_agent / increase_budget commit
+ *        │  recordMessagingAgentInteraction(agentId, kind)
  *        ▼
  *   ToolSideEffect "messaging-agent.interaction:<rootId>"  (one row per tree)
  *        ▲
  *        │  hasMessagingAgentInteraction(root)  ── unique-key lookup
- *   completion notify (send-sms dispatchCompletionOnce)
+ *   kickoff + completion notify (send-sms dispatchNotification)
  *
- * One row per root keeps the completion check a unique-key lookup however large
- * the tree is. Only when that row is missing (untouched agents, or replies posted
- * before this marker existed) does it fall back to the root's own
- * `sms_supervisor` USER message, a scan bounded by that one agent's messages.
+ * One row per root keeps the check a unique-key lookup however large the tree
+ * is. Rows written before 2026-11-14 may carry a relay kind; those do not count,
+ * and the next touch overwrites them. Only when no touch row exists does the
+ * check fall back to the root's own `sms_supervisor` USER message, a scan
+ * bounded by that one agent's messages.
  */
 
 import { prisma } from './database';
@@ -42,14 +46,13 @@ export const SMS_SUPERVISOR_MESSAGE_SOURCE = 'sms_supervisor';
 /** Bound on the parent walk for rows whose busId is missing (spawn depth is far lower). */
 const MAX_ROOT_WALK = 64;
 
-export type MessagingAgentInteractionKind =
-  | 'reply_to_agent'
-  | 'increase_budget'
-  | 'planner_message'
-  | 'write_lock'
-  | 'auth_assistance'
-  | 'agentcard_setup'
-  | 'cost_limit';
+const TOUCH_KINDS = ['reply_to_agent', 'increase_budget'] as const;
+
+export type MessagingAgentInteractionKind = (typeof TOUCH_KINDS)[number];
+
+function isTouchKind(kind: unknown): boolean {
+  return TOUCH_KINDS.some((touch) => touch === kind);
+}
 
 export function messagingAgentInteractionKey(rootAgentId: string): string {
   return `${MESSAGING_AGENT_INTERACTION_OPERATION_TYPE}:${rootAgentId}`;
@@ -83,9 +86,9 @@ async function resolveRootAgentId(agentId: string): Promise<string | null> {
 }
 
 /**
- * Durably mark the agent's tree as one the messaging agent interacted with.
- * Idempotent (first interaction wins). Best-effort: the reply or relay has
- * already happened, so a marker failure is logged and never thrown.
+ * Durably mark the agent's tree as touched from the phone. Idempotent: the
+ * latest touch overwrites the row, replacing any legacy relay kind. Best-effort:
+ * the reply has already happened, so a marker failure is logged, never thrown.
  */
 export async function recordMessagingAgentInteraction(
   agentId: string,
@@ -94,16 +97,17 @@ export async function recordMessagingAgentInteraction(
   try {
     const rootAgentId = await resolveRootAgentId(agentId);
     if (rootAgentId === null) return;
-    await prisma.toolSideEffect.createMany({
-      data: [
-        {
-          operationKey: messagingAgentInteractionKey(rootAgentId),
-          operationType: MESSAGING_AGENT_INTERACTION_OPERATION_TYPE,
-          status: 'SUCCEEDED',
-          request: { agent_id: agentId, kind },
-        },
-      ],
-      skipDuplicates: true,
+    const operationKey = messagingAgentInteractionKey(rootAgentId);
+    const request = { agent_id: agentId, kind };
+    await prisma.toolSideEffect.upsert({
+      where: { operationKey },
+      create: {
+        operationKey,
+        operationType: MESSAGING_AGENT_INTERACTION_OPERATION_TYPE,
+        status: 'SUCCEEDED',
+        request,
+      },
+      update: { request },
     });
   } catch (error) {
     log.error('Failed to record messaging-agent interaction', {
@@ -114,7 +118,7 @@ export async function recordMessagingAgentInteraction(
   }
 }
 
-/** Whether the SMS/WhatsApp agent created, messaged or relayed for this root. */
+/** Whether the SMS/WhatsApp agent created, replied to or raised the budget of this root. */
 export async function hasMessagingAgentInteraction(agent: {
   id: string;
   /** Agent.source (AgentSource enum value). */
@@ -123,9 +127,18 @@ export async function hasMessagingAgentInteraction(agent: {
   if (isMessagingSource(agent.source)) return true;
   const marker = await prisma.toolSideEffect.findUnique({
     where: { operationKey: messagingAgentInteractionKey(agent.id) },
-    select: { id: true },
+    select: { request: true },
   });
-  if (marker !== null) return true;
+  const request = marker?.request;
+  if (
+    request !== null &&
+    request !== undefined &&
+    typeof request === 'object' &&
+    !Array.isArray(request) &&
+    isTouchKind(request.kind)
+  ) {
+    return true;
+  }
   const reply = await prisma.message.findFirst({
     where: {
       agentId: agent.id,

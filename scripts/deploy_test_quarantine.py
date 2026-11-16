@@ -24,6 +24,7 @@ import hashlib
 import ast
 from datetime import datetime, timezone
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,127 @@ PRIORITY = {'FAIL': 0, 'UNVERIFIED': 0, FLAKY: 1, QUARANTINED_FAIL: 2, QUARANTIN
 SCAN_EXCLUDE = ('claude-code-src/', 'openclaw/', 'hermes-agent/', 'codex/', 'prime-agent/', 'kimi-code/', 'openworker/',
                 'node_modules/', 'scripts/lib/test_quarantine.py')
 BOXES_THREAD = re.compile(r'https://boxes\.dev/thread/[A-Za-z0-9_-]+')
+
+USER_DEPLOY_KIND = 'user-deploy-quarantine-v1'
+USER_DEPLOY_DISPOSITION = 'USER_DEPLOY_QUARANTINE'
+USER_DEPLOY_CASE = 'test-mass-agent-run-0'
+# Last frozen pre-enforcement source; only its authenticated ancestors have no policy projection.
+USER_DEPLOY_BEFORE_HEAD = '4185ac910f39babfbf28d0ed531f1f0b337bbaa3'
+USER_DEPLOY_REASON = ('User-directed indefinite exclusion from all deploys (2026-11-10, PR1682): '
+                     'flaky mass-agent test. Keep explicit benchmark execution and historical '
+                     'failures; do not count this omission as PASS.')
+USER_DEPLOY_INSTRUCTION = {'role': 'user', 'turn': '01a1c787-5a6e-7c12-a3be-4b5ac96b5d38',
+                           'thread': 'ph78kfk10r8j8fpxxcp5tc43xd8h2x6q',
+                           'message_time_ms': 1794348964530}
+
+
+def _deploy_catalog(root: Path, historical_head: str | None = None) -> tuple[bytes, list]:
+    path = root / CATALOG
+    if historical_head is None:
+        raw = path.read_bytes() if path.is_file() else b'[]'
+    else:
+        if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', historical_head):
+            raise ValueError('invalid historical deploy quarantine source')
+        try:
+            raw = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                           historical_head + ':' + CATALOG.as_posix()], stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            raise ValueError('historical deploy quarantine catalog unavailable') from None
+    rows = json.loads(raw)
+    if (not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get('name'), str)
+                                        or not row['name'] for row in rows)
+            or len({row['name'] for row in rows}) != len(rows)):
+        raise ValueError('deploy quarantine catalog needs unique named tasks')
+    return raw, rows
+
+
+def catalog_deploy_quarantines(root: Path, names: list[str] | None = None, *,
+                              historical_head: str | None = None) -> dict[str, str]:
+    """Deploy-only selection policy; ordinary failure quarantines still execute."""
+    _raw, rows = _deploy_catalog(root, historical_head)
+    out = {}
+    for row in rows:
+        if 'deploy_quarantine' not in row:
+            continue
+        reason = row['deploy_quarantine']
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('deploy_quarantine must be a nonempty reason string')
+        if names is None or row['name'] in names:
+            out[row['name']] = reason
+    return out
+
+
+def user_deploy_exclusions(root: Path, source: dict, gate: dict, input_fingerprint: str,
+                          environment: str, *, historical_head: str | None = None) -> dict[str, dict]:
+    """The verified named user instruction qualifies selection, never test execution."""
+    if USER_DEPLOY_CASE not in gate.get('checks', []):
+        return {}
+    if gate.get('name') != 'smoke' or gate.get('category') != 'smoke' or gate.get('native_cloud') is not True:
+        raise ValueError('user deploy quarantine requires its exact native smoke gate')
+    if (not isinstance(source, dict) or set(source) != {'head', 'digest'}
+            or not isinstance(source['head'], str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', source['head'])):
+        raise ValueError('user deploy quarantine source identity')
+    head = historical_head or (source.get('head') if isinstance(source, dict) else None)
+    reasons = catalog_deploy_quarantines(root, [USER_DEPLOY_CASE], historical_head=head)
+    if USER_DEPLOY_CASE not in reasons and _git_ancestor(root, head, USER_DEPLOY_BEFORE_HEAD):
+        return {}  # Reading old custody/receipts is not dispatch and must not acquire a new qualification.
+    if reasons.get(USER_DEPLOY_CASE) != USER_DEPLOY_REASON:
+        raise ValueError('named user deploy quarantine marker/authority missing or changed')
+    inventory = gate.get('deploy_quarantine_inventory')
+    if (inventory != {'kind': 'retained-user-deploy-quarantine-inventory-v1',
+                      'checks': {USER_DEPLOY_CASE: USER_DEPLOY_REASON}, 'executed': False, 'credit_granted': False}
+            or inventory.get('executed') is not False or inventory.get('credit_granted') is not False):
+        raise ValueError('retained user deploy quarantine inventory changed')
+    raw, _rows = _deploy_catalog(root, head)
+    if (not isinstance(source, dict) or set(source) != {'head', 'digest'}
+            or historical_head is not None and historical_head != source['head']
+            or any(not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
+                   for v in (source['digest'], input_fingerprint, environment))
+            or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', str(source['head']))):
+        raise ValueError('user deploy quarantine source/input/environment binding')
+    return {USER_DEPLOY_CASE: {'kind': USER_DEPLOY_KIND, 'disposition': USER_DEPLOY_DISPOSITION,
+            'source': dict(source), 'gate': gate['name'], 'check': USER_DEPLOY_CASE,
+            'input_fingerprint': input_fingerprint, 'environment': environment,
+            'catalog_sha256': hashlib.sha256(raw).hexdigest(), 'reason': USER_DEPLOY_REASON,
+            'instruction': dict(USER_DEPLOY_INSTRUCTION),
+            'credit': {'test_execution': False, 'assertions': False, 'cleanup': False, 'financial_release': False}}}
+
+
+def validate_user_deploy_receipt(root: Path, gate: dict, receipt: dict, request: dict) -> dict[str, dict]:
+    """Authenticate only policy actually recorded on this immutable historical execution."""
+    listed = {name: value for name, value in request.get('skips', {}).items()
+              if isinstance(value, dict) and value.get('kind') == USER_DEPLOY_KIND}
+    if USER_DEPLOY_CASE not in gate.get('checks', []):
+        if listed or receipt.get('user_deploy_quarantine') or receipt.get('user_deploy_quarantine_execution'):
+            raise ValueError('user deploy quarantine outside historical gate inventory')
+        return {}
+    reasons = catalog_deploy_quarantines(root, [USER_DEPLOY_CASE], historical_head=receipt['source']['head'])
+    if USER_DEPLOY_CASE not in reasons:
+        if not _git_ancestor(root, receipt['source']['head'], USER_DEPLOY_BEFORE_HEAD):
+            raise ValueError('user deploy quarantine missing after enforcement source')
+        if receipt.get('user_deploy_quarantine') or receipt.get('user_deploy_quarantine_execution'):
+            raise ValueError('unbound user deploy quarantine receipt')
+        if listed:
+            raise ValueError('user deploy quarantine absent from historical catalog')
+        return {}
+    binding = receipt.get('execution_binding', {})
+    expected = user_deploy_exclusions(root, receipt['source'], gate, binding.get('input_fingerprint'),
+                                     binding.get('environment'), historical_head=receipt['source']['head'])
+    for policy in (listed, receipt.get('user_deploy_quarantine', {})):
+        if not isinstance(policy, dict):
+            raise ValueError('invalid user deploy quarantine receipt')
+        for value in policy.values():
+            credit = value.get('credit') if isinstance(value, dict) else None
+            if (not isinstance(credit, dict)
+                    or set(credit) != {'test_execution', 'assertions', 'cleanup', 'financial_release'}
+                    or any(type(flag) is not bool or flag is not False for flag in credit.values())):
+                raise ValueError('user deploy quarantine requires explicit false credits')
+    if (listed != expected or receipt.get('user_deploy_quarantine') != expected
+            or receipt.get('user_deploy_quarantine_execution') != dict.fromkeys(expected, 'UNVERIFIED')
+            or any(receipt.get('case_complete', {}).get(name) is not False
+                   or receipt.get('cases', {}).get(name) != 'SKIP' for name in expected)):
+        raise ValueError('user deploy quarantine receipt/input/credit changed')
+    return expected
 
 
 # --- progress rows -------------------------------------------------------------------------
@@ -505,7 +627,9 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
             **({'case': entry['case']} if entry.get('case') is not None else {})}
 
 
-_DOMAIN_SINGLE_FAILURE = re.compile(r'\(\d+ passed, 1 failed; 1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
+# run_blackbox_tests.py prefixes "<n> passed, <m> failed; " only when the domain returns counts;
+# a domain returning a bare bool reports "(1 failed case(s): ...)" with no counts.
+_DOMAIN_SINGLE_FAILURE = re.compile(r'\((?:\d+ passed, 1 failed; )?1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
 
 
 def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) -> list[dict]:

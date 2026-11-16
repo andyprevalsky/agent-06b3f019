@@ -17,7 +17,11 @@ import {
   accountUsageView,
   listComputeIntegrationUsage,
 } from '../../providers/computeSubscriptionUsage';
-import { scheduleClaudeUsageRefresh, usageNeedsRefresh } from '../../providers/computeUsageRefresh';
+import {
+  scheduleClaudeUsageRefresh,
+  scheduleCodexUsageRefresh,
+  usageNeedsRefresh,
+} from '../../providers/computeUsageRefresh';
 import { reconcileConnectionStatesFromIntegrations } from '../../providers/integrationConnectionSync';
 import { createLogger } from '../../providers/logger';
 import {
@@ -159,10 +163,11 @@ const PROVIDER_INTEGRATION: Record<string, string> = { claude: 'claude_code', co
  * carries the usage last observed for the Integration row it mints into, its
  * cooldown (reason + whether the provider gave the reset) and nextResetAt.
  *
- * A Claude row with no usage, stale usage or a non-authoritative cooldown gets
- * a background usage refresh (computeUsageRefresh: the usage endpoint, or a
- * one-token quota check for inference-only logins): never awaited, so this
- * response is never delayed; its result shows on the next list.
+ * A Claude or Codex row with no usage, stale usage or a non-authoritative
+ * cooldown gets a background usage refresh (computeUsageRefresh: the Claude
+ * usage endpoint, or a one-request quota check for inference-only Claude logins
+ * and every Codex login): never awaited, so this response is never delayed;
+ * its result shows on the next list.
  */
 export async function listConnectedAccounts(
   userId: string,
@@ -177,8 +182,9 @@ export async function listConnectedAccounts(
   const now = new Date();
   return rows.map((r) => {
     const usage = usageByAccount.get(`${PROVIDER_INTEGRATION[r.provider] ?? ''}:${r.accountId}`);
-    if (usage !== undefined && usage.name === 'claude_code' && usageNeedsRefresh(usage, now)) {
-      scheduleClaudeUsageRefresh(usage.id);
+    if (usage !== undefined && usageNeedsRefresh(usage, now)) {
+      if (usage.name === 'claude_code') scheduleClaudeUsageRefresh(usage.id);
+      if (usage.name === 'gpt_code') scheduleCodexUsageRefresh(usage.id);
     }
     return {
       provider: r.provider,

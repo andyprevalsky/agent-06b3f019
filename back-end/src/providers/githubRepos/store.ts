@@ -370,6 +370,29 @@ export async function importLegacyProjectConnections(
   return missing.length;
 }
 
+/** The connections behind exact (owner, canonical ref) pairs, in one indexed read. */
+export async function findGithubRepoConnectionsByOwner(
+  pairs: Array<{ userId: string; canonicalRef: string }>
+): Promise<GithubRepoConnectionRecord[]> {
+  if (pairs.length === 0) return [];
+  return prisma.githubRepoConnection.findMany({
+    where: { OR: pairs.map(({ userId, canonicalRef }) => ({ userId, canonicalRef })) },
+    take: GITHUB_REPO_LIST_LIMIT,
+  });
+}
+
+/** `${userId} ${repoUrl}` for every pair that holds a GithubRepoAccess clone grant. */
+export async function findGrantedRepoPairs(
+  pairs: Array<{ userId: string; repoUrl: string }>
+): Promise<Set<string>> {
+  if (pairs.length === 0) return new Set();
+  const grants = await prisma.githubRepoAccess.findMany({
+    where: { OR: pairs.map(({ userId, repoUrl }) => ({ userId, repoUrl })) },
+    select: { userId: true, repoUrl: true },
+  });
+  return new Set(grants.map((grant) => `${grant.userId} ${grant.repoUrl}`));
+}
+
 /** Canonical refs among `refs` the user has an active connection for. */
 export async function findConnectedRefs(userId: string, refs: string[]): Promise<Set<string>> {
   if (refs.length === 0) return new Set();

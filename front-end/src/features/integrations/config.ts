@@ -19,7 +19,7 @@ export const meetingNotesReturnKey = (provider: MeetingNotesProvider) =>
   `rose.${provider}.returnPath`;
 
 export const INTEGRATION_CATALOG = {
-  iphone: { title: 'Cloud iPhone', aliases: 'ios mobile phone apps device' },
+  iphone: { title: 'Phone', aliases: 'cloud iphone ios android mobile phone apps device' },
   browsers: {
     title: 'Browser Cookies',
     aliases:
@@ -58,10 +58,21 @@ export const INTEGRATION_CATALOG = {
     aliases:
       'projects github gh git repository repositories repo code import computer local env dotenv secrets folders',
   },
-  pebble: { title: 'Other', aliases: 'pebble index 01 ring wearable audio recording webhook' },
+  pebble: {
+    title: 'Wearables',
+    aliases: 'pebble index 01 ring wearable wearables audio recording webhook other',
+  },
+  other: {
+    title: 'Other',
+    aliases: 'other request new integration missing not listed suggest add',
+  },
   clis: {
     title: 'CLIs',
-    aliases: 'cli command line terminal mcp tools github gh vercel fly stripe supabase',
+    aliases: 'cli command line terminal tools github gh vercel fly stripe supabase',
+  },
+  mcp: {
+    title: 'MCP servers',
+    aliases: 'mcp model context protocol tools context7 server servers remote oauth api key',
   },
 } as const satisfies Record<IntegrationCatalogKey, { title: string; aliases: string }>;
 
@@ -114,6 +125,14 @@ export const PLAID_OAUTH_REDIRECT_PATH = '/plaid-oauth-redirect';
 export const GRANOLA_CALLBACK_PATH = meetingNotesCallbackPath('granola');
 export const GRANOLA_RETURN_KEY = meetingNotesReturnKey('granola');
 export const GRANOLA_PUBLIC_ORIGIN = MEETING_NOTES_PUBLIC_ORIGIN;
+
+/**
+ * Rose page an MCP server's OAuth sign-in returns the browser to. It posts the
+ * code with the signed-in user's own session, then goes back to the page that
+ * started sign-in (remembered under MCP_RETURN_KEY).
+ */
+export const MCP_CALLBACK_PATH = '/integrations/mcp/callback';
+export const MCP_RETURN_KEY = 'rose.mcp.returnPath';
 
 /** The backend redirects here after Google's consent, reopening the desktop app. */
 export const DESKTOP_OAUTH_RETURN_URL = 'roselabs://oauth-complete';

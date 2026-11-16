@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { refreshTilionConnectUrl } from '../../providers/browser/tilion';
 import { withTimeout } from '../../providers/steel/injectionTimeouts';
+import { retryWithBackoff } from '../../providers/retry';
 import { rootBrowserAgentId } from '../../providers/browser/worldStateMerge';
 import { SessionNotFoundError } from './service.local-storage';
 import * as repo from './repo.navigation';
@@ -127,20 +128,36 @@ export async function navigateBrowser(taskId: string, action: NavigationAction, 
   return waitForNavigation(taskId, request, userId);
 }
 
+const NAVIGATION_RECEIPT_POLL_MS = 100;
+
 async function waitForNavigation(taskId: string, request: NavigationCommand, userId?: string) {
   // Poll a durable command receipt; this is not a retry of browser side effects.
-  // eslint-disable-next-line no-restricted-syntax
-  while (Date.now() < request.deadline) {
-    const current = await requireSession(taskId, userId);
-    const receipt = command(current.navigationCommand);
-    if (current.sessionId !== request.sessionId || receipt?.id !== request.id) {
-      throw new BrowserNavigationError('Browser session changed during navigation');
+  // Each read happens only before the deadline; the attempt cap is a safety
+  // bound, since every poll waits at least NAVIGATION_RECEIPT_POLL_MS.
+  const polls =
+    Math.ceil(Math.max(0, request.deadline - Date.now()) / NAVIGATION_RECEIPT_POLL_MS) + 1;
+  const receipt = await retryWithBackoff(
+    async () => {
+      if (Date.now() >= request.deadline) return null;
+      const current = await requireSession(taskId, userId);
+      const observed = command(current.navigationCommand);
+      if (current.sessionId !== request.sessionId || observed?.id !== request.id) {
+        throw new BrowserNavigationError('Browser session changed during navigation');
+      }
+      return observed;
+    },
+    {
+      maxRetries: polls,
+      fixedDelays: Array<number>(polls).fill(NAVIGATION_RECEIPT_POLL_MS),
+      isRetryable: () => false,
+      shouldRetryResult: (observed) =>
+        observed !== null && observed.state !== 'done' && observed.state !== 'error',
+      component: 'BrowserNavigationReceipt',
     }
-    if (receipt.state === 'done') return { url: receipt.url ?? null };
-    if (receipt.state === 'error')
-      throw new BrowserNavigationError(receipt.error ?? 'Browser navigation failed', 502);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  );
+  if (receipt?.state === 'done') return { url: receipt.url ?? null };
+  if (receipt?.state === 'error')
+    throw new BrowserNavigationError(receipt.error ?? 'Browser navigation failed', 502);
   throw new BrowserNavigationError(
     'Browser worker did not complete navigation before the deadline',
     504

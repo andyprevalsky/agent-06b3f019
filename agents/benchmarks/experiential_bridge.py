@@ -123,6 +123,11 @@ def build_provider_bridge(
             for value in (session_id, prediction_id)
         ):
             raise HTTPException(422, "Native completion requires exact session/prediction identity")
+        archive_root = payload.get("archive_root_agent_id")
+        if archive_root is not None and (
+            not isinstance(archive_root, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", archive_root)
+        ):
+            raise HTTPException(422, "Invalid archive root identity")
         capture_token = None
         try:
             if capture_root is not None:
@@ -140,6 +145,7 @@ def build_provider_bridge(
                 messages[0]["content"],
                 [Message(role=m["role"], content=m["content"]) for m in messages[1:]],
                 max_tokens=16384,
+                archive_root_agent_id=archive_root,
             )
         except _WMHInvalidPrediction as exc:
             # Loopback-only evidence for the native private, redacted record.

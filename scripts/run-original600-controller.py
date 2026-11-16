@@ -2694,10 +2694,14 @@ def main():
     # falling through to CLOUDBENCH_BROWSER_PROVIDER or the repo back-end/.env.
     browser_provider = (capacity['dotenv_value'](Path(args.backend_env), 'BROWSER_PROVIDER')
                         or 'unset-in-backend-env')
+    # A measured per-group demand profile applies only when every manifest task is in
+    # its catalog group (as for fleets and campaigns); the original manifest keeps global peaks.
+    selection = None if manifest['original'] else json.loads(runner['read'](args.tasks))
     try:
-        refused = capacity['check'](copies, browser_provider=browser_provider)
+        refused = capacity['check'](copies, browser_provider=browser_provider, tasks=selection)
         registry = capacity['for_browser_provider'](
-            capacity['load_registry'](), capacity['resolve_browser_provider'](browser_provider))
+            capacity['for_selection'](capacity['load_registry'](), selection),
+            capacity['resolve_browser_provider'](browser_provider))
     except capacity['RegistryError'] as error:
         raise ValueError(str(error)) from None
     if refused:

@@ -47,6 +47,36 @@ def test_sequential_domains_do_not_share_structlog_context(tmp_path: Path):
     assert structlog.contextvars.get_contextvars() == {}
 
 
+def test_sequential_domains_in_one_task_do_not_share_agent_speed(tmp_path: Path):
+    """run_tests awaits every domain in one task, as here. A browser handler's
+    unbalanced bind_agent_speed (safe in production: Temporal runs each activity
+    in its own task) must not reach a later suite: rose then saw "standard"
+    and skipped the agent-row speed lookup, so tiers were [None, None, None]."""
+    runner = load_runner()
+    binding_domain = tmp_path / "binding_speed.blackbox.py"
+    binding_domain.write_text(
+        "from providers.rose.speed import bind_agent_speed\n"
+        "async def run_all_tests():\n"
+        "    bind_agent_speed('fast')\n"
+        "    return True\n"
+    )
+    observing_domain = tmp_path / "observing_speed.blackbox.py"
+    observing_domain.write_text(
+        "from providers.rose.speed import current_agent_speed\n"
+        "async def run_all_tests():\n"
+        "    return current_agent_speed() is None\n"
+    )
+
+    async def run_sequentially():
+        return [
+            await runner.run_single_domain(binding_domain, "binding-speed"),
+            await runner.run_single_domain(observing_domain, "observing-speed"),
+        ]
+
+    results = asyncio.run(run_sequentially())
+    assert [passed for _, passed, _ in results] == [True, True], results
+
+
 def test_sequential_domains_do_not_share_httpx_mock_handler(tmp_path: Path):
     """A suite's leftover mock must not answer a later suite's loopback requests
     (it returned {} for real Chromium's /json/version)."""
@@ -244,6 +274,33 @@ def test_domains_and_concurrency_reach_the_suite_runner(monkeypatch):
         _run_main(load_runner(), monkeypatch, ["workflow", "--concurrency", "4", "web-search"], started)
     assert exited.value.code == 0
     assert started == [(["workflow", "web-search"], 4)]
+
+
+@pytest.mark.parametrize("suite_exit_code", [0, 1])
+def test_runner_exit_waits_for_native_sdk_callback_still_in_python(monkeypatch, suite_exit_code):
+    """A Tokio thread settling a WorkflowEnvironment/Worker shutdown future can still be
+    in Python when the suites return; exiting then aborts the process (SIGABRT
+    PyGILState_Release while finalizing) after every case passed."""
+    from tests.unit.test_worker_observability_shutdown import _pthread, _run_python_on_native_thread
+
+    runner = load_runner()
+    native: list[tuple] = []
+
+    async def suites_leaving_a_native_callback(domain_filters, concurrency):
+        native.append(_run_python_on_native_thread(0.3))
+        return suite_exit_code
+
+    monkeypatch.setattr(runner, "run_tests", suites_leaving_a_native_callback)
+    monkeypatch.setattr(sys, "argv", ["run_blackbox_tests.py", "workflow"])
+    try:
+        with pytest.raises(SystemExit) as exited:
+            runner.main()
+        finished = native[0][2]
+        assert finished.is_set(), "runner exited while a native SDK callback was still executing Python"
+        assert exited.value.code == suite_exit_code
+    finally:
+        for thread, _callback, _finished in native:
+            assert _pthread.pthread_join(thread, None) == 0
 
 
 def test_failed_domain_names_its_failing_cases_and_first_error(tmp_path: Path):

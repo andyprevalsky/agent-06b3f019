@@ -127,6 +127,8 @@ from .config import (
     BROWSER_DRAIN_YIELD_STATUS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_SESSION_EXPIRING,
+    BROWSER_PROVIDER_SESSION_LOST,
+    BROWSER_PROVIDER_SESSION_MAX_RECOVERIES,
     BROWSER_SESSION_MIN_REMAINING_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
@@ -280,6 +282,32 @@ logger = structlog.get_logger()
 
 # Resume marker for a sign-in-help request the user declined.
 AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
+# Typed one-tap owner action on a native phone code request (no user text).
+AUTH_ASSISTANCE_RESEND_CODE_RESPONSE = "__AUTH_ASSISTANCE_RESEND_CODE__"
+AUTH_RESEND_CODE_RESULT = {
+    "success": False,
+    "status": "resend_code_requested",
+    "user_action": "resend_code",
+    "message": (
+        "The user did not receive the code and tapped Resend code; no code was entered. "
+        "Observe the phone, request a new code with the provider's own control (for example "
+        "Resend code, or Try another way then a text message), then request the user's help "
+        "for the new code again."
+    ),
+}
+
+
+def auth_assistance_declined_message(auth_realm: Optional[str]) -> str:
+    """Facts only: the exact request the user declined, then what the browser did.
+
+    The quoted question is the one the backend showed the user
+    (back-end/src/domains/auth-assistance/repo.ts, repo.nativeWrite.ts).
+    """
+    if auth_realm == "iphone":
+        return 'The user declined the request "Complete the protected step on your iPhone". The browser task stopped.'
+    return f'The user declined the request "Sign in to {auth_realm or "the site"}". The browser task stopped.'
+
+
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
@@ -4601,12 +4629,20 @@ async def _hard_recover_frozen_renderer_page(
     fallback_url: str = "",
     timeout_s: float = 20.0,
 ) -> tuple[Optional[Any], List[str]]:
-    """Open a fresh page, then kill the frozen target via browser-process CDP.
+    """Replace a frozen page inside its own BrowserContext via browser-process CDP.
 
     When classify_evaluate_cdp_stall reports renderer_main_thread_blocked, the
-    page-target CDP is dead but Browser.getVersion still works. Creating the
-    replacement page *before* closing the hung target is required: closing the
-    last page target via CDP can tear down the Playwright BrowserContext.
+    page-target CDP is dead but Browser.getVersion still works. The replacement
+    page must stay in the frozen page's BrowserContext, which holds the
+    session's injected cookies and site storage. A fresh ``new_context()`` has
+    an empty cookie jar, so the task would resume logged out (H-63).
+
+    The blank replacement page is created *before* the hung target is closed,
+    because closing the last page target via CDP can tear down the Playwright
+    BrowserContext. The resume navigation runs after a best-effort close of the
+    hung targets (5 s per target, errors ignored). A same-site resume therefore
+    usually starts after the blocked renderer is gone, but a failed or slow
+    close does not stop the navigation, so this is not guaranteed.
     """
     actions: List[str] = []
     if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
@@ -4659,23 +4695,37 @@ async def _hard_recover_frozen_renderer_page(
                 await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
             browser_cdp = None
 
-    try:
-        # Prefer a fresh BrowserContext: under a pegged renderer,
-        # context.new_page() can fail with "Please use browser.new_context()".
-        new_context = await asyncio.wait_for(playwright_browser.new_context(), timeout=10.0)
-        new_page = await asyncio.wait_for(new_context.new_page(), timeout=10.0)
-        actions.append("new_context_page")
-    except Exception as exc:
-        actions.append(f"new_page_failed:{type(exc).__name__}")
+    async def _context_cookie_count() -> str:
         try:
-            new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
-            actions.append("new_page")
-        except Exception as exc2:
-            actions.append(f"context_new_page_failed:{type(exc2).__name__}")
-            if browser_cdp is not None:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
-            return None, actions
+            return str(len(await asyncio.wait_for(context.cookies(), timeout=3.0)))
+        except Exception:
+            return "unavailable"
+
+    cookies_before = await _context_cookie_count()
+    try:
+        new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
+        actions.append("new_page")
+    except Exception as exc:
+        actions.append(f"context_new_page_failed:{type(exc).__name__}")
+        if browser_cdp is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
+        return None, actions
+
+    if browser_cdp is not None:
+        closed = 0
+        for target_id in frozen_target_ids:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
+                    timeout=5.0,
+                )
+                closed += 1
+                actions.append(f"close_target:{target_id[:12]}")
+        if closed:
+            actions.append(f"closed_targets:{closed}")
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
 
     if resume_url.startswith(("http://", "https://")):
         try:
@@ -4695,26 +4745,13 @@ async def _hard_recover_frozen_renderer_page(
             await asyncio.wait_for(new_page.goto(resume_url), timeout=10.0)
             actions.append("goto_resume_url")
 
-    if browser_cdp is not None:
-        closed = 0
-        for target_id in frozen_target_ids:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
-                    timeout=5.0,
-                )
-                closed += 1
-                actions.append(f"close_target:{target_id[:12]}")
-        if closed:
-            actions.append(f"closed_targets:{closed}")
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
-
     if input_page is not None:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(input_page.close(), timeout=3.0)
             actions.append("close_playwright_page")
 
+    # Counts only: proves the resumed page kept the session cookie jar.
+    actions.append(f"context_cookies:{cookies_before}->{await _context_cookie_count()}")
     return new_page, actions
 
 
@@ -4842,9 +4879,10 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
         },
         (
             "Every visible item; one media image (or rendered_summary for multi-item). "
-            "Per item require title, numeric rating, review count, and a canonical "
-            "product-detail URL already in the trajectory — never cart/checkout/order/return URLs. "
-            "Include price, qty, description (<80 chars), seller, shipping, totals, payment, address when visible."
+            "Per item require a title; include its own product page URL already in the trajectory when it has "
+            "one — never cart/checkout/order/return URLs. "
+            "Include price, qty, description (<80 chars), rating, review count, seller, shipping, totals, payment, "
+            "address when visible."
         ),
     ),
     (
@@ -7035,6 +7073,7 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "schema_user_instruction_count",
     "browser_output_schema",
     "agent_inbox_state",
+    "provider_session_recoveries",
 )
 
 
@@ -7078,6 +7117,34 @@ def _session_expiring(deadline: Optional[Tuple[str, float]], session_id: Optiona
     return deadline[1] - time.monotonic() < BROWSER_SESSION_MIN_REMAINING_SECONDS
 
 
+async def _provider_lost_browser_session(
+    config: Any, task_id: Optional[str], session_id: Optional[str], playwright_browser: Any
+) -> bool:
+    """The step's CDP client is gone and the backend no longer offers this exact native.
+
+    Reattaching to an ended provider session can only fail, and an ERROR result
+    makes the planner spawn a second browser agent. Yielding at the step boundary
+    lets the manager restart this task on a replacement session instead.
+    """
+    is_connected = getattr(playwright_browser, "is_connected", None)
+    if not task_id or not session_id or not callable(is_connected) or is_connected() is not False:
+        return False
+    info = await fetch_session_info(config, task_id, validate_live=True, include_credentials=False)
+    # Only a provider-confirmed end (or the row it paused) counts; unknown health,
+    # an expiring session or a missing URL keep the ordinary reattach path.
+    lost = info.get("session_id") == session_id and (
+        info.get("provider_session_ended") is True or info.get("same_session_unavailable_reason") == "db_status_paused"
+    )
+    logger.warning(
+        "Browser CDP client disconnected; checked provider session",
+        task_id=task_id,
+        session_id=session_id,
+        provider_session_lost=lost,
+        reason=info.get("same_session_unavailable_reason"),
+    )
+    return lost
+
+
 def _activity_deadline_near() -> bool:
     """This attempt's StartToClose leaves less than one supervised step plus teardown."""
     if not activity.in_activity():
@@ -7107,8 +7174,13 @@ def _drain_resume_state(result: Dict[str, Any], prior_resume: Optional[Dict[str,
         "task_id": result.get("task_id"),
         "auth_realm": result.get("auth_realm"),
         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
+        "provider_session_recoveries": result.get("provider_session_recoveries", 0),
         **_payment_resume_fields(prior),
     }
+    if result.get("yield_reason") == BROWSER_PROVIDER_SESSION_LOST:
+        # The next invocation reports the replacement even when the restored
+        # checkpoint left the backend unable to prove the loss itself.
+        resume_state["resumed_after_provider_session_lost"] = True
     if prior.get("generation_yield") is False or result.get("yield_reason") == GENERATION_SUPERSEDED:
         resume_state["generation_yield"] = False
     _copy_browser_resume_continuity_fields(result, resume_state)
@@ -7213,6 +7285,36 @@ def _finalize_rejected_browser_approval(state: Dict[str, Any]) -> None:
             if isinstance(grant, dict) and is_approval_valid({key: grant}, str(approval_kind), url):
                 approvals.pop(key, None)
         container["write_lock_approvals"] = approvals
+
+
+def _finalize_auth_resend_request(state: Dict[str, Any]) -> None:
+    """Answer the pending native auth call with the owner's typed resend intent."""
+    resend = state.get("auth_user_action") or {}
+    if resend.get("action") != "resend_code":
+        return
+    call_id = resend.get("tool_call_id")
+    for message in reversed(state.get("browser_turn_messages") or []):
+        if (message.get("role") != "tool" or message.get("name") != "request_user_assistance_for_authentication"
+                or (call_id and message.get("tool_call_id") != call_id)):
+            continue
+        try:
+            result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(result, dict) or result.get("request_id") != resend.get("request_id"):
+            continue
+        if _resolve_browser_tool_result_for_resume(
+            state.get("browser_turn_messages") or [], pending_status=result.get("status"),
+            result_updates=AUTH_RESEND_CODE_RESULT, tool_call_id=message.get("tool_call_id"),
+        ):
+            break
+    else:
+        raise BrowserResumeStoreError("Resend code request has no saved matching tool result; prior context is required")
+    for entry in reversed(state.get("action_history") or []):
+        result = entry.get("result") or {}
+        if entry.get("action") == "request_user_assistance_for_authentication" and result.get("request_id") == resend.get("request_id"):
+            entry["result"] = {**result, **AUTH_RESEND_CODE_RESULT}
+            break
 
 
 def _copy_simulated_browser_resume_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
@@ -8365,6 +8467,7 @@ async def _spawn_browser_agent_activity_v3_real(
             hydrated_resume = dict(await hydrate_resume_context(agent_id=agent_id, resume_state=write_lock_resume_state))
             if hydrated_resume.get("rejected_action") or hydrated_resume.get("approval_type") == AUTH_ASSISTANCE_DECLINED:
                 _finalize_rejected_browser_approval(hydrated_resume)
+            _finalize_auth_resend_request(hydrated_resume)
         except BrowserResumeStoreError as error:
             return {"status": "paused", "success": False, "pause_error": str(error),
                     "conversation_checkpoint": "unavailable",
@@ -8498,6 +8601,7 @@ async def _spawn_browser_agent_activity_v3_real(
         state = _pause_continuity_state_without_inbox(approval_result)
         if agent_inbox is not None:
             state["agent_inbox_state"] = agent_inbox.state()
+        state["provider_session_recoveries"] = provider_session_recoveries
         return state
 
     def _pause_continuity_state_without_inbox(approval_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -8667,11 +8771,18 @@ async def _spawn_browser_agent_activity_v3_real(
                     for field in protocol_keys:
                         if field in original:
                             visible_auth[key][field] = original[field]
+                    # The backend mints the Tilion live-view token for this
+                    # handoff and re-mints it for display; like browser_url,
+                    # the persisted copy carries it redacted.
+                    if "liveViewUrl" in original:
+                        visible_auth[key]["liveViewUrl"] = redact_url_secrets(original["liveViewUrl"])
         return result
 
     browser_url = None
     current_url = ""
     current_model = None
+    # Replacements already taken for provider-ended sessions (this task, every resume path).
+    provider_session_recoveries = int((write_lock_resume_state or {}).get("provider_session_recoveries") or 0)
     latest_structured_response: Optional[Dict[str, Any]] = None
     config = load_config()
     start_time = safe_time()
@@ -9040,7 +9151,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "status": "auth_assistance_declined",
                 "success": False,
                 "user_declined_auth": True,
-                "message": "The user declined sign-in assistance. The browser task stopped without retrying authentication.",
+                "message": auth_assistance_declined_message((write_lock_resume_state or {}).get("auth_realm")),
                 "task_id": task_id,
                 "session_id": session_id,
                 "browser_url": redact_url_secrets(browser_url),
@@ -9230,6 +9341,35 @@ async def _spawn_browser_agent_activity_v3_real(
                         await asyncio.sleep(SESSION_RETRY_INTERVAL_SECONDS)
                     session_info["resume_mode"] = "new_steel_session_after_unavailable"
                     session_info["same_session_unavailable_reason"] = unavailable_reason
+            provider_session_lost = session_info.get("provider_session_lost")
+            if provider_session_lost or (write_lock_resume_state or {}).get("resumed_after_provider_session_lost"):
+                # The backend restored the last durable state after the provider ended
+                # the previous session; say so instead of implying continuity.
+                logger.warning(
+                    "Browser task resumed on a replacement after the provider ended its session",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    session_id=session_info.get("session_id"),
+                    provider_session_lost=provider_session_lost,
+                )
+                await _save_browser_action_message(
+                    agent_id=agent_id,
+                    title="Browser session replaced",
+                    task_id=task_id,
+                    message=(
+                        "The browser provider ended the previous session. Rose restored the last saved "
+                        "browser state on a new session; anything after that save was lost."
+                    ),
+                    status=MessageStatus.FINISHED,
+                    browser_url=session_info.get("debug_url") or "",
+                    action_type="supervisor_recovery",
+                    tool_call_id=str(uuid_module.uuid4()),
+                    extra_metadata={
+                        "supervisor_reason": BROWSER_PROVIDER_SESSION_LOST,
+                        "parent_tool_call_id": tool_call_id,
+                        **(provider_session_lost or {}),
+                    },
+                )
             session_id = session_info.get("session_id")
             reused_session_deadline = _reused_session_deadline(session_info)
             browser_url = session_info.get("debug_url")
@@ -9605,9 +9745,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
             _user_context_sections.append(
                 "## Purchase Approval Context\n"
-                "Before triggering any Buy, Place Order, or other purchase write action, collect every item's "
-                "canonical product-detail URL, numeric rating, and numeric review count. Never use a cart or "
-                "checkout URL as the product link. A purchase approval is blocked if any item lacks these fields."
+                "Before triggering any Buy, Place Order, or other purchase write action, collect each item's own "
+                "product page URL when it has one, and its rating and review count when the page shows them. "
+                "Never use a cart or checkout URL as the product link."
             )
             _record_timing("parallel.data.user_profile", t)
 
@@ -10597,74 +10737,90 @@ async def _spawn_browser_agent_activity_v3_real(
             # replacement session (the reused one is about to be released)
             # instead of dying mid-step. Every invocation runs at least one
             # step before it may yield again.
+            drain_reason = None
             if iteration > resume_step_count and not drain_checkpoint_failed:
                 drain_reason = await activity_drain_reason(allow_generation_handoff=allow_generation_yield)
                 if not drain_reason and _session_expiring(reused_session_deadline, session_id):
                     drain_reason = BROWSER_SESSION_EXPIRING
                 if not drain_reason and _activity_deadline_near():
                     drain_reason = BROWSER_ACTIVITY_DEADLINE
-                if drain_reason:
-                    try:
-                        drain_continuity = await persist_resume_context(
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                            state=_pause_continuity_state(),
-                        )
-                    except Exception as checkpoint_error:
-                        drain_checkpoint_failed = True
-                        logger.warning(
-                            "Browser drain checkpoint failed; continuing on this worker",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            drain_reason=drain_reason,
-                            error=extract_error_message(checkpoint_error),
-                        )
-                    else:
-                        logger.info(
-                            "Browser task yielding at step boundary",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            session_id=session_id,
-                            drain_reason=drain_reason,
-                            step_count=iteration,
-                        )
-                        if dom_service:
-                            try:
-                                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                            except Exception as e:
-                                logger.warning(f"Failed to disconnect browser before drain yield: {e}")
-                            _tilion_leave_session()
-                            dom_service = None
-                        browser_task_paused_for_resume = True
-                        step_timer.finish()
-                        return _visible_activity_result(
-                            {
-                                "status": BROWSER_DRAIN_YIELD_STATUS,
-                                "yield_reason": drain_reason,
-                                "current_url": current_url,
-                                "write_lock_approvals": write_lock_approvals,
-                                "step_count": iteration,
-                                "session_id": session_id,
-                                "cdp_url": cdp_url,
-                                "task_id": task_id,
-                                "browser_url": redact_url_secrets(browser_url),
-                                "auth_realm": auth_realm,
-                                "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
-                                "usage_items": build_usage_items(
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    model_pricing,
-                                    (safe_time() - start_time) * 1000,
-                                    usage_by_model,
-                                    pricing_pool=browser_pool,
-                                    fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
-                                    provider=browser_session_metadata.get("provider"),
-                                    **_tilion_usage_kwargs(),
-                                ),
-                                **drain_continuity,
-                            }
-                        )
+            # A provider-ended session is checked at every boundary, including an
+            # invocation's first: the recovery budget, not the step gate, bounds it.
+            if (
+                not drain_reason
+                and not drain_checkpoint_failed
+                and provider_session_recoveries < BROWSER_PROVIDER_SESSION_MAX_RECOVERIES
+                and await _provider_lost_browser_session(config, task_id, session_id, playwright_browser)
+            ):
+                drain_reason = BROWSER_PROVIDER_SESSION_LOST
+            if drain_reason:
+                if drain_reason == BROWSER_PROVIDER_SESSION_LOST:
+                    # Counted before the snapshot so every resume path restores the spent budget.
+                    provider_session_recoveries += 1
+                try:
+                    drain_continuity = await persist_resume_context(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                        state=_pause_continuity_state(),
+                    )
+                except Exception as checkpoint_error:
+                    drain_checkpoint_failed = True
+                    if drain_reason == BROWSER_PROVIDER_SESSION_LOST:
+                        provider_session_recoveries -= 1
+                    logger.warning(
+                        "Browser drain checkpoint failed; continuing on this worker",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        drain_reason=drain_reason,
+                        error=extract_error_message(checkpoint_error),
+                    )
+                else:
+                    logger.info(
+                        "Browser task yielding at step boundary",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        session_id=session_id,
+                        drain_reason=drain_reason,
+                        step_count=iteration,
+                    )
+                    if dom_service:
+                        try:
+                            await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+                        except Exception as e:
+                            logger.warning(f"Failed to disconnect browser before drain yield: {e}")
+                        _tilion_leave_session()
+                        dom_service = None
+                    browser_task_paused_for_resume = True
+                    step_timer.finish()
+                    return _visible_activity_result(
+                        {
+                            "status": BROWSER_DRAIN_YIELD_STATUS,
+                            "yield_reason": drain_reason,
+                            "provider_session_recoveries": provider_session_recoveries,
+                            "current_url": current_url,
+                            "write_lock_approvals": write_lock_approvals,
+                            "step_count": iteration,
+                            "session_id": session_id,
+                            "cdp_url": cdp_url,
+                            "task_id": task_id,
+                            "browser_url": redact_url_secrets(browser_url),
+                            "auth_realm": auth_realm,
+                            "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
+                            "usage_items": build_usage_items(
+                                total_input_tokens,
+                                total_output_tokens,
+                                model_pricing,
+                                (safe_time() - start_time) * 1000,
+                                usage_by_model,
+                                pricing_pool=browser_pool,
+                                fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                                provider=browser_session_metadata.get("provider"),
+                                **_tilion_usage_kwargs(),
+                            ),
+                            **drain_continuity,
+                        }
+                    )
             iteration += 1
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
@@ -10812,7 +10968,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_download_persister = download_persister_task.result()
                 observe_page_state = _with_downloaded_files(observe_page_state, browser_download_persister)
                 restored_transcript_unobserved = False
-                step_timer.annotate(observe_dom=observe_needs_dom)
+                step_timer.annotate(
+                    observe_dom=observe_needs_dom,
+                    observe_dom_timing_ms=getattr(dom_service, "last_dom_build_timing_ms", None)
+                    if observe_needs_dom
+                    else None,
+                )
                 current_url = _private_browser_runtime_url(dom_service, observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
             except asyncio.TimeoutError:
@@ -10931,7 +11092,8 @@ async def _spawn_browser_agent_activity_v3_real(
                                             (_credential_binding(), auth_realm, instruction_state.get("delivered_user_instruction_count"), schema_user_instruction_count))
                 if navigation_policy.active:
                     await action_batch.discard("Replan navigation while policy restriction is active.")
-                queued_result = None if navigation_policy.active else await action_batch.next(dom_service, batch_state)
+                queued_result = None if navigation_policy.active else await action_batch.next(
+                    dom_service, batch_state, phone_before_decision)
                 browser_stream = action_batch.stream if queued_result is not None else BrowserThinkingStream(
                     agent_id=agent_id,
                     task_id=task_id,
@@ -15268,8 +15430,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             yield terminal_event
                         return
                     user_declined = False
+                    user_resend = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         signal_response = workflow_instance._signal_responses.pop(request_id, None)
+                        user_resend = (
+                            isinstance(signal_response, str)
+                            and signal_response.strip() == AUTH_ASSISTANCE_RESEND_CODE_RESPONSE
+                            and (result.get("auth_target") or {}).get("kind") == "iphone"
+                        )
                         # A decline used to be read as "the user signed in": the
                         # task resumed on a signed-out page and asked again.
                         user_declined = (
@@ -15302,6 +15470,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             write_lock_resume_state[payment_field] = prior_resume[payment_field]
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
+                    if user_resend:
+                        write_lock_resume_state["auth_user_action"] = {
+                            "action": "resend_code",
+                            "request_id": request_id,
+                            "tool_call_id": result.get("pending_tool_call_id"),
+                        }
                     if user_declined:
                         write_lock_resume_state = _rejected_browser_resume_state(
                             {**result, "approval_type": "auth_assistance"}, write_lock_resume_state)
@@ -15309,7 +15483,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
-                        title="User Declined To Sign In" if user_declined else "User Assistance Received",
+                        title=("User Declined To Sign In" if user_declined else
+                               "User Asked To Resend The Code" if user_resend else "User Assistance Received"),
                         message="",
                         status=MessageStatus.FINISHED,
                         metadata={

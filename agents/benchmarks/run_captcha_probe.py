@@ -541,7 +541,11 @@ async def run_probe(args: argparse.Namespace, probe: Dict[str, Any]) -> Dict[str
             "child_messages": child_messages,
         },
     )
-    result = await grade(probe, root_messages, child_messages, summary, end_reason, args.user_id)
+    from helpers.tracing import archive_scope
+
+    # The judge's model call belongs to this probe run's root bundle.
+    with archive_scope(agent_id):
+        result = await grade(probe, root_messages, child_messages, summary, end_reason, args.user_id)
     result.update(
         agent_id=agent_id,
         fe_link=_fe_link(args, agent_id),

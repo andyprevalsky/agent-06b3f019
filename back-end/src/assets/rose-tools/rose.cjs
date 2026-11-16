@@ -9,7 +9,8 @@
 //   rose env status [--json]      (size, memory/swap/load, OOM kills, top processes)
 //   rose env size [--cpu N] [--memory-gb M] --reason TEXT
 //   rose mcp                      (stdio MCP server: display, send_message_to_user,
-//                                  change_environment_size)
+//                                  change_environment_size, plus the tools of the
+//                                  user's connected MCP servers, proxied by Rose)
 //
 // Code agents cannot ask the user (or their spawner) a question: there is no
 // pinned question, approval or wait command, and nothing here blocks on an answer.
@@ -1194,6 +1195,41 @@ const mcpTools = () => [
   CLI_MCP_TOOL,
 ];
 
+// The user's connected MCP servers (Integrations page), proxied by the backend:
+// their headers and OAuth tokens never enter this sandbox. Never replayed.
+let userMcpTools = new Map();
+async function loadUserMcpTools() {
+  try {
+    const data = await call('GET', '/mcp', undefined, 2, 15_000);
+    userMcpTools = new Map();
+    for (const server of Array.isArray(data.servers) ? data.servers : []) {
+      for (const tool of Array.isArray(server.tools) ? server.tools : []) {
+        userMcpTools.set(tool.agent_name, { server, tool });
+      }
+    }
+  } catch (err) {
+    process.stderr.write(`rose mcp: connected MCP servers unavailable: ${err.message}\n`);
+  }
+  return [...userMcpTools.values()].map(({ server, tool }) => ({
+    name: tool.agent_name,
+    description: `[${server.name} MCP server] ${tool.description}`,
+    inputSchema: tool.input_schema || { type: 'object' },
+  }));
+}
+
+async function callUserMcpTool(name, args) {
+  if (!userMcpTools.has(name)) await loadUserMcpTools();
+  const entry = userMcpTools.get(name);
+  if (!entry) return null;
+  return call(
+    'POST',
+    `/mcp/${encodeURIComponent(entry.server.id)}/call`,
+    { tool: entry.tool.name, arguments: args },
+    1,
+    6 * 60_000
+  );
+}
+
 const MCP_HANDLERS = {
   display: displayTool,
   send_message_to_user: messageTool,
@@ -1217,10 +1253,26 @@ function serveMcp() {
       });
     }
     if (method === 'ping') return reply(id, {});
-    if (method === 'tools/list') return reply(id, { tools: mcpTools() });
+    if (method === 'tools/list') {
+      return reply(id, { tools: [...mcpTools(), ...(await loadUserMcpTools())] });
+    }
     if (method === 'tools/call') {
       const handler = MCP_HANDLERS[params.name];
-      if (!handler) return fail(id, -32602, `unknown tool ${params.name}`);
+      if (!handler) {
+        try {
+          const proxied = await callUserMcpTool(params.name, params.arguments || {});
+          if (!proxied) return fail(id, -32602, `unknown tool ${params.name}`);
+          return reply(id, {
+            content: Array.isArray(proxied.content) ? proxied.content : [],
+            ...(proxied.structured_content !== undefined
+              ? { structuredContent: proxied.structured_content }
+              : {}),
+            isError: proxied.is_error === true,
+          });
+        } catch (err) {
+          return reply(id, { content: [{ type: 'text', text: err.message }], isError: true });
+        }
+      }
       try {
         const result = await handler(params.arguments || {});
         return reply(id, {

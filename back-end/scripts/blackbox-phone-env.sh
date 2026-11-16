@@ -6,3 +6,19 @@ if [[ -z "${CLOUD_IPHONE_ALLOWED_PHONES:-}" ]]; then
   export CLOUD_IPHONE_ALLOWED_PHONES
 fi
 export CLOUD_IPHONE_ENABLED=true
+# back-end/.env holds the PRODUCTION AgentPhone key, whose account has a hard
+# number cap shared with real users. Test stacks get only a dedicated test
+# account key, or none (phone provisioning is then skipped).
+export AGENTPHONE_API_KEY="${AGENTPHONE_TEST_API_KEY:-}"
+
+# Call after the isolated backend's port is known and before it starts. Every
+# Vapi/Twilio REST call goes to that backend's own loopback fake
+# (/api/test/fake-phone-upstream) with a fake key, overriding any real
+# VAPI_PRIVATE_KEY from back-end/.env, so no blackbox or coverage case can dial
+# a real number. vapi.blackbox.ts refuses to run unless this routing holds.
+export_blackbox_phone_upstream_env() {
+  local port="$1"
+  export VAPI_API_BASE_URL="http://127.0.0.1:${port}/api/test/fake-phone-upstream"
+  export TWILIO_API_BASE_URL="$VAPI_API_BASE_URL"
+  export VAPI_PRIVATE_KEY="vapi-blackbox-key"
+}

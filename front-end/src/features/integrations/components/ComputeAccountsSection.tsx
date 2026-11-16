@@ -5,6 +5,12 @@
  * automatically, so the only user-actionable state is whether an account needs
  * reconnecting. `needs_reconnect` is the sole amber state.
  *
+ * STATE MACHINE: ComputeAccountChips
+ *   [NO_ACCOUNTS] nothing (or only the load error)
+ *   [ACCOUNTS] one chip per account, wrapping; × removes that account
+ *   [ACCOUNTS, one is shareable with a team] one account per line: chip, then its
+ *     team-sharing caption (AccountTeamShare; claude_code / gpt_code by account id)
+ *
  * Connection state lives in `hooks/useComputeAccounts`.
  *
  * STATE MACHINE: ComputeConnectModal (server stage drives every transition)
@@ -15,8 +21,12 @@
  *   any --phase idle|error--> [CLOSED]
  */
 
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
+
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
+import { computeShareProvider } from '@/lib/api/teams';
 
 import { useComputeAccounts } from '../hooks/useComputeAccounts';
 import ConnectedAccountChip from './ConnectedAccountChip';
@@ -40,23 +50,39 @@ export default function ComputeAccountChips({
   state: ReturnType<typeof useComputeAccounts>;
 }) {
   const { accounts, phase, error, removing, remove } = state;
+  const { shareTarget } = useAccountShares();
+  const rows = accounts.map((account) => {
+    const provider = computeShareProvider(account.provider);
+    const target = provider && shareTarget(provider, account.accountId);
+    return { account, share: target && <AccountTeamShare {...target} /> };
+  });
   if (accounts.length === 0 && error === null) return null;
+  const shared = rows.some(({ share }) => share !== undefined);
   return (
     <div className="mt-1.5 flex w-full flex-col gap-2 pl-[46px]">
       {accounts.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {accounts.map((account) => (
-            <ConnectedAccountChip
-              key={`${account.provider}:${account.accountId}`}
-              label={account.accountEmail ?? account.accountId}
-              tone={account.state === 'needs_reconnect' ? 'warning' : 'synced'}
-              detail={account.state === 'needs_reconnect' ? 'Reconnect' : undefined}
-              title={account.lastErrorReason ?? undefined}
-              removing={removing === account.accountId}
-              disabled={removing !== null}
-              onRemove={() => void remove(account)}
-            />
-          ))}
+        <div className={`flex gap-2 ${shared ? 'flex-col items-start' : 'flex-wrap'}`}>
+          {rows.map(({ account, share }) => {
+            const key = `${account.provider}:${account.accountId}`;
+            const chip = (
+              <ConnectedAccountChip
+                label={account.accountEmail ?? account.accountId}
+                tone={account.state === 'needs_reconnect' ? 'warning' : 'synced'}
+                detail={account.state === 'needs_reconnect' ? 'Reconnect' : undefined}
+                title={account.lastErrorReason ?? undefined}
+                removing={removing === account.accountId}
+                disabled={removing !== null}
+                onRemove={() => void remove(account)}
+              />
+            );
+            if (!shared) return <Fragment key={key}>{chip}</Fragment>;
+            return (
+              <span key={key} className="flex min-w-0 items-center gap-2.5">
+                {chip}
+                {share}
+              </span>
+            );
+          })}
         </div>
       )}
 

@@ -50,11 +50,13 @@ class ToolSchema:
 # ---------------------------------------------------------------------------
 
 
-# Source of a direct compute token, as returned by the backend.
+# Source of a direct compute token, as returned by the backend (lease order).
 #   - "user": the user's own subscription token
+#   - "team": a teammate's subscription shared with one of the user's teams;
+#             reported back with the user's id and the shared row's integration id
 #   - "pool": one of the shared pooled tokens (LRU-rotated by the backend)
 ComputeTokenType = Literal["claude", "gpt"]
-ComputeTokenSource = Literal["user", "pool"]
+ComputeTokenSource = Literal["user", "team", "pool"]
 ClaudeTokenSource = ComputeTokenSource
 GptTokenSource = ComputeTokenSource
 

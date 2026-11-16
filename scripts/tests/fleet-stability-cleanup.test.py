@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -114,6 +115,18 @@ for item in sorted(audit.rglob('*'),key=lambda x:str(x.relative_to(audit))):
 (mirror/'source-audit').write_text('path='+str(audit)+'\nsha256='+digest.hexdigest()+'\n')
 PYCLI
 """
+
+
+def same_birth(pid, pid_start):
+    """True only while pid still has the recorded proc-start birth (never signal a reused PID)."""
+    if not pid_start.startswith("proc-start:"):
+        return not Path("/proc/self/stat").exists()  # BSD lstart identities: no cheap native check
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    fields = stat[stat.rfind(")") + 2:].split()
+    return len(fields) > 19 and fields[19] == pid_start.rsplit(":", 1)[1]
 
 
 class FleetFailureCleanup(unittest.TestCase):
@@ -876,6 +889,88 @@ ps() {
 
     def test_failed_summary_log_cannot_abandon_owned_cleanup(self):
         self.run_case(log_fault="summary")
+
+    def test_repeated_waiter_cancellation_keeps_exact_cleanup(self):
+        # The supervisor re-forwards cancellation to the published waiter every
+        # 0.1s. Bash 5.2 can run that trap inside a $(...) or <(...) parse in the
+        # waiter, failing the substitution and abandoning recovery. Deliver the
+        # same TERM densely for the waiter's whole life so any such parse is hit.
+        stop = threading.Event()
+        delivered = []
+
+        def forward_repeatedly():
+            # Pace delivery; the event ends the storm as soon as the case returns.
+            while not stop.wait(0.0005):
+                for path in (self.root / "proofs").glob("*/active-waiter.owner"):
+                    try:
+                        fields = dict(line.split("=", 1) for line in path.read_text().splitlines())
+                        if same_birth(int(fields["pid"]), fields["pid_start"]):
+                            os.kill(int(fields["pid"]), signal.SIGTERM)
+                            delivered.append(1)
+                    except (OSError, KeyError, ValueError):
+                        pass
+
+        storm = threading.Thread(target=forward_repeatedly, daemon=True)
+        storm.start()
+        try:
+            self.run_case(cancel=True)
+        finally:
+            stop.set()
+            storm.join(timeout=10)
+        self.assertGreater(len(delivered), 100, "waiter was never exposed to repeated cancellation")
+        self.assertNotIn("unexpected EOF", (self.root / "output.log").read_text())
+
+    def test_waiter_probes_survive_trapped_signal_storm(self):
+        # Deterministic companion to the case above: run the identity and group
+        # probes the cancellation waiter uses many times in a TERM-trapped shell
+        # while that exact shell receives TERM every few milliseconds. A probe
+        # that parses $(...) in the trapped shell fails with "unexpected EOF".
+        script = r"""
+source "$1"
+trap 'pending=TERM' HUP INT TERM
+birth="$(cloudbench_pid_start_time "$$")"
+printf '%s\n' "$BASHPID" > "$2.tmp" && mv "$2.tmp" "$2"
+bad=0 i=0
+while [ "$i" -lt "$3" ]; do
+  i=$((i + 1))
+  cloudbench_pid_matches_start "$$" "$birth" || bad=$((bad + 1))
+  cloudbench_process_group_exists "$$" || bad=$((bad + 1))
+done
+echo "probes-complete bad=$bad"
+"""
+        ready = self.root / "probe-shell.pid"
+        shell = subprocess.Popen(
+            [BASH, "-c", script, "_", str(self.root / "scripts/lib/cloudbench-env.sh"), str(ready),
+             # BSD hosts classify births with ps execs; keep their run bounded.
+             "1500" if Path("/proc/self/stat").exists() else "200"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+        )
+        delivered = 0
+        try:
+            pacing = threading.Event()
+            deadline = time.monotonic() + 30
+            while not ready.exists() and shell.poll() is None and time.monotonic() < deadline:
+                pacing.wait(0.01)
+            self.assertTrue(ready.exists(), "probe shell never published its PID")
+            target = int(ready.read_text())
+            # bash -c runs the loop in its own process, so the unreaped child PID cannot be reused.
+            self.assertEqual(target, shell.pid)
+            deadline = time.monotonic() + 120
+            while shell.poll() is None and time.monotonic() < deadline and not pacing.wait(0.002):
+                try:
+                    os.kill(target, signal.SIGTERM)
+                    delivered += 1
+                except ProcessLookupError:
+                    break
+            output, _ = shell.communicate(timeout=120)
+        finally:
+            if shell.poll() is None:
+                os.killpg(shell.pid, signal.SIGKILL)
+                shell.wait()
+        self.assertGreater(delivered, 100, "probe shell was never exposed to repeated TERM")
+        self.assertNotIn("unexpected EOF", output)
+        self.assertIn("probes-complete bad=0", output)
+        self.assertEqual(shell.returncode, 0, output)
 
     def test_cancellation_does_not_depend_on_body_pid_probe(self):
         self.run_case(cancel=True, unknown_body_probe=True)

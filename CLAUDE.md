@@ -15,6 +15,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - When an error appears, triage it the way `/deploy` does (`.claude/shared/deploy-failure-policy.md`): fix what your change introduced or your goal targets, hand off an evidenced not-introduced failure as a repair `/goal`, and treat an unattributed one as blocking; "pre-existing", "flaky" and "infrastructure" are never evidence (rules 16, 24).
 - Treat each new user message as added acceptance criteria unless it cancels one, and before claiming done validate against the latest combined set, reporting anything unmet or unverified.
 - Own "make X work in prod" end to end: check `git log --all` and open PRs for an in-flight fix, then reproduce, fix the root cause and rerun the real gate until it is green (rule 0a).
+- NEVER serialize work that can be parallelized unless the user explicitly asks for it. If a limit forces serialization (provider quota, concurrency cap, lock, capacity check), first try your best to raise or remove it, even when that takes extra work: read the provider's real limit, fix a stale recorded cap, or lift the tooling restriction. Serialize only after that fails, and tell the user which limit and why.
 - Build approval-gated changes (prompts, Zod schemas, harness behavior) now and queue their approvals for the start of `/deploy`; a pending approval blocks only its own action, and infra fixes need none (rule 5).
 - Outside `/descend`, never edit a benchmark's definition, pass criteria or timeout yourself: describe the change you would make in your final message and leave the file untouched; `/descend` may apply a cross-reviewed task edit, which its final change review approves before deploying (rule 25).
 - Leave a destructive or irreversible action, or spend beyond what was authorized, undone and list it for the user at the end instead of asking mid-run.
@@ -27,6 +28,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 ## Communication
 
 - Be concise with the user; they will ask for more.
+- When the user mentions SMS, they mean the entire phone messaging surface: WhatsApp, Linq, and the SMS fallbacks.
 - Fold messages from other agents into the current conversation; surface only material progress, blockers or requested results.
 - Approval and review requests show the key user- and model-visible strings that change, well formatted, plus a plain list of schema or API fields; never code diffs or file pointers.
 - Golden-reference review precedes every approval request: a fresh adversarial sub-agent checks grounding per `.claude/shared/approval-format.md`. It reviews only the hunks inside the mandatory user-approval scope (deploy-guard-flagged prompt, agent-behavior and trajectory hunks, Zod schemas, /RCA harness-fix packets); GROUNDED clears those manual gates, and approvals are snapshot-scoped (rules 26, 26a).
@@ -44,6 +46,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Never delete lockfiles or change dependency ranges to make an install work, and never reinstall dependencies into a `node_modules` or venv linked from another checkout.
 - Never give a foreground Bash command a timeout above 5 minutes; run anything longer in the background and watch it (rule 12).
 - Never treat a user pause as a bug's cause; users pause after noticing a problem (rule 11).
+- Never fix flaky tests through serialization, and deploys must never serialize on each other; if you find such serialization, make sure an agent is working to undo it.
 - Never `git stash`: the stash ref is shared across all worktrees, so popping can pull another workspace's in-flight work; use `git diff HEAD > .git-wip.patch && git checkout -- .`, then `git apply .git-wip.patch && rm .git-wip.patch` (rule 21).
 - Never `pkill` by a pattern that could match a process you did not launch in this session (benchmark controllers and test runners may belong to other workspaces); to stop your own run, TERM exactly its controller PID and let its cleanup run, and surface a stuck run you don't own to the user (rule 27).
 
@@ -137,7 +140,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Already-set environment variables beat `.env`; when config is wrong despite a correct `.env`, look for an injected variable first.
 - Outside `run.sh`, export the same unique `TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for backend and worker.
 - On a Linux devbox without `.cloud-env`, run `bash scripts/cloud-init.sh`; `agents/venv` uses Python 3.11, and keep `TMPDIR` outside the checkout.
-- `mac-app/` is macOS only: never install, run, test or commit it on Linux.
+- `mac-app/` changes may be made and committed from Linux; skip only the mac-app tests that cannot run there (Electron build, real-Mac runs) and record them as skipped, unverified, never PASS.
 - If a test fails on an invalid GPT or Claude auth token, retry with the local token or refetch it from the prod database before escalating.
 - GitHub writes acting as Andy use `GITHUB_TOKEN`; a rate-limited read-only call uses `python3 scripts/github_token_pool.py pick`, never for writes.
 - A 404 from any pool member other than `GITHUB_TOKEN` (machine accounts, the `rose-labs-agents` App, `GITHUB_DISPATCH_TOKEN`) is not authoritative; retry with `GITHUB_TOKEN`.

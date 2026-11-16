@@ -304,6 +304,50 @@ class Worker(unittest.TestCase):
         rows, _ = progress.read_new(folder / 'progress.jsonl')
         self.assertEqual(['first', 'second'], [r['unit'] for r in rows])
 
+    def test_cases_sharing_a_declared_sweep_run_it_once(self):
+        # The backend recipe gives all of its cases one shared `sweep` (the full sharded
+        # coverage command). Run serially per case it was 271 identical ~10-minute sweeps that
+        # could never meet the 4 h gate deadline (FLAKY 2d9047db repair, run 43633983800).
+        counter = self.root / '.context' / 'sweeps'
+        counter.parent.mkdir(exist_ok=True)
+        def sweep(code):
+            return {'command': [sys.executable, '-c',
+                                f'open({str(counter)!r},"a").write("x\\n"); raise SystemExit({code})'],
+                    'aggregate': False, 'sweep': 'backend'}
+        for code, verdict in ((0, 'PASS'), (1, 'FAIL')):
+            counter.unlink(missing_ok=True)
+            self.recipe['cases'] = {'a': sweep(code), 'b': sweep(code), 'c': sweep(code),
+                                    'own': {'command': [sys.executable, '-c', 'pass']}}
+            request = dict(self.request, token=f'sweep-token-{code}', checks=['a', 'b', 'c', 'own'])
+            result = worker.execute(request, self.root)
+            self.assertEqual({'a': verdict, 'b': verdict, 'c': verdict, 'own': 'PASS'}, result['cases'])
+            self.assertEqual(1, len(counter.read_text().splitlines()))
+            self.assertTrue(result['complete'])
+            self.assertEqual(result['evidence']['a']['log'], result['evidence']['c']['log'])
+            self.assertEqual('a', result['evidence']['c']['shared_sweep_run_by'])
+        # Case-specific FLAKY rows stay with the case whose run recorded them (CodeRabbit, PR #2124).
+        sys.path.insert(0, str(Path(worker.__file__).resolve().parent))
+        import deploy_gate_progress as progress
+        flaky = sweep(0)
+        flaky['command'] = [sys.executable, '-c',
+                            ("import sys; sys.path.insert(0,%r); import deploy_gate_progress as p; "
+                             "p.report('u1','FLAKY',detail='rerun passed')") % str(Path(worker.__file__).resolve().parent)]
+        self.recipe['cases'] = {'a': dict(flaky), 'c': dict(flaky)}
+        with patch.dict(os.environ, {progress.ENV: str(self.root / '.context' / 'flaky-progress.jsonl')}):
+            result = worker.execute(dict(self.request, token='sweep-token-flaky', checks=['a', 'c']), self.root)
+        self.assertEqual({'a': 'PASS', 'c': 'PASS'}, result['cases'])
+        self.assertEqual(['u1'], [r['unit'] for r in result['evidence']['a']['flaky']])
+        self.assertNotIn('flaky', result['evidence']['c'])
+        self.assertEqual('a', result['evidence']['c']['shared_sweep_run_by'])
+        # A case naming the same sweep with a different spec is not the same run.
+        counter.unlink()
+        other = sweep(0)
+        other['env'] = {'DIFFERENT': '1'}
+        self.recipe['cases'] = {'a': sweep(0), 'b': other}
+        result = worker.execute(dict(self.request, token='sweep-token-split', checks=['a', 'b']), self.root)
+        self.assertEqual({'a': 'PASS', 'b': 'PASS'}, result['cases'])
+        self.assertEqual(2, len(counter.read_text().splitlines()))
+
     def test_aggregate_failure_cannot_prove_all_constituents_completed(self):
         self.recipe['cases']['first']['aggregate']=True
         result=worker.execute(self.request,self.root)
@@ -647,6 +691,23 @@ class Cloud(unittest.TestCase):
         self.assertEqual(1,len(state['attempts']))
         self.assertEqual({'smoke/failing'},set(state['skips']))
 
+    def test_owned_cleanup_release_stall_warning_marks_the_native_failure(self):
+        """The collector reads the task's own owned-cleanup evidence: the confirmed AgentCard release
+        stall flags the native failure so the single rerun never mints a new card for it."""
+        path=self.fleet/'failing/cloudbench-run.json';document=cycle.read(path)
+        task=document['tasks'][0]
+        task.update(benchmark_status='FAILED',status='PAUSED',failure_reason='Timeout after 901s (task timeout=900s)')
+        task['logs']={'cloud_cleanup_evidence':{'errors':[],'warnings':[
+            "payment: AgentCard never released the closed card's org transfer (consumed, releasedCents=0); "
+            "skipped under the standing user-approved warning policy"]}}
+        cycle.write(path,document)
+        _,details,_,_=self.collect()
+        self.assertIs(details['failing']['native_task']['release_stall_cleanup'],True)
+        task['logs']['cloud_cleanup_evidence']['warnings']=['archive: TimeoutError']
+        cycle.write(path,document)
+        _,details,_,_=self.collect()
+        self.assertIs(details['failing']['native_task']['release_stall_cleanup'],False)
+
     def test_missing_child_is_unknown_not_a_waivable_aggregate(self):
         (self.fleet/'failing/cloudbench-run.json').unlink()
         cases,_,_,_=self.collect()
@@ -824,6 +885,22 @@ class Cloud(unittest.TestCase):
         import deploy_test_quarantine as quarantine
         self.assertIn('lack /RCA attribution',quarantine.attribution_block(state['flaky']))  # merge refuses
 
+    def test_failed_agentcard_task_with_cleanup_confirmed_stall_is_never_rerun(self):
+        """Regression (PR #2005 smoke rounds 2-3, 2026-11-13): a failed AgentCard lifecycle task whose
+        own cleanup confirmed the release stall was rerun, and the rerun mints a new card after a
+        confirmed stall (deploy.md). Stopping that rerun voided the whole receipt. It is now never a
+        rerun candidate; its native FAIL stays the complete, triageable case."""
+        first=self.campaign({'passing':'PASS','failing':'FAIL'})
+        first[1]['failing']['native_task']['release_stall_cleanup']=True
+        result,launch,collect,rows,out=self.run_smoke([first])
+        self.assertEqual(1,launch.call_count)  # no rerun, no new card
+        self.assertEqual(1,collect.call_count)
+        self.assertEqual({'passing':'PASS','failing':'FAIL'},result['cases'])
+        self.assertTrue(result['complete'])
+        self.assertIsNone(result.get('rerun'))
+        self.assertNotIn('TEST_FLAKY',out)
+        # An ordinary failure is still rerun once: test_failed_smoke_task_passing_its_single_rerun_is_flaky...
+
     def test_failed_smoke_task_failing_its_rerun_fails_and_is_never_run_a_third_time(self):
         result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
                                                  self.campaign({'failing':'FAIL'})])
@@ -926,6 +1003,18 @@ class CloudCampaign(unittest.TestCase):
             'started_at':datetime.fromtimestamp(2,timezone.utc).isoformat(),
             'finished_at':datetime.fromtimestamp(3,timezone.utc).isoformat()}
         self.seal_campaign(self.campaign)
+
+    def pilot_limits(self):
+        """The reviewed registry with Tilion at its original 20-browser pilot, so 17 checks cross a 16-wide cap.
+
+        The live account allows far more (scripts/cloudbench-provider-limits.json); this keeps
+        the cap-crossing boundary independent of the provider's current plan."""
+        value=json.loads((ROOT/'scripts/cloudbench-provider-limits.json').read_text())
+        row,=[row for row in value['enforced'] if row['id']=='tilion-browser-sessions']
+        row['limit']=20
+        path=self.root/'provider-limits-tilion-pilot.json'
+        path.write_text(json.dumps(value))
+        return str(path)
 
     def seal_campaign(self, directory):
         import runpy, hashlib
@@ -1074,7 +1163,7 @@ class CloudCampaign(unittest.TestCase):
             self.summary['campaign_id']=target_campaign.name
             self.seal_campaign(target_campaign)
             return 0,False,False,False
-        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}), \
+        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':self.pilot_limits()}), \
              patch.object(self.cloud,'source',return_value=self.request['source']), \
              patch.object(self.cloud,'run_command',side_effect=launch), \
              patch.object(self.cloud.time,'time',return_value=1):
@@ -1176,7 +1265,7 @@ class CloudCampaign(unittest.TestCase):
         self.assertFalse(self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)[2])
 
     def test_campaign_command_preserves_inventory_and_uses_registry_capacity(self):
-        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}), \
+        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':self.pilot_limits()}), \
              patch.object(self.cloud,'source',return_value=self.request['source']), \
              patch.object(self.cloud,'run_command',return_value=(0,False,False,False)) as launch, \
              patch.object(self.cloud,'collect_campaign',return_value=(dict.fromkeys(self.request['checks'],'PASS'),{},True,'campaign')):
@@ -3725,7 +3814,7 @@ class FakeTilionListing:
 
 
 class CloudSharedProviderHeadroom(unittest.TestCase):
-    """Two deploys and production share ONE 20-browser Tilion account: size smoke from its live usage."""
+    """Two deploys and production share ONE 250-browser Tilion account: size smoke from its live usage."""
     KEY='fixture-tilion-key-not-real'
 
     def setUp(self):
@@ -3753,35 +3842,35 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
                 self.assertNotIn(self.KEY,stderr.getvalue())
 
     def test_live_account_sessions_narrow_the_smoke_width(self):
-        listing=FakeTilionListing(5)  # production + another deploy hold five browsers right now
+        listing=FakeTilionListing(190)  # production + another deploy hold 190 browsers right now
         width,output=self.width(listing)
-        self.assertEqual(11,width)  # floor(20 * 0.8 - 5), not the solo registry cap 16
+        self.assertEqual(10,width)  # floor(250 * 0.8 - 190), not the 17 requested or the registry cap 70
         url,method,headers,timeout=listing.requests[0]
         self.assertEqual(('https://tilion.fixture.invalid/v1/sessions','GET'),(url,method))
         self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
         self.assertLessEqual(timeout,15)
-        self.assertIn('5 live account-wide of 20 (20% reserved for production)',output)
+        self.assertIn('190 live account-wide of 250 (20% reserved for production)',output)
         self.assertEqual([],self.sleeps)
 
     def test_idle_account_still_honours_the_registry_cap_and_request(self):
-        self.assertEqual(16,self.width(FakeTilionListing(0))[0])
+        self.assertEqual(70,self.width(FakeTilionListing(0),count=80)[0])  # Parallel's registry cap binds
         self.assertEqual(3,self.width(FakeTilionListing(0),count=3)[0])
 
     def test_second_deploy_waits_while_the_first_holds_the_pool_then_starts(self):
-        # Deploy A's 16 smoke browsers are live; production keeps its four-browser reserve.
-        listing=FakeTilionListing(16,17,9)
+        # Deploys and production hold all 200 usable browsers; production keeps its 50-browser reserve.
+        listing=FakeTilionListing(200,201,193)
         width,output=self.width(listing)
         self.assertEqual(7,width)
         self.assertEqual(3,len(listing.requests))
         self.assertEqual([30.0,30.0],self.sleeps)
         self.assertEqual(2,output.count('⏳ waiting for shared provider headroom'))
-        self.assertIn('16 live of 20, 20% reserved for production',output)
+        self.assertIn('200 live of 250, 20% reserved for production',output)
 
     def test_full_account_until_the_deadline_refuses_before_any_launch(self):
         launched=[]
         with patch.object(self.cloud,'run_command',side_effect=lambda *a,**k:launched.append(a)):
             with self.assertRaises(ValueError) as refused:
-                self.width(FakeTilionListing(16))
+                self.width(FakeTilionListing(200))
         self.assertIn('cannot admit one smoke task by the deadline',str(refused.exception))
         self.assertEqual([],launched)
         self.assertAlmostEqual(900.0,sum(self.sleeps))
@@ -3803,8 +3892,8 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         capacity=runpy.run_path(str(ROOT/'scripts/cloudbench-provider-capacity.py'))
         registry=capacity['for_browser_provider'](capacity['load_registry'](),'tilion')
         stderr=io.StringIO()
-        width=headroom.admitted_width(17,registry,probes=probes,deadline=0,stream=stderr)
-        self.assertEqual(16,width)
+        width=headroom.admitted_width(80,registry,probes=probes,deadline=0,stream=stderr)
+        self.assertEqual(70,width)
         self.assertIn('live account usage UNMEASURED',stderr.getvalue())
 
     def test_plain_http_base_url_never_receives_the_key(self):

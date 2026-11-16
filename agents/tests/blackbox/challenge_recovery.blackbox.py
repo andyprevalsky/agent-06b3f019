@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1091,6 +1092,53 @@ async def test_live_cookie_commit_requires_one_clean_load():
         assert challenged_page.goto_count == 1
 
 
+async def test_captcha_widget_without_solver_evidence_is_not_auto_solving():
+    """H-35b: a challenge widget is not evidence that a provider solver is working.
+
+    Kernel reports only terminal ``captcha_solve_result`` events and Tilion
+    reports no per-session solver state. The in-page chip (which the browser
+    agent reads) must not claim "Auto-solving CAPTCHA" for them merely because
+    a CAPTCHA-like widget is on the page, while real provider evidence still
+    drives the chip.
+    """
+    from browser_tools.captcha_solve_indicator import poll_captcha_indicator_phase
+
+    class _PageWithChallengeWidget:
+        async def probe_captcha_widgets_present(self):
+            return True
+
+    def _telemetry(payload):
+        async def _fetch(_config, _task_id):
+            return payload
+
+        return _fetch
+
+    async def _phase(payload):
+        return await poll_captcha_indicator_phase(
+            _PageWithChallengeWidget(),
+            fetch_telemetry=_telemetry(payload),
+            config=None,
+            task_id="task-h35b",
+            memory={},
+        )
+
+    for provider in ("kernel", "tilion"):
+        phase = await _phase({"provider": provider, "isSolving": None, "latestOutcome": None})
+        assert phase == "idle", f"{provider}: widget presence claimed {phase!r} without solver evidence"
+
+    # Positive provider evidence still drives the chip.
+    assert await _phase({"provider": "steel", "isSolving": True, "latestOutcome": None}) == "solving"
+    fresh_success = {
+        "status": "success",
+        "captchaType": "turnstile",
+        "durationMs": 900,
+        "errorCode": None,
+        "websiteHost": "example.com",
+        "timestampMicros": time.time() * 1_000_000,
+    }
+    assert await _phase({"provider": "kernel", "isSolving": None, "latestOutcome": fresh_success}) == "succeeded"
+
+
 async def run_all_tests():
     print("challenge-recovery blackbox tests:")
     result = BlackboxResult()
@@ -1185,6 +1233,10 @@ async def run_all_tests():
     await result.record_async(
         "live_cookie_commit_one_pass",
         test_live_cookie_commit_requires_one_clean_load,
+    )
+    await result.record_async(
+        "captcha_widget_without_solver_evidence_not_auto_solving",
+        test_captcha_widget_without_solver_evidence_is_not_auto_solving,
     )
     return result.all_passed
 

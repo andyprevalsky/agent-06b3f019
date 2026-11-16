@@ -10,7 +10,7 @@
  *   - Exposed API shape: every method the renderer relies on
  *     (see shared/types/ipc.ts → IPC interface) is present and is a callable
  *     function, with the expected namespace nesting (auth.*, shortcut.*,
- *     onboarding.*, claudeCode.*, atlas.*, whatsapp.*, telegram.*).
+ *     onboarding.*, claudeCode.*, roseCli.*, atlas.*, whatsapp.*, telegram.*).
  *   - Invoke channels: each request/response method routes to
  *     `ipcRenderer.invoke(<channel>, ...args)` with the exact channel name and
  *     argument ordering the main process handlers expect.
@@ -189,6 +189,13 @@ describe('exposed API shape', () => {
     shortcut: ['get', 'set', 'validate', 'enable', 'disable', 'isEnabled'],
     onboarding: ['isComplete', 'setComplete', 'getLastAuthProvider', 'setLastAuthProvider'],
     claudeCode: ['hasCredentials', 'syncCredentials', 'setMockNoClaudeCode'],
+    roseCli: [
+      'ensureInstalled',
+      'pickProjectFolder',
+      'importProject',
+      'onImportEvent',
+      'cancelImport',
+    ],
     atlas: ['storePassword', 'hasPassword', 'clearPassword'],
     whatsapp: [
       'hasCredentials',
@@ -283,6 +290,14 @@ describe('invoke channel routing', () => {
     ['claudeCode.hasCredentials', 'claude:hasCredentials', []],
     ['claudeCode.syncCredentials', 'claude:syncCredentials', []],
     ['claudeCode.setMockNoClaudeCode', 'claude:setMockNoClaudeCode', [true]],
+    ['roseCli.ensureInstalled', 'roseCli:ensureInstalled', []],
+    ['roseCli.pickProjectFolder', 'roseCli:pickProjectFolder', []],
+    [
+      'roseCli.importProject',
+      'roseCli:importProject',
+      [{ action: 'scan', folder: '/Users/me/app', loginCode: 'rlc_x', apiUrl: 'https://x' }],
+    ],
+    ['roseCli.cancelImport', 'roseCli:cancelImport', ['run-1']],
     ['atlas.storePassword', 'atlas:storePassword', ['pw']],
     ['atlas.hasPassword', 'atlas:hasPassword', []],
     ['atlas.clearPassword', 'atlas:clearPassword', []],
@@ -372,6 +387,18 @@ describe('subscription channel routing', () => {
       }
     }
   );
+
+  it('roseCli.onImportEvent forwards each import event and unsubscribes the same listener', () => {
+    const callback = vi.fn();
+    const { channel, handler, result } = subscribe('roseCli.onImportEvent', callback);
+    expect(channel).toBe('roseCli:importEvent');
+    const payload = { runId: 'run-1', event: 'exit', code: 0 };
+    handler({}, payload);
+    expect(callback).toHaveBeenCalledWith(payload);
+
+    (result as () => void)();
+    expect(rendererRemoveListener).toHaveBeenCalledWith('roseCli:importEvent', handler);
+  });
 
   it('onUpdateProgress extracts percent from the event payload', () => {
     const callback = vi.fn();

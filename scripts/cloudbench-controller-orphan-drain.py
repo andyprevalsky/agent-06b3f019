@@ -425,7 +425,12 @@ _pidfd_source = next(
     if isinstance(node, ast.Assign)
     and any(isinstance(target, ast.Name) and target.id == "PIDFD_SOURCE" for target in node.targets)
 )
-GUEST = _pidfd_source + "\n" + GUEST + AGENT
+# The shared guest core (pidfd binding, custody reads, process identity and
+# prerequisites) without the normal-agent capture path. Guests that only need
+# the core, such as relay retirement, ship it alone so their exec body stays
+# within the bounded 16 KiB Machine exec transport.
+CORE_GUEST = _pidfd_source + "\n" + GUEST
+GUEST = CORE_GUEST + AGENT
 
 
 def command(payload):

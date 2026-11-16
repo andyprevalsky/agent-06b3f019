@@ -38,6 +38,15 @@ import {
 
 const log = createLogger('BrowserChallengeRecovery');
 
+/**
+ * Every config search ends inside the worker's 300 s recover-challenge read
+ * deadline, leaving 90 s for promotion, old-session release and the response.
+ * Unbounded searches outlived the caller (H-20: ReadTimeout at exactly 300 s,
+ * then the orphaned search kept renting candidates for 3 more minutes) and the
+ * agent never received failed_config_keys.
+ */
+export const RECOVERY_SEARCH_DEADLINE_MS = 210_000;
+
 export async function searchAndPromoteBrowserConfig(
   input: {
     signal?: AbortSignal;
@@ -320,10 +329,9 @@ export async function searchAndPromoteBrowserConfig(
         ownerKey: current.agentId,
         signal: input.signal,
         blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
-        // Two transport-dead provider candidates get 90s each. The full search
-        // stops at 210s, leaving 90s under the worker's 300s HTTP read deadline
-        // for promotion, old-session release, and the response.
-        ...(transportFailure ? { candidateDeadlineMs: 90_000, searchDeadlineMs: 210_000 } : {}),
+        searchDeadlineMs: dependencies.searchDeadlineMs ?? RECOVERY_SEARCH_DEADLINE_MS,
+        // Two transport-dead provider candidates get 90s each.
+        ...(transportFailure ? { candidateDeadlineMs: 90_000 } : {}),
       }
     );
   } catch (error) {

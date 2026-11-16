@@ -103,7 +103,11 @@ export const verifyPhoneCredential: CredentialVerifier = async (input) => {
         },
       },
     },
-    dump_context: { call_site: 'phone_saved_credential_binding', agent_id: input.agentId },
+    dump_context: {
+      call_site: 'phone_saved_credential_binding',
+      agent_id: input.agentId,
+      archive_scope: { agentId: input.agentId },
+    },
   });
   const output = new StructuredOutputAccumulator();
   let model = '';

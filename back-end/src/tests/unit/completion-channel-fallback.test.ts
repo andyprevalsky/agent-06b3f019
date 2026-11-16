@@ -8,7 +8,12 @@ import {
   MAX_NOTIFICATION_CORRECTIONS,
   NotificationDeliveryError,
 } from '../../providers/smsSupervisor/notificationDelivery';
-import { SMS_TEMPLATES, getAgentUrl, ROSE_LABS_URL } from '../../providers/smsTemplates';
+import {
+  SMS_TEMPLATES,
+  getAgentShareUrl,
+  getAgentUrl,
+  ROSE_LABS_URL,
+} from '../../providers/smsTemplates';
 import { SMS_MAX_BODY_CHARACTERS } from '../../providers/smsDeliveryContract';
 import { isEmojiOnlyMessage } from '../../providers/smsSupervisor/emoji';
 
@@ -32,7 +37,7 @@ const stubs: Record<string, unknown> = {
     markWhatsAppReachable: async () => {},
     markWhatsAppUnreachable: async () => {},
   },
-  '../smsTemplates': { SMS_TEMPLATES, getAgentUrl, ROSE_LABS_URL },
+  '../smsTemplates': { SMS_TEMPLATES, getAgentShareUrl, getAgentUrl, ROSE_LABS_URL },
   './mmsAttachment': { rehostMmsAttachmentUrl: async () => null },
   './sessionStore': { appendLifecycleSms: async () => {} },
   './notificationDelivery': {
@@ -43,9 +48,13 @@ const stubs: Record<string, unknown> = {
   './writeLockBody': {},
   '../smsDeliveryContract': { SMS_MAX_BODY_CHARACTERS },
   './emoji': { isEmojiOnlyMessage },
-  '../messagingAgentInteraction': { recordMessagingAgentInteraction: async () => {} },
+  // An accepted final answer is immutable: the concise compose step must never run.
+  './notificationLlm': {
+    composeLifecycleNotification: async () => {
+      throw new Error('final answers must not be recomposed');
+    },
+  },
   './notificationCards': {
-    deliverNotificationCard: async () => {},
     approvalNotificationContent: () => {
       throw new Error('completion must not build an approval card');
     },
@@ -65,7 +74,8 @@ vm.runInNewContext(code, {
   console,
 });
 async function main() {
-  const url = getAgentUrl('completion-fixture');
+  // Finish texts link the agent's share page (roselabs.ai/a/<id>, with its link preview).
+  const url = getAgentShareUrl('completion-fixture');
   for (const answer of ['x'.repeat(SMS_MAX_BODY_CHARACTERS + 1), '😀', '👨‍👩‍👧‍👦']) {
     sent.length = 0;
     const result = await exported.notifyCompletion(

@@ -102,9 +102,14 @@ legacy unlinked repo connections is one indexed query per list.
 - Schema: migration `20261115215734_project_is_folder` (adds
   `Project.isFolder BOOLEAN NOT NULL DEFAULT true`); republish the canonical
   PG15 seed fixture. No Zod request-schema changes.
-- The Mac app half (`mac-app/` may not be committed from Linux) ships separately from
-  a Mac: `docs/handoffs/projects-are-repos-mac-app/` (patch + validation steps). Until
-  then the web shows "Desktop only · Download for Mac" for Import from your computer.
+- The Mac app half ships in this change (Andy, 2026-11-16: mac-app is committed from
+  Linux; mac tests that cannot run there are skipped as unverified): `extraResources`
+  `scripts/lib/rose-sync` → `Resources/rose-cli`, `main/domains/rose-cli` (the
+  `~/.rose/bin/rose` launcher and the import run manager), `window.api.roseCli`
+  (`pickProjectFolder`, `importProject`, `onImportEvent`, `cancelImport`; the login code
+  reaches the CLI only as `ROSE_LOGIN_CODE`), and `scripts/mac-app-release-decision`
+  shipping a Mac release on a `scripts/lib/rose-sync/**` change. Until that release
+  installs, the web shows "Desktop only · Download for Mac" for Import from your computer.
 
 ## Known limits
 

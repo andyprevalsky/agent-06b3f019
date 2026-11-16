@@ -495,6 +495,23 @@ class AttemptCompletionBrowserTool(BaseModel):
     tool: Literal["attempt_completion"]
 
 
+# Phone wire operations that may share one model response with other calls.
+# Every agent call advances the lease cursor; batch fences use the receipt
+# cursor. Navigation changes the screen, so only reads may follow it. Setup, release, credential, message and unlisted
+# operations always require their own model turn.
+PHONE_READ_OPERATIONS = frozenset({"screen.text", "screen.bounds", "apps.list"})
+PHONE_NAVIGATION_OPERATIONS = frozenset({
+    "input.tap", "input.press", "input.drag", "input.scroll", "input.keys",
+    "apps.launch", "nav.home",
+})
+PHONE_BATCHABLE_OPERATIONS = PHONE_READ_OPERATIONS | PHONE_NAVIGATION_OPERATIONS | {"input.text"}
+
+
+def phone_call_batchable(params: Dict[str, Any]) -> bool:
+    return params.get("mode") == "status" or (
+        params.get("mode") == "operation" and params.get("operation") in PHONE_BATCHABLE_OPERATIONS)
+
+
 class PhoneBrowserTool(BaseModel):
     """Operate the account's dedicated cloud iPhone through Rose."""
     model_config = {"extra": "forbid"}
@@ -551,7 +568,9 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 class RecoverFromChallengeBrowserTool(BaseModel):
     """Relatively expensive staged recovery to force-open a blocked page or service.
 
-    It can move the browser to a different browser/IP configuration (network exit).
+    Recovery replaces this browser's machine in place: you stay the same browser agent
+    on the same task, with no new browser agent and no second session. It can move the
+    browser to a different browser/IP configuration (network exit).
     """
 
     tool: Literal["recover_from_challenge"]
@@ -564,11 +583,11 @@ class RecoverFromChallengeBrowserTool(BaseModel):
     auth_cookies_are_preserved: bool = Field(
         default=True,
         description=(
-            "True when the current browser session is logged in and the new machine must "
-            "maintain the current authenticated state to pass the goal/task. False when you "
-            "want to explore machines that have a fresh cookie state (and thus potentially "
-            "lose auth status, but potentially fix a bad cookie which is poisoning every "
-            "session with a forced anti-bot)."
+            "True when the current browser session is logged in and must keep its current "
+            "authenticated state through recovery to pass the goal/task. False when recovery "
+            "may use a fresh cookie state (and thus potentially lose auth status, but "
+            "potentially fix a bad cookie which is poisoning every session with a forced "
+            "anti-bot)."
         ),
     )
 
@@ -592,25 +611,28 @@ class PaymentLineItem(BaseModel):
         description="Product image URL if visible",
         validation_alias=AliasChoices("image_url", "imageUrl"),
     )
-    product_url: str = Field(
+    product_url: Optional[str] = Field(
+        default=None,
         description=(
-            "Canonical product-detail page URL for this item. This must link to the product itself, "
-            "never a cart, basket, checkout, payment, or order-confirmation page."
+            "This item's own product page URL, when it has one; omit it when the item has no page of its "
+            "own. Never a cart, basket, checkout, payment, or order-confirmation page."
         ),
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
-    rating: str = Field(
+    rating: Optional[str] = Field(
+        default=None,
         description=(
             "Product rating shown on the product page, such as '4.8 stars'. If the page "
-            "genuinely shows no rating (e.g. a service, ticket, or event booking), pass "
-            "'0 stars', never 'N/A', 'none', 'unknown', or a made-up number."
-        )
+            "genuinely shows no rating (e.g. a service, ticket, or event booking), omit it; "
+            "never pass 'N/A', 'none', 'unknown', or a made-up number."
+        ),
     )
-    review_count: str = Field(
+    review_count: Optional[str] = Field(
+        default=None,
         description=(
             "Product review count shown on the product page, preserving visible formatting. "
             "If the page genuinely shows no reviews (e.g. a service, ticket, or event "
-            "booking), pass '0 reviews', never 'N/A', 'none', 'unknown', or a made-up number."
+            "booking), omit it; never pass 'N/A', 'none', 'unknown', or a made-up number."
         ),
         validation_alias=AliasChoices("review_count", "reviewCount"),
     )
@@ -628,17 +650,19 @@ class PaymentLineItem(BaseModel):
 
     @field_validator("product_url")
     @classmethod
-    def require_product_detail_url(cls, value: str) -> str:
+    def require_product_detail_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
         return validate_product_detail_url(value)
 
     @field_validator("rating")
     @classmethod
-    def require_product_rating(cls, value: str) -> str:
+    def require_product_rating(cls, value: Optional[str]) -> Optional[str]:
         return validate_product_rating(value)
 
     @field_validator("review_count")
     @classmethod
-    def require_product_review_count(cls, value: str) -> str:
+    def require_product_review_count(cls, value: Optional[str]) -> Optional[str]:
         return validate_product_review_count(value)
 
 
@@ -660,8 +684,9 @@ class RequestPaymentCardBrowserTool(BaseModel):
     currency: Literal["USD"] = Field(default="USD", description="Purchase currency; currently only USD")
     line_items: List[PaymentLineItem] = Field(
         description=(
-            "Full itemized receipt. Every item must include its canonical product-detail URL, rating, "
-            "review count, image URL if visible, quantity, unit price, and line total."
+            "Full itemized receipt. Every item must include its image URL if visible, quantity, unit price, "
+            "and line total, plus its own product page URL when it has one, and its rating and review count "
+            "when the page shows them."
         ),
         min_length=1,
         validation_alias=AliasChoices("line_items", "lineItems"),
@@ -752,17 +777,21 @@ class WriteLockPurchaseItem(BaseModel):
         default=None,
         description="Short visible item description or variant details. Keep under 80 characters.",
     )
-    rating: str = Field(description="Required numeric product rating, such as '4.6 stars'.")
-    review_count: str = Field(
+    rating: Optional[str] = Field(
+        default=None, description="Numeric product rating, such as '4.6 stars', when the page shows one."
+    )
+    review_count: Optional[str] = Field(
+        default=None,
         description=(
-            "Required numeric review count followed by 'reviews' or 'ratings', "
-            "for example '312 reviews'."
+            "Numeric review count followed by 'reviews' or 'ratings', "
+            "for example '312 reviews', when the page shows one."
         ),
         validation_alias=AliasChoices("review_count", "reviewCount", "reviews"),
     )
     image_url: Optional[str] = Field(default=None, description="Best image URL for this item.")
-    product_url: str = Field(
-        description="Required canonical product-detail URL; never use a cart, checkout, payment, or order URL.",
+    product_url: Optional[str] = Field(
+        default=None,
+        description="This item's own product page URL, when it has one; never use a cart, checkout, payment, or order URL.",
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
     seller: Optional[str] = Field(default=None, description="Visible seller or merchant for this item.")
@@ -787,17 +816,19 @@ class WriteLockPurchaseItem(BaseModel):
 
     @field_validator("rating")
     @classmethod
-    def require_product_rating(cls, value: str) -> str:
+    def require_product_rating(cls, value: Optional[str]) -> Optional[str]:
         return validate_product_rating(value)
 
     @field_validator("review_count")
     @classmethod
-    def require_product_review_count(cls, value: str) -> str:
+    def require_product_review_count(cls, value: Optional[str]) -> Optional[str]:
         return validate_product_review_count(value)
 
     @field_validator("product_url")
     @classmethod
-    def require_product_detail_url(cls, value: str) -> str:
+    def require_product_detail_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
         return validate_product_detail_url(value)
 
 
@@ -995,6 +1026,8 @@ class GenerateWriteLockNotificationTool(BaseModel):
         if self.trigger_type == "purchase" and self.purchase is not None:
             trusted_page_urls = (info.context or {}).get("trusted_page_urls")
             for item in self.purchase.items:
+                if item.product_url is None:
+                    continue
                 if trusted_page_urls:
                     validate_product_url_for_pages(item.product_url, trusted_page_urls)
                 else:

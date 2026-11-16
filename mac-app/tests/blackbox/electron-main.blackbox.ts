@@ -90,6 +90,11 @@ vi.mock('../../main/domains/auto-updater/runtime', () => ({
 vi.mock('../../main/domains/local-code-runner/runtime', () => ({
   startLocalCodeRunner: vi.fn(),
 }));
+// The real runtime writes ~/.rose/bin/rose; wiring tests must never touch the user's home.
+const startRoseCliMock = vi.fn();
+vi.mock('../../main/domains/rose-cli/runtime', () => ({
+  startRoseCli: startRoseCliMock,
+}));
 vi.mock('../../main/domains/auth/runtime', () => ({
   AuthService: { getSession: getSessionMock },
 }));
@@ -217,6 +222,7 @@ describe('blackbox: electron-main (main-wiring)', () => {
     registerUpdateIpcMock.mockClear();
     getSessionMock.mockClear();
     getSessionMock.mockResolvedValue({ access_token: 'test-access-token' });
+    startRoseCliMock.mockClear();
     importPasskeysFromTokenMock.mockClear();
     importPasskeysFromTokenMock.mockResolvedValue({
       success: true,
@@ -387,6 +393,8 @@ describe('blackbox: electron-main (main-wiring)', () => {
 
     expect(registerUpdateIpcMock).toHaveBeenCalledTimes(1);
     expect(initAutoUpdaterMock).toHaveBeenCalledTimes(1);
+    // Every start (re)writes the `rose` launcher for this app location.
+    expect(startRoseCliMock).toHaveBeenCalledTimes(1);
   });
 
   it('whenReady: resets stale offscreen saved main-window placement to the primary display', async () => {

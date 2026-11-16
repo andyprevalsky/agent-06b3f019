@@ -3,23 +3,55 @@
  * [LOADING] → [READY | ERROR]; [READY] → explicit checkbox → [SAVING]
  * [SAVING] → refetch authoritative shares → [READY]; failure → [ERROR + unchanged checkbox].
  * Membership never enables sharing. Only the resource owner can issue these writes.
+ *
+ * AccountTeamShare (one shareable account on its Integrations row: a Gmail address, iMessage,
+ * WhatsApp, LinkedIn, a Granola / Fireflies account, a Plaid institution, a GitHub repo, a
+ * Claude / ChatGPT subscription account or a CLI; never iPhone, browser cookies, passwords
+ * or Pebble Index 01):
+ *   [PRIVATE] dashed "Share" button
+ *   [SHARED]  "Shared with <team>" | "Shared with N teams" (hover → tooltip naming every team) + ⌄
+ *   either --click--> [PICKER OPEN] "Share with teams" · the account's label (else the
+ *     integration's name) · one checkbox per accepted team, even when there is only one
+ *     · what teammates' agents get for this kind of account
+ *     checkbox --toggle--> [SAVING] (same cycle as above) → caption follows the refetched shares
+ *     escape / outside click → closed
+ *   Not rendered while loading, signed out, with no accepted team, or for an account the backend
+ *   does not list as shareable (damaged Gmail credential, ambiguous single-row account,
+ *   disconnected or still-setting-up account).
+ *   A failed teams/accounts load shows once, page-level (TeamShareLoadError).
+ *
+ * System context:
+ *   Integrations page → TeamShareLoadError (top) and each shareable account row
+ *     (DesktopIntegrations → desktopSectionViews / DesktopComputeRow, the stock sections, and the
+ *     shared GitHub Repos / CLIs cards)
+ *     → useAccountShares().shareTarget(provider, account) → AccountTeamShare
+ *     → GET /teams + GET /teams/shareable-integrations (one shared react-query cache)
+ *     → PUT | DELETE /teams/:teamId/integrations/:accountId → refetch both
  */
-import { useId } from 'react';
+import { useId, type ReactNode } from 'react';
+import { ChevronDown, UserPlus, Users } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
+  accountLabel,
   setTeamIntegration,
   setTeamProject,
   isAccountShared,
-  integrationLabel,
+  type ShareableIntegration,
+  type Team,
 } from '@/lib/api/teams';
-import { useShareableIntegrations, useTeamMutation, useTeams } from '@/hooks/useTeams';
+import { useAccountShares, useTeamMutation, useTeams } from '@/hooks/useTeams';
 
 export function TeamShareToggle({
   label,
+  detail,
   checked,
   disabled = false,
   save,
 }: {
   label: string;
+  /** Muted right-aligned note (member count); visual only, not part of the checkbox name. */
+  detail?: string;
   checked: boolean;
   disabled?: boolean;
   save: (shared: boolean) => Promise<unknown>;
@@ -43,6 +75,11 @@ export function TeamShareToggle({
             Saving…
           </span>
         )}
+        {detail !== undefined && (
+          <span aria-hidden="true" className="ml-auto shrink-0 text-[11px] text-muted-foreground">
+            {detail}
+          </span>
+        )}
       </label>
       {mutation.isError && (
         <p id={errorId} role="alert" className="mt-1 text-sm text-red-600">
@@ -53,52 +90,117 @@ export function TeamShareToggle({
   );
 }
 
-/** Also used on Integrations: each account chooses each accepted team independently. */
-export function IntegrationTeamSharing() {
-  const teams = useTeams();
-  const accounts = useShareableIntegrations();
-  if (!teams.userId) return null;
+const CAPTION_CLASSES =
+  'inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-black/5 hover:text-foreground data-[state=open]:bg-black/5 data-[state=open]:text-foreground dark:hover:bg-white/[0.08] dark:data-[state=open]:bg-white/[0.08]';
+const PRIVATE_CLASSES = `${CAPTION_CLASSES} border border-dashed border-border hover:text-[#e8507f] data-[state=open]:text-[#e8507f] dark:hover:text-[#ff7aa2] dark:data-[state=open]:text-[#ff7aa2]`;
+
+const MEETING_NOTES = "Teammates' agents can read this account's meeting notes.";
+const SUBSCRIPTION = "Teammates' agents can use this subscription after their own.";
+/** What a teammate's agent gets from each kind of shared account (messages by default). */
+const SHARE_EFFECT = new Map<string, string>([
+  ['granola', MEETING_NOTES],
+  ['fireflies', MEETING_NOTES],
+  ['plaid', "Teammates' agents can read this institution's transactions."],
+  ['github_repo', "Teammates' code agents can use this repo."],
+  ['claude_code', SUBSCRIPTION],
+  ['gpt_code', SUBSCRIPTION],
+  ['cli', "Teammates' agents can run this CLI in your sandbox."],
+]);
+const shareEffect = (account: ShareableIntegration) =>
+  SHARE_EFFECT.get(account.provider) ?? "Teammates' agents can read this account's messages.";
+
+function memberCount(team: Team): string {
+  const count = team.members.filter((member) => member.status === 'ACCEPTED').length;
+  return `${count} ${count === 1 ? 'member' : 'members'}`;
+}
+
+/** Hovering "N teams" names every team the account is shared with. */
+function TeamsTooltip({ teams, children }: { teams: Team[]; children: ReactNode }) {
   return (
-    <section aria-label="Integration team sharing" className="rounded-xl border border-border p-5">
-      <h2 className="font-semibold">Share integration data with teams</h2>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Choose each account and team explicitly. New connections stay private. Email and iMessage
-        data can be shared; iPhone access and credentials stay private.
-      </p>
-      {(teams.isPending || accounts.isPending) && (
-        <p role="status" className="mt-3 text-sm">
-          Loading sharing settings…
-        </p>
-      )}
-      {(teams.isError || accounts.isError) && (
-        <p role="alert" className="mt-3 text-sm text-red-600">
-          {teams.error?.message || accounts.error?.message}
-        </p>
-      )}
-      {accounts.data?.integrations.map((account) => (
-        <fieldset key={account.id} className="mt-4 border-t border-border pt-3">
-          <legend className="text-sm font-medium">{integrationLabel(account)}</legend>
-          {teams.data?.teams.map((team) => (
-            <TeamShareToggle
-              key={team.id}
-              label={`Share ${integrationLabel(account)} with ${team.name}`}
-              checked={isAccountShared(team, account)}
-              save={(shared) => setTeamIntegration(team.id, account.id, shared)}
-            />
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent className="text-xs">
+          <p className="mb-0.5 text-muted-foreground">Shared with</p>
+          {teams.map((team) => (
+            <p key={team.id} className="flex items-center gap-1.5">
+              <Users className="h-3 w-3 opacity-60" aria-hidden="true" />
+              {team.name}
+            </p>
           ))}
-        </fieldset>
-      ))}
-      {teams.data?.teams.length === 0 && (
-        <p className="mt-3 text-sm text-muted-foreground">
-          Create or join a team to choose what to share.
-        </p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+/** "Shared with …" / "Share" beside one account; opens a checkbox per team. */
+export function AccountTeamShare({
+  account,
+  teams,
+}: {
+  account: ShareableIntegration;
+  teams: Team[];
+}) {
+  const shared = teams.filter((team) => isAccountShared(team, account));
+  const name = accountLabel(account);
+  const who = shared.length === 1 ? shared[0].name : `${shared.length} teams`;
+  const trigger = (
+    <PopoverTrigger asChild>
+      {shared.length === 0 ? (
+        <button type="button" className={PRIVATE_CLASSES} aria-label={`Share ${name}`}>
+          <UserPlus className="h-3 w-3" aria-hidden="true" />
+          Share
+        </button>
+      ) : (
+        <button type="button" className={CAPTION_CLASSES} aria-label={`${name} shared with ${who}`}>
+          <Users className="h-3 w-3" aria-hidden="true" />
+          Shared with
+          <span
+            className={`font-medium text-foreground/85 ${shared.length > 1 ? 'underline decoration-dotted underline-offset-2' : ''}`}
+          >
+            {who}
+          </span>
+          <ChevronDown className="h-3 w-3 opacity-60" aria-hidden="true" />
+        </button>
       )}
-      {accounts.data?.integrations.length === 0 && (
-        <p className="mt-3 text-sm text-muted-foreground">
-          No connected email or iMessage accounts.
+    </PopoverTrigger>
+  );
+  return (
+    <Popover>
+      {shared.length > 1 ? <TeamsTooltip teams={shared}>{trigger}</TeamsTooltip> : trigger}
+      <PopoverContent
+        align="start"
+        aria-label={`Share ${name} with teams`}
+        className="z-[230] w-64 rounded-xl p-3"
+      >
+        <p className="text-[13px] font-medium">Share with teams</p>
+        <p className="mb-1 truncate text-[11.5px] text-muted-foreground">{name}</p>
+        {teams.map((team) => (
+          <TeamShareToggle
+            key={team.id}
+            label={team.name}
+            detail={memberCount(team)}
+            checked={isAccountShared(team, account)}
+            save={(next) => setTeamIntegration(team.id, account.id, next)}
+          />
+        ))}
+        <p className="mt-2 border-t border-border pt-2 text-[11px] leading-snug text-muted-foreground">
+          {shareEffect(account)} Credentials stay private.
         </p>
-      )}
-    </section>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** The one page-level notice when sharing settings fail to load (captions stay hidden). */
+export function TeamShareLoadError() {
+  const { error } = useAccountShares();
+  if (error === null) return null;
+  return (
+    <p role="alert" className="text-sm text-red-600 dark:text-red-300">
+      Team sharing unavailable: {error}
+    </p>
   );
 }
 

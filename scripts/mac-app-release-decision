@@ -50,9 +50,11 @@ is_ignored_path() {
 }
 
 # Roots whose non-ignored contents are compiled into the shipped app.
+# scripts/lib/rose-sync is the `rose` CLI the app bundles (mac-app/package.json
+# build.extraResources -> Resources/rose-cli), so a CLI change must ship too.
 is_shipped_path() {
   case "$1" in
-    mac-app/* | front-end/*) return 0 ;;
+    mac-app/* | front-end/* | scripts/lib/rose-sync/*) return 0 ;;
     *) return 1 ;;
   esac
 }

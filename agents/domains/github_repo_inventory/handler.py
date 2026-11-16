@@ -1,10 +1,11 @@
-"""Workflow-side entry point: the root's projects for its environment block.
+"""Workflow-side entry point: the root's projects (and uncovered GitHub repos) for its environment block.
 
     AgentWorkflow._sync_environment_context (root only)
         ──▶ fetch_root_projects ──▶ fetch_github_repo_inventory_activity (one attempt)
-        ──▶ {projects, total} listing (capped entries + exact total; no entries = no
-            projects), or None when the fetch failed or the result carries no project
-            list (the environment block then keeps the listing the model was last shown)
+        ──▶ {projects, repos, total} listing (capped entries + exact total; no entries =
+            no projects), or None when either fetch failed or the result carries no
+            project list or a malformed repo list (the environment block then keeps the
+            listing the model was last shown)
 
 Fetched live on every sync (no cache), so adding or removing a project shows up
 on the root's next turn. Imported inside the Temporal workflow sandbox.
@@ -19,14 +20,14 @@ from temporalio.common import RetryPolicy
 
 from domains.github_repo_inventory.config import ACTIVITY_TIMEOUT
 from domains.github_repo_inventory.service import fetch_github_repo_inventory_activity
-from helpers.github_repo_inventory import MAX_PROJECTS, compact_projects
+from helpers.github_repo_inventory import project_listing
 
 
 async def fetch_root_projects(workflow_instance: Any) -> Optional[Dict[str, Any]]:
-    """The workflow user's ``{projects, total}`` listing; empty without a user, None when the fetch failed."""
+    """The workflow user's ``{projects, repos, total}`` listing; empty without a user, None when unavailable."""
     user_id = getattr(workflow_instance, "user_id", None)
     if not isinstance(user_id, str) or not user_id:
-        return {"projects": [], "total": 0}
+        return {"projects": [], "repos": [], "total": 0}
     try:
         result = await workflow.execute_activity(
             fetch_github_repo_inventory_activity,
@@ -37,8 +38,11 @@ async def fetch_root_projects(workflow_instance: Any) -> Optional[Dict[str, Any]
     except Exception as exc:
         workflow.logger.warning(f"[environment] project list unavailable: {type(exc).__name__}")
         return None
-    projects = result.get("projects") if isinstance(result, dict) else None
-    if not isinstance(projects, list) or result.get("available") is False:
+    if not isinstance(result, dict) or result.get("available") is False:
         workflow.logger.warning("[environment] project list unavailable")
         return None
-    return {"projects": compact_projects(projects)[: MAX_PROJECTS + 1], "total": result.get("total")}
+    projects, repos = result.get("projects"), result.get("repos", [])
+    if not isinstance(projects, list) or not isinstance(repos, list):
+        workflow.logger.warning("[environment] project list malformed")
+        return None
+    return {**project_listing(projects, repos), "total": result.get("total")}

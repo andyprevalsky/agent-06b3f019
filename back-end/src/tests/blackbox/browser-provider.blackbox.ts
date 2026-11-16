@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { runSteelAwareParity } from './browser-provider.steel-persistence-outage.support';
+import { quarantinedKernelParity } from './browser-provider-kernel-parity.quarantine';
 import { steelPersistenceOutageCases } from './browser-provider.steel-persistence-outage.cases';
 
 import nodeAssert from 'node:assert/strict';
@@ -35,7 +36,6 @@ import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
-import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
 import {
   gateOverridden,
@@ -49,6 +49,7 @@ import { assertStaleProxyCreateFailureIsLabeled } from './browser-provider-proxy
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
 import { tilionDnsWorkerCases } from './browser-provider.tilion-dns-worker.support';
+import { authPersistFixtureCases } from './browser-provider.auth-persist-origin.support';
 import { steelAuthShareCases } from './browser-provider.steel-auth-share.support';
 import {
   createBrowserUseRecoverySession,
@@ -85,10 +86,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'Steel PAUSED replacement failure recovers through release404',
     () => assertSteelSameProfileReplacement(true),
   ],
-  [
-    'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
-    assertAuthPersistFailedInitCustody,
-  ],
+  ...authPersistFixtureCases,
   // Tilion became the default for new sessions (docs/plans/completed/tilion-browser-provider.md).
   ...tilionWiringCases,
   ...steelAuthShareCases,
@@ -600,9 +598,11 @@ async function main(): Promise<void> {
       'Kernel residential proxy unavailable'
     );
   } else if (LIVE_PROVIDERS) {
-    const parity = await runSteelAwareParity(runLiveProviderParity, true);
-    failed += parity.failed;
-    steelPersistenceSkipped = parity.skipped;
+    await quarantinedKernelParity(async () => {
+      const parity = await runSteelAwareParity(runLiveProviderParity, true);
+      steelPersistenceSkipped = parity.skipped;
+      if (parity.failed > 0) throw new Error('live Kernel provider parity failed');
+    })();
   } else console.log('Live provider cases run in the browser-provider-live deploy probe.');
   if (LIVE_PROVIDERS) failed += await runLiveCrossProviderCases();
 

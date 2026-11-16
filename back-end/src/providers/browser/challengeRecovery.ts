@@ -161,6 +161,8 @@ export interface BrowserConfigSearchRuntimeDependencies {
   probe: typeof probeCandidateBrowser;
   /** Tell the live view about the promoted binding before the old session is released. */
   announceBinding?: typeof announceBrowserSessionBinding;
+  /** Whole-search budget override (tests); defaults to RECOVERY_SEARCH_DEADLINE_MS. */
+  searchDeadlineMs?: number;
 }
 
 export interface RecoveryStorageLane {
@@ -371,7 +373,7 @@ export async function probeCandidateBrowser(
       page.off('response', onResponse);
       page.off('requestfailed', onRequestFailed);
     }
-    if (attempt.usage) classifierLlmUsage.push(attempt.usage);
+    classifierLlmUsage.push(...(attempt.usages ?? (attempt.usage ? [attempt.usage] : [])));
     const transportRestored =
       !attempt.clean &&
       restoredTunnelCandidate({

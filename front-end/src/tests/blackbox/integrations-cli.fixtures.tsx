@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, act } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { screen, waitFor, act, within } from '@testing-library/react';
+import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
@@ -34,11 +34,49 @@ export function registerCliIntegrationTests() {
       vi.useRealTimers();
     });
 
+    // Stock: the CLI card. Desktop: the "CLIs" integration row with account chips.
+    const requestLabel = roseDesktop ? 'CLI to connect' : 'Enter the CLI you want to connect';
+    const submitName = roseDesktop ? 'Connect CLI' : 'Connect';
+    const cliRow = () => within(screen.getByTestId('integration-row-clis'));
+    const ycChip = () => {
+      const chip = cliRow().getByText('YC CLI').closest<HTMLElement>('[data-tone]');
+      if (chip === null) throw new Error('No YC CLI account chip');
+      return chip;
+    };
+
+    async function openForm(user: UserEvent) {
+      const name = roseDesktop ? 'Connect CLIs' : 'Add CLI';
+      await user.click(await screen.findByRole('button', { name }));
+    }
+
+    /** Pending setup: card text, or a syncing chip under the shared sync bar. */
+    async function expectSettingUp() {
+      if (!roseDesktop) {
+        expect(await screen.findByText('Setting up…')).toBeVisible();
+        return;
+      }
+      await waitFor(() => expect(ycChip()).toHaveAttribute('data-tone', 'syncing'));
+      expect(cliRow().getByTestId('sync-progress')).toBeVisible();
+    }
+
+    async function expectVerified() {
+      if (!roseDesktop) {
+        await waitFor(() => expect(screen.queryByText('Setting up…')).not.toBeInTheDocument());
+        expect(screen.getByText('Connected', { exact: true })).toBeVisible();
+        return;
+      }
+      await waitFor(() => expect(ycChip()).toHaveAttribute('data-tone', 'synced'));
+      expect(ycChip()).toHaveAttribute('title', 'Connected');
+      expect(cliRow().queryByTestId('sync-progress')).toBeNull();
+    }
+
     it('keeps the integrations page mounted when the CLI list response has no integrations', async () => {
       server.use(http.get(`${API_BASE}/integrations/cli`, () => HttpResponse.json({})));
       renderWithProviders(<Integrations />, { roseDesktop });
       expect(await screen.findByRole('alert')).toHaveTextContent('Unexpected CLI response');
-      expect(screen.getByRole('button', { name: 'Add CLI' })).toBeVisible();
+      expect(
+        screen.getByRole('button', { name: roseDesktop ? 'Connect CLIs' : 'Add CLI' }),
+      ).toBeVisible();
     });
 
     it('starts the requested CLI once with authentication and opens its setup agent', async () => {
@@ -53,12 +91,16 @@ export function registerCliIntegrationTests() {
       );
       renderWithProviders(<Integrations />, { roseDesktop });
       const user = userEvent.setup();
-      await user.click(await screen.findByRole('button', { name: 'Add CLI' }));
-      expect(screen.getByAltText('Claude')).toBeVisible();
-      expect(screen.getByLabelText('Enter the CLI you want to connect')).toHaveFocus();
-      await user.type(screen.getByLabelText('Enter the CLI you want to connect'), 'YC CLI');
-      await user.click(screen.getByRole('button', { name: 'Connect' }));
-      expect(await screen.findByText('Setting up…')).toBeVisible();
+      await openForm(user);
+      if (!roseDesktop) expect(screen.getByAltText('Claude')).toBeVisible();
+      expect(screen.getByLabelText(requestLabel)).toHaveFocus();
+      await user.type(screen.getByLabelText(requestLabel), 'YC CLI');
+      await user.click(screen.getByRole('button', { name: submitName }));
+      await expectSettingUp();
+      if (roseDesktop) {
+        expect(screen.queryByRole('form', { name: 'Connect CLI' })).toBeNull();
+        expect(within(ycChip()).getByRole('button', { name: 'Open setup' })).toBeVisible();
+      }
       expect(submitted?.request).toBe('YC CLI');
       expect(submitted?.request_id).toMatch(/^[0-9a-f-]{36}$/);
       expect(authorization).toMatch(/^Bearer /);
@@ -88,18 +130,27 @@ export function registerCliIntegrationTests() {
         );
         renderWithProviders(<Integrations />, { roseDesktop });
         const user = userEvent.setup();
-        await user.click(await screen.findByRole('button', { name: 'Add CLI' }));
-        await user.type(screen.getByLabelText('Enter the CLI you want to connect'), 'YC CLI');
-        await user.click(screen.getByRole('button', { name: 'Connect' }));
+        await openForm(user);
+        await user.type(screen.getByLabelText(requestLabel), 'YC CLI');
+        await user.click(screen.getByRole('button', { name: submitName }));
         expect(await screen.findByRole('alert')).toHaveTextContent(
           format === 'html' ? 'Could not connect CLI' : 'Connection interrupted',
         );
-        await user.click(screen.getByRole('button', { name: 'Connect' }));
+        await user.click(screen.getByRole('button', { name: submitName }));
         expect(await screen.findByText('Sign-in needs attention')).toBeVisible();
         expect(ids).toHaveLength(2);
         expect(ids[1]).toBe(ids[0]);
-        await user.click(screen.getByRole('button', { name: 'Retry' }));
-        expect(screen.getByLabelText('Enter the CLI you want to connect')).toHaveValue('YC CLI');
+        if (roseDesktop) {
+          // The failure is an error chip with its reason on the line under the chips.
+          expect(ycChip()).toHaveAttribute('data-tone', 'error');
+          expect(cliRow().getByTestId('account-sync-error')).toHaveTextContent(
+            'Sign-in needs attention',
+          );
+          await user.click(within(ycChip()).getByRole('button', { name: 'Retry' }));
+        } else {
+          await user.click(screen.getByRole('button', { name: 'Retry' }));
+        }
+        expect(screen.getByLabelText(requestLabel)).toHaveValue('YC CLI');
       },
     );
 
@@ -116,13 +167,12 @@ export function registerCliIntegrationTests() {
       );
       vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
       const { unmount } = renderWithProviders(<Integrations />, { roseDesktop });
-      await screen.findByText('Setting up…');
+      await expectSettingUp();
       verified = true;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
-      await waitFor(() => expect(screen.queryByText('Setting up…')).not.toBeInTheDocument());
-      expect(screen.getByText('Connected', { exact: true })).toBeVisible();
+      await expectVerified();
       const afterVerified = calls;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(15_000);
@@ -144,7 +194,7 @@ export function registerCliIntegrationTests() {
       );
       vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
       const { unmount } = renderWithProviders(<Integrations />, { roseDesktop });
-      await screen.findByText('Setting up…');
+      await expectSettingUp();
       unmount();
       const before = calls;
       await act(async () => {

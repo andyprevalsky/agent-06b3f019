@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 import structlog
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
@@ -33,6 +34,10 @@ ETA = {**{f"{i}m": i * 60 for i in range(1, 60)},
        **{f"{i}mo": i * 30 * 86400 for i in range(1, 12)}, "1y": 31536000}
 logger = structlog.get_logger()
 _limits: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+class JEVBudgetExceeded(ValueError):
+    """The clipped prefix exceeds the frozen token budget; a longer prefix cannot fit."""
 
 
 def clip(value: Any, limit: int = 2000) -> Any:
@@ -128,7 +133,7 @@ def request(snapshot: dict, prompt: dict) -> dict:
                 break
             state["history"] = clip(state["history"], limit)
         if len(encoding.encode(json.dumps(state))) >= 24000:
-            raise ValueError("JEV prefix exceeds 24k token budget")
+            raise JEVBudgetExceeded("JEV prefix exceeds 24k token budget")
     if fmt == "timeline":
         state["history"] = "\n".join(json.dumps(e, ensure_ascii=False) for e in state["history"])
     return {"model": MODEL, "state": state, "questions": {
@@ -161,40 +166,136 @@ def decode(raw: dict, snapshot: dict, prompt_version: str) -> dict:
     return estimate
 
 
-async def _predict_jev_progress_impl(snapshot: dict) -> None:
-    """Best effort, bounded HTTP; cancellation propagates through both requests."""
+TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+
+
+def _archive_jev_request(snapshot: dict, body: dict, prompt_version: str) -> str | None:
+    """Archive the exact TypeSafe request as a v2 start record in the root bundle.
+
+    Kept out of the ClickHouse log copy: request bodies never enter logs.
+    """
+    from helpers.observability import dump_llm_context
+
+    return dump_llm_context(
+        "jev_progress",
+        [],
+        agent_id=snapshot["agentId"],
+        model=MODEL,
+        config={
+            "provider": "typesafe",
+            "endpoint": TYPESAFE_URL,
+            "prompt_version": prompt_version,
+            "request_body": body,
+            "task_id": snapshot.get("taskId"),
+            "sequence": snapshot.get("sequence"),
+        },
+        log_copy=False,
+    )
+
+
+def _archive_jev_result(dump: str | None, raw: Any, estimate: dict | None, error: BaseException | None) -> None:
+    if not dump:
+        return
+    from helpers.observability import update_llm_dump
+
+    output: dict = {
+        "content": json.dumps(raw, ensure_ascii=False, default=str) if raw is not None else "",
+        "structured": raw,
+        "estimate": estimate,
+        "usage": (raw or {}).get("usage") if isinstance(raw, dict) else None,
+        "actual_model": (raw or {}).get("model") if isinstance(raw, dict) else None,
+        "provider": "typesafe",
+    }
+    if error is not None:
+        output["error"] = {"type": type(error).__name__, "message": str(error)[:500]}
+    update_llm_dump(dump, model=MODEL, output=output)
+
+
+def _prepare(snapshot: dict) -> tuple[dict, str]:
+    """Pinned prompt plus the clipped request body: file, JSON and tokenizer work."""
+    raw_prompt = (Path(__file__).resolve().parents[1] / "config/jev_progress_prompt.json").read_bytes()
+    document = json.loads(raw_prompt)
+    prompt = document.get("prompt", document)
+    version = hashlib.sha256(json.dumps(prompt, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    if document.get("model", MODEL) != MODEL or document.get("promptVersion", version) != version:
+        raise ValueError("Invalid pinned JEV prompt")
+    return request(snapshot, prompt), version
+
+
+async def _predict_jev_progress_impl(snapshot: dict) -> dict | None:
+    """Best effort, bounded HTTP; cancellation propagates through both requests.
+
+    Returns {"stopSession": True} only when this prefix is too large to ever be
+    estimated: it exceeds the frozen token budget, or the provider refused its
+    size (413, or 400 with detail.error_type "max_tokens_exceeded"). The
+    session's own-call history only grows, so later prefixes would be too large
+    as well. Every other failure (auth, 5xx, timeouts, publish errors) leaves
+    the session scheduling, because it can be transient.
+    """
     key = os.environ.get("TYPESAFE_API_KEY")
     if not key:
-        return
+        return None
     loop = asyncio.get_running_loop()
     limiter = _limits.setdefault(loop, asyncio.Semaphore(4))
+    stage = "prepare"
     try:
         async with asyncio.timeout(25):
             async with limiter:
-                raw_prompt = (Path(__file__).resolve().parents[1] / "config/jev_progress_prompt.json").read_bytes()
-                document = json.loads(raw_prompt)
-                prompt = document.get("prompt", document)
-                version = hashlib.sha256(json.dumps(prompt, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-                if document.get("model", MODEL) != MODEL or document.get("promptVersion", version) != version:
-                    raise ValueError("Invalid pinned JEV prompt")
-                body = request(snapshot, prompt)
+                # Clipping a long prefix re-serializes and re-tokenizes it several
+                # times; on the loop thread that stalled the agent's own loop.
+                body, version = await asyncio.to_thread(_prepare, snapshot)
+                dump = _archive_jev_request(snapshot, body, version)
+                stage = "predict"
                 client = get_http_client()
-                response = await client.post("https://api.typesafe.ai/v1/systemone", json=body,
-                                             headers={"Authorization": f"Bearer {key}"}, timeout=20)
-                response.raise_for_status()
-                estimate = decode(response.json(), snapshot, version)
+                # A received response stays in the archive even when decoding rejects it.
+                raw: Any = None
+                try:
+                    response = await client.post(TYPESAFE_URL, json=body,
+                                                 headers={"Authorization": f"Bearer {key}"}, timeout=20)
+                    response.raise_for_status()
+                    stage = "decode"
+                    raw = response.json()
+                    estimate = decode(raw, snapshot, version)
+                except Exception as exc:
+                    _archive_jev_result(dump, raw, None, exc)
+                    raise
+                _archive_jev_result(dump, raw, estimate, None)
                 # Cancellation has no synchronous gap in which a terminal loop can race this publication.
                 await asyncio.sleep(0)
+                stage = "publish"
                 await publish_progress_estimate(snapshot["agentId"], estimate)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         # Never log request bodies, credentials, or provider response content.
-        logger.warning("jev_progress.failed", agent_id=snapshot["agentId"], error_type=type(exc).__name__)
+        fields: dict[str, Any] = {}
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            fields = {"status_code": status, "response_class": f"{status // 100}xx"}
+        logger.warning("jev_progress.failed", agent_id=snapshot["agentId"], error_type=type(exc).__name__,
+                       stage=stage, **fields)
+        if isinstance(exc, JEVBudgetExceeded) or (stage == "predict" and _refused_as_too_large(exc)):
+            return {"stopSession": True}
+    return None
+
+
+def _refused_as_too_large(exc: Exception) -> bool:
+    """TypeSafe's size refusal: 413, or 400 {"detail": {"error_type": "max_tokens_exceeded"}}."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    if exc.response.status_code == 413:
+        return True
+    if exc.response.status_code != 400:
+        return False
+    try:
+        detail = exc.response.json().get("detail")
+    except Exception:
+        return False
+    return isinstance(detail, dict) and detail.get("error_type") == "max_tokens_exceeded"
 
 
 @activity.defn
-async def predict_jev_progress(snapshot: dict) -> None:
+async def predict_jev_progress(snapshot: dict) -> dict | None:
     # Remote Temporal cancellation is delivered at heartbeats. Local asyncio
     # cancellation propagates immediately through the same request coroutine.
     async def heartbeat() -> None:
@@ -203,7 +304,7 @@ async def predict_jev_progress(snapshot: dict) -> None:
             await asyncio.sleep(1)
     heartbeat_task = asyncio.create_task(heartbeat()) if activity.in_activity() else None
     try:
-        await _predict_jev_progress_impl(snapshot)
+        return await _predict_jev_progress_impl(snapshot)
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
@@ -218,12 +319,16 @@ class JEVSession:
 
     Scheduling every turn replaces only a waiting prefix, never an active HTTP
     request. Backend sequence guards reject out-of-order active completions.
+    The own-call history only grows, so after one prefix exceeds the frozen token
+    budget or the provider refuses it as too large, every later prefix would be
+    too: the session stops estimating. Other failures never stop it.
     """
     def __init__(self, agent_id: str, task_id: str | None = None, kind: str = "normal_root"):
         self.agent_id, self.task_id, self.kind = agent_id, task_id, kind
         self.pending: set = set()
         self.queued = None
         self.closed = False
+        self.stopped = False
         self.sequence = 0
         self.history: dict[tuple, dict] = {}
 
@@ -234,7 +339,7 @@ class JEVSession:
             future.cancel()
 
     def schedule(self, goal: str, schema: Any, events: list[dict]) -> None:
-        if self.closed:
+        if self.closed or self.stopped:
             return
         try:
             for index, event in enumerate(events):
@@ -270,9 +375,11 @@ class JEVSession:
 
     def _done(self, future: Any) -> None:
         self.pending.discard(future)
-        if not future.cancelled():
-            future.exception()
-        if not self.closed and self.queued is not None:
+        result = None if future.cancelled() or future.exception() is not None else future.result()
+        if isinstance(result, dict) and result.get("stopSession"):
+            self.stopped = True
+            self.queued = None
+        if not self.closed and not self.stopped and self.queued is not None:
             snapshot, self.queued = self.queued, None
             self._start(snapshot)
 

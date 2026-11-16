@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { prisma } from './database';
 import { retryWithBackoff } from './retry';
+import { TRACE_ARCHIVE_FINALIZING_MARKER_PATH } from './traceArchivePaths';
 import {
   type StoreResult,
   archiveEnabled,
@@ -16,7 +17,7 @@ import {
   readPlainArchivedArtifact,
 } from './traceArchiveStrict';
 
-export const TRACE_ARCHIVE_FINALIZING_MARKER = 'manifest.finalization-fence.json';
+export const TRACE_ARCHIVE_FINALIZING_MARKER = TRACE_ARCHIVE_FINALIZING_MARKER_PATH;
 
 export type ManifestArtifact = {
   ref: string;
@@ -534,4 +535,43 @@ export async function finalizationFenceExists(rootAgentId: string): Promise<bool
     rootAgentId,
     objectPath: TRACE_ARCHIVE_FINALIZING_MARKER,
   });
+}
+
+const lateReconciles = new Map<string, { again: boolean; done: Promise<void> }>();
+
+/**
+ * A write that lands after a root's finalization fence must appear in its
+ * manifests. Concurrent late writes for one root coalesce: at most one pass is
+ * running and one more is queued, so a burst of N late code/llm objects costs
+ * ≤2 bundle listings instead of N (10k-agent cost: one fence stat per write,
+ * reconciliation only for already-finalized roots).
+ */
+export async function reconcileAfterLateWrite(rootAgentId: string): Promise<void> {
+  const running = lateReconciles.get(rootAgentId);
+  if (running) {
+    running.again = true;
+    return running.done;
+  }
+  if (!(await finalizationFenceExists(rootAgentId))) return;
+  const raced = lateReconciles.get(rootAgentId);
+  if (raced) {
+    raced.again = true;
+    return raced.done;
+  }
+  const entry: { again: boolean; done: Promise<void> } = { again: false, done: Promise.resolve() };
+  entry.done = (async () => {
+    try {
+      do {
+        entry.again = false;
+        const result = await reconcileFinalizedManifest(rootAgentId, { markerExists: true });
+        if (result.status !== 'current' && result.status !== 'updated') {
+          throw new Error(`Trace archive manifest is ${result.status} for ${rootAgentId}`);
+        }
+      } while (entry.again);
+    } finally {
+      lateReconciles.delete(rootAgentId);
+    }
+  })();
+  lateReconciles.set(rootAgentId, entry);
+  return entry.done;
 }

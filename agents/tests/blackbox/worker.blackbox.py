@@ -377,16 +377,22 @@ async def test_late_activity_body_start_is_logged_with_its_dispatch_lag():
 
 
 def test_worker_registers_activity_dispatch_lag_interceptor():
-    """The production Worker(...) installs the dispatch-lag interceptor."""
+    """Every production Worker(...) installs the dispatch-lag and archive-identity interceptors."""
+    from helpers.activity_dispatch import ActivityDispatchLagInterceptor
+    from helpers.archive_identity import ArchiveIdentityInterceptor, production_worker_interceptors
+
     tree = _worker_tree()
+    workers = 0
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Worker":
+            workers += 1
             kw = next((k for k in node.keywords if k.arg == "interceptors"), None)
             assert kw is not None, "Worker(...) must pass interceptors="
             names = {n.func.id for n in ast.walk(kw.value) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            assert "ActivityDispatchLagInterceptor" in names, names
-            return
-    raise AssertionError("Worker(...) call not found")
+            assert "production_worker_interceptors" in names, names
+    assert workers >= 2, "production and validation Worker(...) calls not found"
+    kinds = {type(interceptor) for interceptor in production_worker_interceptors()}
+    assert {ActivityDispatchLagInterceptor, ArchiveIdentityInterceptor} <= kinds, kinds
 
 
 def test_activity_admission_closes_on_cpu_pressure():
@@ -458,6 +464,135 @@ def test_activity_admission_closes_on_cpu_pressure():
         raise AssertionError("expected ValueError for open_cpu >= close_cpu")
     except ValueError:
         pass
+
+
+async def test_loop_lag_attributes_stall_to_cpu_starvation_window():
+    """A loop.lag warning must say whether the stall was our work or a starved guest.
+
+    H-60 (epoch-18 Instacart r1/r2): a shared-cpu-4x bench guest exhausted its
+    CPU burst and was throttled (guest-diagnostics steal 57-77%), stretching
+    1.5-2 s DOM steps into 5-17.5 s loop stalls. loop.lag only carried process
+    cpu_pct (23% at the 17.5 s stall), so triage read it as an unknown blocker.
+    The warning now reports, for the exact tick window, the process's own CPU
+    seconds, the guest's hypervisor-steal share and cgroup throttled seconds.
+    """
+    import os
+    import time as _time
+    from collections import namedtuple
+    from unittest.mock import patch
+
+    os.environ.setdefault("TEMPORAL_ADDRESS", "localhost:7233")
+    os.environ.setdefault("TEMPORAL_TASK_QUEUE", "test")
+    import worker
+
+    fields = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal", "guest", "guest_nice")
+    SysTimes = namedtuple("scputimes", fields)
+    calls = {"n": 0}
+    monitor_sampled = asyncio.Event()
+    stall_observed = asyncio.Event()
+
+    def fake_cpu_times(percpu=False):
+        # Every sample advances 1 s user + 3 s steal (+ guest time psutil already
+        # folds into user): a 75% hypervisor-steal share of all guest vCPU time.
+        n = calls["n"] = calls["n"] + 1
+        if n >= 2:
+            monitor_sampled.set()
+        return SysTimes(float(n), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0 * n, 5.0 * n, 0.0)
+
+    events: list[dict] = []
+
+    class _Recorder:
+        def warning(self, **kw):
+            events.append(kw)
+            if kw.get("event") == "loop.lag" and kw["lag_s"] >= 0.5:
+                stall_observed.set()
+
+        def info(self, **kw):
+            events.append(kw)
+
+    with patch.object(worker, "logger", _Recorder()), patch("worker.psutil.cpu_times", fake_cpu_times):
+        monitor = asyncio.create_task(worker.monitor_event_loop_lag(interval_s=0.05, warn_threshold_s=0.25))
+        await asyncio.wait_for(monitor_sampled.wait(), timeout=0.2)
+        _time.sleep(0.6)  # blocks the loop without using CPU, like a descheduled guest
+        await asyncio.wait_for(stall_observed.wait(), timeout=0.2)
+        monitor.cancel()
+        try:
+            await monitor
+        except asyncio.CancelledError:
+            pass
+
+    stalls = [e for e in events if e.get("event") == "loop.lag" and e["lag_s"] >= 0.5]
+    assert stalls, f"the 0.6 s stall must emit loop.lag: {events}"
+    stall = stalls[0]
+    for key in ("window_s", "process_cpu_s", "steal_pct", "cgroup_throttled_s"):
+        assert key in stall, f"loop.lag must carry {key} for the stalled window: {stall}"
+    assert stall["window_s"] >= stall["lag_s"], stall
+    assert stall["process_cpu_s"] < 0.3, f"a sleeping stall used no process CPU: {stall}"
+    assert stall["steal_pct"] == 75.0, f"steal share of guest CPU time over the window: {stall}"
+    assert stall["cgroup_throttled_s"] is None or stall["cgroup_throttled_s"] >= 0, stall
+    # Existing consumers keep their fields.
+    for key in ("lag_s", "cpu_pct", "num_cpus", "asyncio_tasks", "worker_index"):
+        assert key in stall, stall
+
+
+def test_cgroup_throttle_stat_prefers_cpu_stat_local_for_ancestor_quotas():
+    """cpu.stat.local includes ancestor-imposed throttling; cpu.stat alone reads zero under a parent quota."""
+    import os
+    import tempfile
+
+    os.environ.setdefault("TEMPORAL_ADDRESS", "localhost:7233")
+    os.environ.setdefault("TEMPORAL_TASK_QUEUE", "test")
+    import worker
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = os.path.join(tmp, "cgroup")
+        root = os.path.join(tmp, "fs")
+        base = os.path.join(root, "a", "b")
+        os.makedirs(base)
+        with open(proc, "w", encoding="ascii") as fh:
+            fh.write("0::/a/b\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) is None
+        with open(os.path.join(base, "cpu.stat"), "w", encoding="ascii") as fh:
+            fh.write("usage_usec 10\nthrottled_usec 0\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) == os.path.join(base, "cpu.stat")
+        # Without cpu.stat.local, a limited ancestor makes the child's zero meaningless: unknown.
+        with open(os.path.join(root, "a", "cpu.max"), "w", encoding="ascii") as fh:
+            fh.write("50000 100000\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) is None
+        with open(os.path.join(root, "a", "cpu.max"), "w", encoding="ascii") as fh:
+            fh.write("max 100000\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) == os.path.join(base, "cpu.stat")
+        with open(os.path.join(root, "a", "cpu.max"), "w", encoding="ascii") as fh:
+            fh.write("50000 100000\n")
+        with open(os.path.join(base, "cpu.stat.local"), "w", encoding="ascii") as fh:
+            fh.write("throttled_usec 2500000\n")
+        chosen = worker._own_cgroup_cpu_stat_path(proc, root)
+        assert chosen == os.path.join(base, "cpu.stat.local")
+        assert worker._cgroup_throttled_usec(chosen) == 2500000
+        with open(proc, "w", encoding="ascii") as fh:
+            fh.write("12:cpu,cpuacct:/a/b\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) is None
+
+
+def test_cgroup_throttled_usec_reads_cpu_stat_and_reports_unknown_when_absent():
+    """Container quotas show as cgroup v2 throttled_usec, not hypervisor steal."""
+    import os
+    import tempfile as _tempfile
+
+    os.environ.setdefault("TEMPORAL_ADDRESS", "localhost:7233")
+    os.environ.setdefault("TEMPORAL_TASK_QUEUE", "test")
+    import worker
+
+    with _tempfile.TemporaryDirectory() as tmp:
+        stat = os.path.join(tmp, "cpu.stat")
+        with open(stat, "w", encoding="ascii") as fh:
+            fh.write("usage_usec 900\nnr_periods 40\nnr_throttled 30\nthrottled_usec 4512000\n")
+        assert worker._cgroup_throttled_usec(stat) == 4512000
+        with open(stat, "w", encoding="ascii") as fh:
+            fh.write("usage_usec 900\nuser_usec 700\nsystem_usec 200\n")  # no cpu.max: no bandwidth stats
+        assert worker._cgroup_throttled_usec(stat) is None
+        assert worker._cgroup_throttled_usec(os.path.join(tmp, "missing")) is None
+    assert worker._cgroup_throttled_usec(None) is None
 
 
 _FINALIZATION_BLOCKER_CHILD = """
@@ -3033,6 +3168,9 @@ async def run_all_tests():
     )
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
+    await r.record_async("loop_lag_attributes_cpu_starvation", test_loop_lag_attributes_stall_to_cpu_starvation_window)
+    r.record("cgroup_throttled_usec_parser", test_cgroup_throttled_usec_reads_cpu_stat_and_reports_unknown_when_absent)
+    r.record("cgroup_throttle_stat_prefers_local", test_cgroup_throttle_stat_prefers_cpu_stat_local_for_ancestor_quotas)
     r.record("run_then_exit_survives_a_finalization_deadlock", test_run_then_exit_survives_a_finalization_deadlock)
     r.record("exit_code_for_matches_cpython_system_exit", test_exit_code_for_matches_cpython_system_exit)
     r.record("worker_entrypoint_skips_interpreter_finalization", test_worker_entrypoint_skips_interpreter_finalization)

@@ -12,11 +12,15 @@
  */
 
 import assert from 'node:assert/strict';
-import { nudgeCardholderRecovery } from '../../providers/agentcard/fund-recovery';
+import {
+  nudgeCardholderRecoveries,
+  nudgeCardholderRecovery,
+} from '../../providers/agentcard/fund-recovery';
 import { AgentCardOrgRuntimeError } from '../../providers/agentcard/org-runtime';
 import {
   UNUSED_MINT_SETTLE_POLL_MS,
   UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS,
+  paceOrgThrottle,
   waitForUnusedMintSettled,
   type MintTransferObservation,
 } from '../../providers/agentcard/unused-mint-settle';
@@ -381,6 +385,127 @@ async function main(): Promise<void> {
       ['list_recoveries', 'recover_funds']
     );
   });
+
+  // Deploy #2106 (2026-11-15 03:34Z): ~20 concurrent deploys' treasury reads hit the shared org
+  // throttle; the run's read-only get_company_wallet probe got 401 flaps, then exhausted the
+  // runtime's 30 s 429 budget and failed the gate before anything was minted.
+  const exhaustedThrottle = (retryAfterAtMs?: number) =>
+    new AgentCardOrgRuntimeError(
+      'AgentCard Organization MCP rate limit exhausted for get_company_wallet after 5 attempts; ' +
+        `upstream: Too many requests${retryAfterAtMs === undefined ? '' : ` {"retryAfter":${retryAfterAtMs}}`}`,
+      429,
+      'agentcard_org_mcp_rate_limited'
+    );
+
+  await check(
+    'an exhausted org throttle on a read is re-issued after one jittered window',
+    async () => {
+      const time = clock();
+      const budget = { remainingMs: 120_000 };
+      let reads = 0;
+      const wallet = await paceOrgThrottle(
+        async () => {
+          reads += 1;
+          if (reads === 1) throw exhaustedThrottle();
+          return { wallet: 'read' };
+        },
+        { budget, now: time.now, sleep: time.sleep, random: () => 0.5 }
+      );
+      assert.deepEqual(wallet, { wallet: 'read' });
+      assert.equal(reads, 2, 'exactly one extra read after the wait');
+      assert.deepEqual(time.state.sleeps, [UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS * 1.25]);
+      assert.equal(budget.remainingMs, 120_000 - 75_000, 'the wait is charged to the run budget');
+    }
+  );
+
+  await check('an advertised throttle reset is honored before the re-read', async () => {
+    const time = clock();
+    const budget = { remainingMs: 120_000 };
+    let reads = 0;
+    await paceOrgThrottle(
+      async () => {
+        reads += 1;
+        if (reads === 1) throw exhaustedThrottle(time.now() + 7_000);
+        return 'ok';
+      },
+      { budget, now: time.now, sleep: time.sleep, random: () => 0.25 }
+    );
+    assert.deepEqual(time.state.sleeps, [7_000 + 250 + 250]);
+  });
+
+  await check(
+    'a throttle beyond the shared budget still fails with the original error',
+    async () => {
+      const time = clock();
+      const budget = { remainingMs: 120_000 };
+      const error = exhaustedThrottle();
+      let reads = 0;
+      await assert.rejects(
+        paceOrgThrottle(
+          async () => {
+            reads += 1;
+            throw error;
+          },
+          { budget, now: time.now, sleep: time.sleep }
+        ),
+        (thrown) => thrown === error
+      );
+      assert.deepEqual(time.state.sleeps, [60_000, 60_000], 'never more than the budget');
+      assert.equal(reads, 3);
+      assert.equal(budget.remainingMs, 0);
+      const late = exhaustedThrottle(time.now() + 1_000);
+      await assert.rejects(
+        paceOrgThrottle(
+          async () => {
+            throw late;
+          },
+          { budget: { remainingMs: 500 }, now: time.now, sleep: time.sleep }
+        ),
+        (thrown) => thrown === late,
+        'an advertised reset that does not fit is not raced'
+      );
+      assert.equal(time.state.sleeps.length, 2);
+    }
+  );
+
+  await check('a non-throttle error is never re-issued by the pacer', async () => {
+    const time = clock();
+    let reads = 0;
+    const error = new AgentCardOrgRuntimeError('boom', 500, 'agentcard_org_mcp_error');
+    await assert.rejects(
+      paceOrgThrottle(
+        async () => {
+          reads += 1;
+          throw error;
+        },
+        { budget: { remainingMs: 120_000 }, now: time.now, sleep: time.sleep }
+      ),
+      (thrown) => thrown === error
+    );
+    assert.equal(reads, 1);
+    assert.deepEqual(time.state.sleeps, []);
+  });
+
+  await check(
+    'a residual sweep round reads open recoveries once for every cardholder',
+    async () => {
+      const org = fakeOrg({
+        recoveries: [
+          { id: 'rcv_held', cardholder_id: 'ch_2', status: 'requested', amount_cents: 70 },
+        ],
+      });
+      const nudges = await nudgeCardholderRecoveries([OWN, 'ch_2', 'ch_3'], org.callOrgTool);
+      assert.deepEqual(
+        org.calls.map((call) => call.tool),
+        ['list_recoveries', 'recover_funds', 'recover_funds'],
+        'one org-wide read instead of one per cardholder'
+      );
+      assert.deepEqual(
+        nudges.map((nudge) => (nudge instanceof Error ? 'refused' : nudge.kind)),
+        ['requested', 'coalesced', 'requested']
+      );
+    }
+  );
 
   if (failures.length > 0) {
     process.stderr.write(`\n${failures.length} agentcard settle coalesce test(s) failed\n`);

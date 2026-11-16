@@ -11,9 +11,10 @@
            renders <environment-status> after the cached prefix (never persisted)
 
 A root also renders its user's projects (``# Available projects``): one live
-activity (GET /api/projects) per sync, nothing cached; a failed fetch keeps the
-listing of the latest environment row, and a list that empties after it was
-shown is retracted explicitly.
+activity per sync (GET /api/projects plus GET /api/integrations/github/repos for
+GitHub repos no project covers, teammates' shared repos included), nothing
+cached; a failed fetch keeps the listing of the latest environment row, and a
+list that empties after it was shown is retracted explicitly.
 
 Sources (no other workflow I/O): ``_background_tasks`` records (path, type,
 started_at, child ids), ``_environment_activity`` (latest IN_PROGRESS title a

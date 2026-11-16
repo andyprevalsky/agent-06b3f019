@@ -294,4 +294,6 @@ export type IntegrationCatalogKey =
   | 'projects'
   | 'meetingNotes'
   | 'pebble'
-  | 'clis';
+  | 'clis'
+  | 'mcp'
+  | 'other';

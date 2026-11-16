@@ -1,0 +1,24 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr2099/git-preservation-20261114T210002Z-9a6f137d7553.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "80ea09b4e9fa390746cb92090429985ad4084ec343f8a25423117ecbacdd908a",
+  "gzip_sha256": "91858a0b9306fd44f05508b63997c98943bf91f4a74315053b24f42cee067a66",
+  "stored_bytes": 164942743,
+  "frames": 20,
+  "files": 28,
+  "original_bytes": 177622354,
+  "manifest_sha256": "03c8340c6c79a5ddb7c8e0bba87b8fd9d041822516662b40aa3fcce5b2555ba0",
+  "full_readback_verified": true,
+  "independent_restore": {
+    "observed_at": "2026-11-14T21:01:48.854022+00:00",
+    "key_fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+    "recipe_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+    "restored_files": 28,
+    "all_member_hashes_verified": true,
+    "independent_of_local_R2_and_encryption_files": true,
+    "remote_values_persisted": false
+  },
+  "scope": "Immutable finite carrier selection; exact logical mappings, original metadata and per-file cutoffs are inside the encrypted payload. This carrier alone does not represent final current machine state."
+}

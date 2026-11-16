@@ -19,7 +19,9 @@
  * A heartbeat that cannot name its login (the agent loop's lease carries no
  * integration id) names its token by credential fingerprint instead: the
  * lease's own user rows are matched against it (computeLoginFailure
- * resolveUserLoginByCredential), never another user's rows.
+ * resolveUserLoginByCredential), never another user's rows. A team lease (a
+ * teammate holding the owner's shared subscription) lands on that exact owner
+ * row, and only while the holder's team share is still current.
  *
  * 10k agents: one PK read of the lease plus one conditional UPDATE per
  * heartbeat that carries a snapshot. The UPDATE matches only when the row's
@@ -32,6 +34,7 @@
 
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { teamComputeOwner } from './computeTeamShares';
 
 const log = createLogger('ComputeSubscriptionUsage');
 
@@ -204,7 +207,13 @@ export async function recordSubscriptionUsage(
 ): Promise<boolean> {
   const lease = await prisma.computeTokenLineageLease.findUnique({
     where: { lineageKey },
-    select: { tokenType: true, tokenSource: true, tokenIdentity: true, releasedAt: true },
+    select: {
+      tokenType: true,
+      tokenSource: true,
+      tokenIdentity: true,
+      releasedAt: true,
+      userId: true,
+    },
   });
   if (lease === null) return false;
   if (
@@ -215,7 +224,7 @@ export async function recordSubscriptionUsage(
   }
   const name = integrationNameForTokenType(lease.tokenType);
   if (name === null) return false;
-  let owner: { id: string } | { userId: string };
+  let owner: { id: string } | { userId: string } | { id: string; userId: string };
   let integrationId = report.integrationId;
   if (lease.tokenSource === 'pool') {
     // A pool lease names its own row; a report may only confirm it.
@@ -232,6 +241,14 @@ export async function recordSubscriptionUsage(
       if (resolved === null) return false;
       integrationId = resolved;
     }
+  } else if (lease.tokenSource === 'team') {
+    // The shared row is the lease's identity; it counts for its owner while shared.
+    if (integrationId === '') integrationId = lease.tokenIdentity;
+    if (lease.tokenIdentity !== integrationId || lease.userId === null) return false;
+    const type = lease.tokenType === 'claude' ? 'claude' : 'gpt';
+    const ownerUserId = await teamComputeOwner(lease.userId, type, integrationId);
+    if (ownerUserId === null) return false;
+    owner = { id: integrationId, userId: ownerUserId };
   } else {
     return false;
   }

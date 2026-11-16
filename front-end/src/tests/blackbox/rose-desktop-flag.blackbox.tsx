@@ -7,7 +7,7 @@
  *        grows to 18px and slides sideways on hover/tap); no in-box row
  *  - #40 write lock = one bare lock icon that toggles; unlocked = rose
  *  - #43 every tab item has an instant tooltip with the ledger's exact text;
- *        the info item opens About / Privacy / Terms
+ *        the info item opens Privacy / Terms
  *  - #53 dark-only glass send button; its CSS is scoped to html.dark
  *  - #32 bottom row: bare paperclip at the model selector's 26px height
  *        (speed toggle states live in fast-mode-toggle.blackbox.tsx)
@@ -169,7 +169,7 @@ describe('Rose Desktop query box: nub tab (#31)', () => {
       'Select a test prompt',
       null, // budget: its text is the name
       'Agent settings',
-      'About, Privacy and Terms',
+      'Privacy and Terms',
     ]);
     expect(within(nub).getByTestId('nub-write-lock')).toBeInTheDocument();
     expect(within(nub).getByLabelText('Select a test prompt')).toBeInTheDocument();
@@ -321,7 +321,7 @@ describe('Rose Desktop query box: write lock (#40) and tooltips (#43)', () => {
     await expectTip(user, within(nub).getByTestId('nub-budget'), 'Budget used · $0.00 of $2.50');
     await expectTip(user, within(nub).getByTestId('nub-context'), 'Context window used');
     await expectTip(user, within(nub).getByLabelText('Agent settings'), 'Agent settings');
-    await expectTip(user, within(nub).getByTestId('query-info-trigger'), 'About · Privacy · Terms');
+    await expectTip(user, within(nub).getByTestId('query-info-trigger'), 'Privacy · Terms');
   });
 
   it('tab items carry no native title (the tooltip never doubles up)', () => {
@@ -331,7 +331,7 @@ describe('Rose Desktop query box: write lock (#40) and tooltips (#43)', () => {
     }
   });
 
-  it('the info item opens a small menu linking About, Privacy and Terms', async () => {
+  it('the info item opens a small menu linking Privacy and Terms', async () => {
     const user = userEvent.setup();
     renderFlagged();
     await user.hover(tab());
@@ -339,7 +339,6 @@ describe('Rose Desktop query box: write lock (#40) and tooltips (#43)', () => {
     const menu = await screen.findByTestId('query-info-menu');
     const links = within(menu).getAllByRole('link');
     expect(links.map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
-      ['About', '/about'],
       ['Privacy', '/privacy'],
       ['Terms', '/terms'],
     ]);

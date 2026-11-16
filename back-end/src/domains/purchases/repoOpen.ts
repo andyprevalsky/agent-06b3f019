@@ -2,6 +2,10 @@ import { PurchaseSpendStatus, type Prisma } from '@prisma/client';
 import { runTransactionWithRetry } from '../../providers/database';
 import { lockPurchaseAgentAdmission } from './repoAgentAdmission';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
+import {
+  ownerLifecycleBenchmarkBilling,
+  type OwnerLifecycleBilling,
+} from '../../providers/ownerLifecycleBilling';
 
 const PURCHASE_OPEN_LOCK_SEED = 4_951_887;
 const ACTIVE_PURCHASE_STATUSES = [
@@ -30,9 +34,39 @@ interface PendingPurchaseData {
   totalCents: number;
 }
 
+type BillingSnapshot = Pick<
+  Prisma.PurchaseSpendUncheckedCreateInput,
+  'stripeLivemode' | 'stripeCustomerId' | 'stripeSubscriptionId'
+>;
+
+/** The owner's production lifecycle probe bills its dedicated live customer, never its Subscription. */
+function billingSnapshot(
+  ownerBilling: OwnerLifecycleBilling | null,
+  subscription: {
+    stripeLivemode: boolean;
+    stripeCustomerId: string | null;
+    stripeSubscriptionId: string | null;
+  } | null
+): BillingSnapshot {
+  if (ownerBilling !== null) {
+    return {
+      stripeLivemode: true,
+      stripeCustomerId: ownerBilling.stripeCustomerId,
+      stripeSubscriptionId: null,
+    };
+  }
+  return {
+    stripeLivemode: subscription?.stripeLivemode ?? false,
+    stripeCustomerId: subscription?.stripeCustomerId ?? null,
+    stripeSubscriptionId: subscription?.stripeSubscriptionId ?? null,
+  };
+}
+
 export async function createPendingPurchaseWithLock(data: PendingPurchaseData) {
   const agentId =
     data.agentId !== undefined && data.agentId.trim() !== '' ? data.agentId.trim() : undefined;
+  // Resolved outside the transaction (providers/ownerLifecycleBilling.ts).
+  const ownerBilling = await ownerLifecycleBenchmarkBilling(data.userId, agentId);
   return runTransactionWithRetry(async (transaction) => {
     // Deletion seals this same generation. Either the purchase is visible to
     // cleanup before the seal commits, or this admission is rejected.
@@ -98,9 +132,7 @@ export async function createPendingPurchaseWithLock(data: PendingPurchaseData) {
     const purchase = await transaction.purchaseSpend.create({
       data: {
         userId: data.userId,
-        stripeLivemode: subscription?.stripeLivemode ?? false,
-        stripeCustomerId: subscription?.stripeCustomerId ?? null,
-        stripeSubscriptionId: subscription?.stripeSubscriptionId ?? null,
+        ...billingSnapshot(ownerBilling, subscription),
         agentId,
         fingerprint: data.fingerprint,
         canonicalFingerprint: data.canonicalFingerprint,
