@@ -21209,7 +21209,7 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     assert "EXACT=snap-owned" in raced.stdout, "adopted the peer snapshot completed before our accepted request"
     assert "transaction snapshot: snap-prior-transaction" not in raced.stdout
 
-def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
+def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path, isolated_snapshot_controller) -> None:
     """An unresolved ref is input failure and must cause zero Fly API calls."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -21219,8 +21219,13 @@ def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
     fake_fly.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$FLY_CALLS"\necho "[]"\n')
     fake_fly.chmod(0o755)
 
+    # A real private commit exists: the refusal must concern the requested ref,
+    # not a missing Git checkout. The controller still exercises its exporter.
+    valid = subprocess.run(["git", "-C", str(FLEET_SCRIPT.parents[1]), "rev-parse", "--verify", "HEAD^{commit}"],
+                           text=True, capture_output=True, check=False)
+    assert valid.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}\n", valid.stdout)
     result = subprocess.run(
-        ["bash", str(CLOUD_SCRIPT), "--refresh-deps", "--ref", "definitely-not-a-commit"],
+        ["bash", str(FLEET_SCRIPT.with_name("run-bench-cloud")), "--refresh-deps", "--ref", "definitely-not-a-commit"],
         env={
             **os.environ,
             "PATH": f"{bin_dir}:{os.environ['PATH']}",

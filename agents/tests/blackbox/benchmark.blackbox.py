@@ -1448,7 +1448,8 @@ def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
             "-k",
             "boot_payload or boot_launch_compresses_complete_payload or controller_execs_from_a_script_snapshot "
             "or nested_controller_borrows_parent_owned_script_snapshot or script_snapshot_initialization_signal_and_publish_failure_clean_up "
-            "or borrowed_script_snapshot_and_invalid_owner_identity_are_never_deleted or detached_script_snapshot_transfer_covers_exit_death_timeout_and_waiter_loss",
+            "or borrowed_script_snapshot_and_invalid_owner_identity_are_never_deleted or detached_script_snapshot_transfer_covers_exit_death_timeout_and_waiter_loss "
+            "or refresh_deps_rejects_invalid_ref_before_fly",
         ],
         cwd=repo_root,
         text=True,
@@ -1456,7 +1457,7 @@ def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "32 passed" in result.stdout
+    assert "33 passed" in result.stdout
 
 
 def test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate():

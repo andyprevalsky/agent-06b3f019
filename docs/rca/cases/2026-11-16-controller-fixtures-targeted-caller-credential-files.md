@@ -65,6 +65,18 @@ under .context/controller-fixture-delivery. The cherry-picked patch has the
 same stable patch ID as the reviewed source commit. Full delivery validation
 and immutable push receipt are recorded there separately from causal proof.
 
+### Same-class sibling found during concurrent delivery checks
+
+The fourth repeated six-case run detected a backend caller-env change while
+full benchmark coverage ran. A synthetic replay traced it to the existing
+invalid-ref refresh test, which directly executed the real run-bench-cloud
+entrypoint. That test passed while both synthetic caller dotenvs changed.
+Apply the same private controller fixture to this caller and use its copied
+run-bench-cloud. Retain all original invalid-ref, zero-Fly-call and timeout
+assertions; positively resolve the private HEAD commit to prove the root is a
+real Git checkout. Register this sibling with the existing owning selector,
+which now runs 33 cases. The failed concurrent receipt remains preserved.
+
 ## Human feedback
 
 Deliver only the reviewed environment-isolation commit on current main. Do not
