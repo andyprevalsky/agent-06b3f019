@@ -3356,6 +3356,18 @@ done
 CONDUCTOR_PORT_A=$((HUB_PORT_A - 5764))
 CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 
+# Shared assertion: scenarios 1, 12 and 13 execute in different shards.
+assert_pool_provisioning_refused() {  # <label> <status> <log> <pool-ledger>
+    local label="$1" status="$2" log="$3" ledger="$4"
+    [ "$status" -ne 0 ] || fail "$label: a legacy --provision-pool request fabricated success"
+    grep -qxF "❌ existing-Machine capacity gap (pool-provision-1.ids): new Machine allocation withheld; authenticated measured admission is not available" "$log" ||
+        fail "$label: the pool request was not refused by measured new-Machine admission"
+    if grep -qE "cloned |pool ready: [1-9]" "$log"; then
+        fail "$label: a refused pool request reported an allocation"
+    fi
+    [ ! -s "$ledger" ] || fail "$label: a refused pool request recorded pool IDs: $(cat "$ledger")"
+}
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 1 — concurrent provisioning: two controllers, isolated pool machines
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3392,16 +3404,6 @@ status_a=0; wait "$PID_A" || status_a=$?
 status_b=0; wait "$PID_B" || status_b=$?
 PIDS=()
 
-assert_pool_provisioning_refused() {  # <label> <status> <log> <pool-ledger>
-    local label="$1" status="$2" log="$3" ledger="$4"
-    [ "$status" -ne 0 ] || fail "$label: a legacy --provision-pool request fabricated success"
-    grep -qxF "❌ existing-Machine capacity gap (pool-provision-1.ids): new Machine allocation withheld; authenticated measured admission is not available" "$log" ||
-        fail "$label: the pool request was not refused by measured new-Machine admission"
-    if grep -qE "cloned |pool ready: [1-9]" "$log"; then
-        fail "$label: a refused pool request reported an allocation"
-    fi
-    [ ! -s "$ledger" ] || fail "$label: a refused pool request recorded pool IDs: $(cat "$ledger")"
-}
 assert_pool_provisioning_refused "workstream A" "$status_a" "$TMP_ROOT/controller-a.log" "$POOL_A"
 assert_pool_provisioning_refused "workstream B" "$status_b" "$TMP_ROOT/controller-b.log" "$POOL_B"
 assert_no_controller_script_snapshots "refused provisioning cleanup"

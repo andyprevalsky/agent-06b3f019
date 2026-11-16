@@ -63,6 +63,24 @@ repetitions in the native transcript. Those prove capacity deferral, not browser
 experiment performance. Full /push qualification remains separate; a duplicate
 quarantine key arriving from latest main blocks the agents coverage gate.
 
+### Shard assertion visibility follow-up
+
+The prior six shard-4 logs and a fresh run returned exit 0 with 31 PASS lines,
+but each also reported `assert_pool_provisioning_refused: command not found`
+for scenarios 12 and 13. That helper was defined inside the shard-1 scenario,
+so shard 4 skipped its definition. Those receipts still prove scenario 4b,
+but do not prove the missing assertions ran. Move the unchanged helper above
+the first scenario guard so every shard sees it; keep all assertion bodies,
+scenario ordering, controller deadlines and acceptance rules unchanged.
+A complete corrected shard-4 rerun is required before claiming the gate passes.
+
+The workflow and span-history diagnostics pass with the original external
+TMPDIR. The earlier failures used a TMPDIR inside the Git worktree: span
+history detected Git and selected branch-segment behavior; the Temporal test
+server had no existing cache there. Preserve those failures as environment
+misconfiguration evidence, not source regressions. The duplicate catalog key
+on origin/main remains a separate full-coverage blocker.
+
 ## Reusable lesson
 
 Extracted shell fixtures must supply an executable at an exec boundary, so
