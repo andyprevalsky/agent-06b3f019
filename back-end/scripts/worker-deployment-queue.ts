@@ -228,6 +228,7 @@ async function runQueue(jobId: string): Promise<void> {
   process.once('SIGTERM', interrupt);
   process.once('SIGINT', interrupt);
   const coalesce = !options.includes('--allow-abort');
+  let deferred = false;
   if (coalesce) await recordOwnAncestry(jobId);
   // A SUPERSEDED job is carried by its descendant: wait for (and help run) that cutover.
   while ((await resolveWorkerDeployment(jobId)).resolved.stage !== 'SUCCEEDED') {
@@ -245,6 +246,8 @@ async function runQueue(jobId: string): Promise<void> {
         `Requested deployment is ABORTED${typeof why === 'string' ? `: ${why}` : ''}`
       );
     }
+    if (deferred) await sleep(5000);
+    deferred = false;
     let lease;
     try {
       lease = await acquireWorkflowDeploymentLease();
@@ -296,6 +299,27 @@ async function runQueue(jobId: string): Promise<void> {
           });
           return;
         }
+      }
+      // The child is this checkout's controller. A head from a strictly newer release
+      // (2026-11-16: run 43791105681 at 224a7c8c20 ran coalesced job c2b6101f of
+      // c678865ab9 with its older controller, so #2147's fix never ran) belongs to a
+      // controller that contains it: that release's own run, which is waiting on this
+      // lease, or the scheduled recovery from main. Unprovable pairs keep FIFO recovery.
+      if (
+        head.identity.sourceCommit !== requested.identity.sourceCommit &&
+        provesAncestor(requested.identity.sourceCommit, head.identity.sourceCommit, true)
+      ) {
+        emit({
+          waiting: true,
+          requestedJobId: jobId,
+          predecessorJobId: head.jobId,
+          reason: 'NEWER_RELEASE_CONTROLLER',
+          headSourceCommit: head.identity.sourceCommit,
+          controllerSourceCommit: requested.identity.sourceCommit,
+        });
+        if (options.includes('--if-idle')) return;
+        deferred = true;
+        continue;
       }
       emit({
         requestedJobId: jobId,
