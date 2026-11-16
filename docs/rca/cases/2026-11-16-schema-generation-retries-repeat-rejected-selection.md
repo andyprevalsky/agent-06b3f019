@@ -17,13 +17,15 @@ tags:
   - selected-field
   - provider-compatibility
 sources:
-  - fleet run 43893687982
+  - PR #2403
   - commit 770611c7c2e3ad3e066c2ee703e87c28f0e50d4f
 repro: back-end/src/tests/blackbox/response-schema-retry.blackbox.ts
 status: open
 ---
 
 ## Problem
+
+Native failure: https://github.com/Rose-Ai-Labs/rose/actions/runs/43893687982.
 
 The existing caller-root archive blackbox failed its HTTP200 assertion twice
 (2612ms and625ms), before checking archive paths. Native captures contain six
@@ -66,18 +68,47 @@ system prompt, auth, archive binding, three attempts,2000/4000 escalation and
 backoffs remain. Retry state is invocation-local, holding one rejected response,
 so10000 concurrent agents have no shared coordination or fan-in.
 
-The original transport repro exited1 with HTTP500. The recovery repro uses the
-same original malformed first output, plus a real provider continuation captured
-from the corrective request. Exact corrective-request matching returns HTTP200;
-old source still returns HTTP500. These are mechanism checks, not a full gate.
-The permanent regression includes unchanged native bad bytes, captured real
-continuation, feedback-dependent recovery, persistent rejection at3 attempts,
-ordinary report/value, wrong selection, optional/file/list negatives. Five
-unchanged runs and independent flakiness review passed. Original agents suite
-passed (68923ms). Required native gates, final review and deployment remain
-pending; status stays open until that evidence is recorded. Replay's original
-URL-only provider responses do not prove provider compatibility; separate
-provider-path proof and tighter permitted-delta assertions are required.
+The original transport repro exited1 with HTTP500 on both original revisions.
+The strict recovery repro retains the original malformed first output, checks
+all initial request bodies except the typed-enum delta and its derived Foundry
+cache key, and matches the corrective request to its real captured response.
+`NODE_PATH=/home/boxes/rose/node_modules node .context/schema-repair/replay/recovery-replay.cjs head`
+exits1/HTTP500 in0.875s; the same oracle with candidate source exits0/HTTP200
+in0.449s with zero swallowed transport violations and caller-root records.
+These scripts/captures are privately preserved; the permanent blackbox contains
+the exact native bad bytes and recorded provider continuation, not a hand-edited
+answer. Valid output is used only after the real validation-feedback request.
+
+The permanent regression now covers feedback-dependent recovery, persistent
+rejection within3 attempts, report/value controls, multi-field and nested-file
+negatives, unchanged2000/2000/4000 truncation behavior, fatal400/401 fail-fast,
+and all3 caller-root start/final pairs with exact rejected bytes/feedback.
+It explicitly joins the existing asynchronous capture owners before reading
+records. Five unchanged runs and independent flakiness review passed; canonical
+path and final native qualification are recorded in the deployment receipts.
+
+The unchanged original agents suite passed (68923ms; original archive case461ms).
+On the first frozen repair source a71cc5fdee826148c58ddd48dab33623ceaeb951,
+all17 native gates passed. Owning Blacksmith run43905320069 passed all287
+cases, with the exact original archive case PASS313ms. Its assertion file and
+finalPresentation.ts are byte-identical to the original source. Actual
+corrected-schema acceptance is separately demonstrated on Cerebras and Foundry
+(HTTP200); replaying original400s is not provider-acceptance proof.
+
+Independent RCA reconciled every causal/control objection. Golden approval
+schema-retry-2 is GROUNDED at that frozen source, scoped diff SHA256
+78fb93198069116b3d16529ac317acef9a7fd104ad1b5aa184e827a15414824b,
+reviewer ph793p8hynymab1kkh93eknxsh8ja1az. The provider source bytes remain
+unchanged in stabilization. References: Instructor handlers.py321-340/950
+at1e85ddf38807084182aeefb5bb67f4deee821163; Pydantic AI anthropic.py335-358
+atc7586d79b64706f4605f15a29534118813df12a4; Vercel parse-and-validate-object-
+result.ts52-59/87-109 at8ba3940d3dd1f3cd3c4365bbaec505c6ef0eb1e3.
+Latest-only/first-error feedback differs from accumulated/fenced structured
+feedback, but leaves acceptance and retry limits unchanged. Extra input tokens
+increase retry prompt cost; unchanged completion caps do not imply unchanged
+spend. This proves selected-field repair, not general presentation-intent
+compliance or guaranteed model reliability. PR2404 remains pending final
+stabilization verification, merge and production checks; status remains open.
 
 ## Human feedback
 
