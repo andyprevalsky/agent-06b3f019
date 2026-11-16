@@ -21,12 +21,14 @@ tags:
   - rose-1-mini
 sources:
   - PR #2210
+  - PR #2250
+  - commit 33ef570dae578831f563f9e2e446ebe73afec0fc
   - commit 8e74738f13adfe9a5db1c61cd673dd8c3dd69b73
   - agent 1772a64a-c22a-5cf7-9184-17508eda5df6
   - agent 1772a64a lease 45543f2e-e77c-4470-b258-4c19dc135226
   - agent 1772a64a lease 7c1dd8c6-b81e-4bcc-908b-15f76b23d1ed
 repro: back-end/src/tests/blackbox/iphone-control.setup-verifier-replay.cases.ts "live setup verifier: recorded proof screens and controls"
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -54,11 +56,29 @@ Class stopped at: "verifier prompts must name the OCR-observable proof for each 
 - Regression: live rose-1-mini replay of the recorded observations with negative controls (inbox under dialog, Google Account page alone, typed sign-in form, wrong Google account, phone row without glyph, phone unchecked only under Receive, Waiting for activation, FaceTime look-alike, wrong Apple Account). Before: FAIL 3/3 (Gmail Settings and iMessage unknown); after: PASS 5/5. The independent review's Waiting-for-activation negative caught an overbroad first draft, fixed before landing.
 - 10k agents: prompt text only; no new queries or fan-in.
 
-Shipped: PR #2210, merged 8e74738f13 on 2026-11-15. Production lanes PASS: Render live via descendant 37308b16bd, backend probes, Fly verified by descendant cutover 64f91559 (a867f5d4), workflow migration, semantic via descendant 6c9aa700. Live owner retry of the gmail, imessage and receive_address verifies is still pending. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
+Shipped: PR #2210, merged 8e74738f13 on 2026-11-15. Production lanes PASS: Render live via descendant 37308b16bd, backend probes, Fly verified by descendant cutover 64f91559 (a867f5d4), workflow migration, semantic via descendant 6c9aa700. Live owner retry (agent 87c1e09a-28ed-5f81-b7ce-6166c18523d7, 20:40Z) after #2210 shipped:
+- gmail, icloud_messages and icloud_keychain confirmed on the real Gmail account Settings and Saved to iCloud screens.
+- receive_address was a FALSE CONFIRM from the FaceTime settings page ("You can be reached by FaceTime at … Caller ID"). The #2210 checkmark-glyph rule let FaceTime checkmarks read as iMessage receive selection. imessage on the same page was unknown in prod, but confirmed 2/3 in replay.
+- Exact replay of that request on #2210's prompt: receive_address confirmed 3/3.
+
+Follow-up fix: PR #2250, merged 33ef570dae on 2026-11-15. Production PASS: Render live, backend probes, semantic (descendant e7b9f9ef). Backend only, so no Fly cutover, per the coordinator's hold during the live owner setup.
+- receive_address needs the phone checkmark inside the You Can Receive iMessages to and Reply From list. Start New Conversations From, FaceTime and Caller ID checkmarks do not count, and a FaceTime screen is never Send and Receive.
+- imessage: a FaceTime screen never proves iMessage, and an Apple Account line naming another identity is disabled.
+- Regressions use the real FaceTime page (as receive_address and as imessage) and the real Saved to iCloud page: messages and keychain confirm, contacts stays unproven without a Contacts row.
+- The replay case fails 3/3 runs on #2210's prompt and passes 10/10 consecutive runs after.
+
+Third gap, icloud_contacts:
+- After #2250, live agent 87c1e09a confirmed gmail, passcode, imessage and receive_address under the stricter verifier.
+- icloud_contacts stayed unknown on the real iCloud See All list (cursors 14 and 38). There Contacts is a switch row with no On text, so OCR can never show its state.
+- The textual proof is Settings > Apps > Contacts > Accounts, where the iCloud row's services line reads 'iCloud Drive, iCloud Mail, Contacts, and' / '10 more...' (cursor 9, split across OCR rows). The verifier said unknown there 3/3.
+
+Fix (backend-only): an Accounts screen whose iCloud row's services line explicitly lists Contacts confirms it. A line that doesn't list Contacts (including one truncated with 'and N more'), or Contacts under another account, is unknown and never disabled. The regressions use the real Accounts and See All screens plus those two mutations. The 21-check replay passes 10/10 after and fails 3/3 before.
+
+Remaining for ready, none of them a verifier defect: device_passcode is disabled (no passcode set); imessage needs the real Send & Receive screen; icloud_contacts needs See All under Saved to iCloud. The agent-guidance wording for the last two is held as draft PR #2262. The coordinator will batch it into thread ph78393fcn3's single Fly cutover once the live setup is done. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
 
 ## Human feedback
 
-The user required no weakening of proof (a typed-but-unsigned identifier must never confirm) and replay regressions from the real observations.
+The coordinator asked to hold Fly cutovers during the live owner setup, so the follow-up is backend-only. The user required no weakening of proof (a typed-but-unsigned identifier must never confirm) and replay regressions from the real observations.
 
 ## Reusable lesson
 

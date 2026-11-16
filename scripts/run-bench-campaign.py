@@ -1511,15 +1511,16 @@ def campaign_simultaneous_benches(concurrency: int, job_count: int, group_total:
     return max(min(concurrency, job_count), group_total or 0)
 
 
-def provider_capacity_refusal(benches: int) -> int:
+def provider_capacity_refusal(benches: int, tasks: list[str] | None = None) -> int:
     """0 when the provider rate-limit cap admits `benches`; else its refusal exit code.
 
     The helper and its reviewed registry ship beside this control script, so a
-    separate task workspace cannot substitute other limits.
+    separate task workspace cannot substitute other limits. `tasks` selects a
+    measured demand profile only when every task is in its catalog group.
     """
     capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
     try:
-        return capacity["check"](benches)
+        return capacity["check"](benches, tasks=tasks)
     except capacity["RegistryError"] as error:
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
 
@@ -1599,7 +1600,7 @@ def main() -> int:
         # tasks (no browser) before provisioning; no live task-agent calls.
         print("🧊 provider rate-limit cap not applied: --demo-cache replay makes no live task-agent provider calls")
     else:
-        refused = provider_capacity_refusal(global_benches)
+        refused = provider_capacity_refusal(global_benches, args.task)
         if refused:
             return refused
     controller_nice = os.environ.get("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE", "0")

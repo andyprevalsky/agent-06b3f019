@@ -8,8 +8,8 @@ unlimited fallback) the cap is
     floor(limit * (1 - production_reserve_fraction) / per_bench_peak)
 
 and the overall cap is the minimum across enforced providers that apply to the
-fleet's browser provider. A row with `browser_provider` (Tilion: one 20-browser
-pilot account) binds only fleets on that provider; every other row binds all
+fleet's browser provider. A row with `browser_provider` (Tilion: one shared
+250-browser account) binds only fleets on that provider; every other row binds all
 fleets. The browser provider is `--browser-provider`, else
 CLOUDBENCH_BROWSER_PROVIDER, else BROWSER_PROVIDER in back-end/.env (the bench
 env contract later requires it to equal production). When none is a known
@@ -17,9 +17,22 @@ provider, every row binds (fail closed). Informational
 providers (exhaustion falls back and recovers) never refuse a run; they are
 printed as notes once the requested width exceeds their own cap.
 
+Per-bench peaks default to the global mixed-census measurement (run600c). A
+reviewed `demand_profiles` entry records a lighter measured peak for one
+catalog task group (e.g. polar-bench barely calls web search). It replaces
+only the rows it measured, and only when EVERY `--task` belongs to that group
+in agents/benchmarks/{tasks,polar_tasks}.json:
+
+    --task polar-bu-001 --task polar-odysseys-…   → polar-bench profile peaks
+    mixed, unknown, uncatalogued or no --task      → global peaks (today's cap)
+
+A profile may only lower a row's peak, so a fleet that admits under a profile
+contains only that group's tasks; any wider global width that also carries
+other tasks is refused by those tasks' own (global) check.
+
 Usage:
-    cloudbench-provider-capacity.py check --benches N [--browser-provider P]  # exit 0, or 78 + refusal
-    cloudbench-provider-capacity.py cap [--json] [--browser-provider P]       # print the cap
+    cloudbench-provider-capacity.py check --benches N [--browser-provider P] [--task T ...]  # exit 0, or 78
+    cloudbench-provider-capacity.py cap [--json] [--browser-provider P] [--task T ...]       # print the cap
 
 There is no bypass: raising the cap means recording new provider limits in
 scripts/cloudbench-provider-limits.json in a reviewed change.
@@ -45,6 +58,9 @@ CANONICAL_LABEL = "scripts/cloudbench-provider-limits.json"
 REGISTRY_ENV = "CLOUDBENCH_PROVIDER_LIMITS_FILE"
 BROWSER_PROVIDER_ENV = "CLOUDBENCH_BROWSER_PROVIDER"
 BACKEND_ENV_FILE = Path(__file__).resolve().parents[1] / "back-end" / ".env"
+TASK_CATALOGS = tuple(Path(__file__).resolve().parents[1] / "agents" / "benchmarks" / name
+                      for name in ("tasks.json", "polar_tasks.json"))
+MAX_CATALOG_BYTES = 32 * 1024 * 1024
 BROWSER_PROVIDERS = ("tilion", "kernel", "steel", "browser-use")
 MAX_ENV_BYTES = 1024 * 1024
 EXIT_REFUSED = 78  # EX_CONFIG: provider configuration cannot serve this width.
@@ -58,6 +74,7 @@ _PROVIDER_KEYS = {"id", "name", "limit", "limit_unit", "limit_qualifier", "crede
                   "per_bench_peak", "per_bench_peak_unit", "limit_source", "demand_source"}
 _ENFORCED_KEYS = _PROVIDER_KEYS | {"exhaustion"}
 _INFORMATIONAL_KEYS = _PROVIDER_KEYS | {"fallback"}
+_PROFILE_KEYS = {"id", "task_group", "date", "per_bench_peak", "demand_measurement", "demand_source"}
 
 
 class RegistryError(ValueError):
@@ -113,8 +130,36 @@ def _provider(row: object, field: str, keys: set[str], reserve: Fraction) -> dic
         raise RegistryError(f"provider limit registry: {field}.credential_env must name an env key")
     limit = _positive(row["limit"], field + ".limit")
     peak = _positive(row["per_bench_peak"], field + ".per_bench_peak")
-    usable = limit * (1 - reserve)
-    return dict(row, cap=math.floor(usable / peak))
+    return dict(row, cap=_cap(limit, peak, reserve))
+
+
+def _cap(limit: Fraction, peak: Fraction, reserve: Fraction) -> int:
+    return math.floor(limit * (1 - reserve) / peak)
+
+
+def _profile(row: object, field: str, providers: dict[str, dict]) -> dict:
+    """One measured task-group demand profile; it may only lower a provider's peak."""
+    if not isinstance(row, dict) or set(row) != _PROFILE_KEYS:
+        raise RegistryError(f"provider limit registry: {field} must have exactly {sorted(_PROFILE_KEYS)}")
+    profile_id = _text(row["id"], field + ".id")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,63}", profile_id):
+        raise RegistryError(f"provider limit registry: {field}.id must be a lowercase slug")
+    for key in ("task_group", "demand_measurement", "demand_source"):
+        _text(row[key], f"{field}.{key}")
+    if not isinstance(row["date"], str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["date"]):
+        raise RegistryError(f"provider limit registry: {field}.date must be YYYY-MM-DD")
+    peaks = row["per_bench_peak"]
+    if not isinstance(peaks, dict) or not peaks:
+        raise RegistryError(f"provider limit registry: {field}.per_bench_peak must map provider ids to peaks")
+    exact = {}
+    for provider_id, value in peaks.items():
+        if provider_id not in providers:
+            raise RegistryError(f"provider limit registry: {field}.per_bench_peak names unknown provider {provider_id!r}")
+        exact[provider_id] = _positive(value, f"{field}.per_bench_peak.{provider_id}")
+        if exact[provider_id] > Fraction(providers[provider_id]["per_bench_peak"]):
+            raise RegistryError(f"provider limit registry: {field}.per_bench_peak.{provider_id} may only lower "
+                                "the provider's global per_bench_peak")
+    return dict(row, peaks=exact)
 
 
 def load_registry(path: Path | None = None) -> dict:
@@ -139,7 +184,7 @@ def load_registry(path: Path | None = None) -> dict:
         value = json.loads(raw.decode("utf-8"), parse_float=Decimal, parse_constant=_reject_constant)
     except (UnicodeDecodeError, ValueError) as error:
         raise RegistryError(f"provider limit registry is not valid JSON: {error}") from None
-    if not isinstance(value, dict) or set(value) != _TOP_KEYS or value["schema"] != SCHEMA:
+    if not isinstance(value, dict) or set(value) - {"demand_profiles"} != _TOP_KEYS or value["schema"] != SCHEMA:
         raise RegistryError(f"provider limit registry must be one {SCHEMA} object")
     _text(value["production_reserve_note"], "production_reserve_note")
     reserve_raw = value["production_reserve_fraction"]
@@ -170,9 +215,67 @@ def load_registry(path: Path | None = None) -> dict:
     ids = [row["id"] for row in rows + notes]
     if len(set(ids)) != len(ids):
         raise RegistryError("provider limit registry: provider ids must be unique")
+    raw_profiles = value.get("demand_profiles", [])
+    if not isinstance(raw_profiles, list):
+        raise RegistryError("provider limit registry: demand_profiles must be a list")
+    providers = {row["id"]: row for row in rows + notes}
+    profiles = [_profile(row, f"demand_profiles[{i}]", providers) for i, row in enumerate(raw_profiles)]
+    for key in ("id", "task_group"):
+        if len({row[key] for row in profiles}) != len(profiles):
+            raise RegistryError(f"provider limit registry: demand profile {key}s must be unique")
     return dict(path=selected, canonical=selected.resolve() == CANONICAL_REGISTRY, reserve=reserve,
-                measurement=measurement, enforced=rows, informational=notes,
+                measurement=measurement, enforced=rows, informational=notes, profiles=profiles,
                 cap=min(row["cap"] for row in rows))
+
+
+def task_groups(names: set[str], catalogs: tuple[Path, ...] = TASK_CATALOGS) -> dict[str, str | None]:
+    """Catalog group of each named task; absent names are unknown (global demand)."""
+    groups: dict[str, str | None] = {}
+    for path in catalogs:
+        try:
+            if not path.is_file() or path.stat().st_size > MAX_CATALOG_BYTES:
+                continue
+            entries = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        for entry in entries if isinstance(entries, list) else ():
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if name not in names:
+                continue
+            group = entry.get("group") if isinstance(entry.get("group"), str) else None
+            groups[name] = group if groups.get(name, group) == group else None  # conflicting rows: unknown
+    return groups
+
+
+def selection_profile(registry: dict, tasks: list[str] | None,
+                      catalogs: tuple[Path, ...] = TASK_CATALOGS) -> dict | None:
+    """The demand profile every selected task belongs to, else None (global peaks)."""
+    if not tasks or not registry.get("profiles"):
+        return None
+    groups = task_groups(set(tasks), catalogs)
+    found = {groups.get(name) for name in tasks}
+    if len(found) != 1 or None in found:
+        return None
+    group = found.pop()
+    return next((profile for profile in registry["profiles"] if profile["task_group"] == group), None)
+
+
+def for_selection(registry: dict, tasks: list[str] | None, catalogs: tuple[Path, ...] = TASK_CATALOGS) -> dict:
+    """Rows with the selection's measured profile peaks; unprofiled rows keep the global peak."""
+    profile = selection_profile(registry, tasks, catalogs)
+    if profile is None:
+        return dict(registry, demand_profile=None)
+
+    def measured(row: dict) -> dict:
+        peak = profile["peaks"].get(row["id"])
+        if peak is None:
+            return row
+        return dict(row, per_bench_peak=profile["per_bench_peak"][row["id"]], demand_source=profile["demand_source"],
+                    demand_measurement=profile["demand_measurement"],
+                    cap=_cap(Fraction(row["limit"]), peak, registry["reserve"]))
+    rows = [measured(row) for row in registry["enforced"]]
+    return dict(registry, enforced=rows, informational=[measured(row) for row in registry["informational"]],
+                cap=min(row["cap"] for row in rows), demand_profile=profile)
 
 
 def dotenv_value(path: Path, key: str) -> str | None:
@@ -262,15 +365,22 @@ def informational_notes(registry: dict, benches: int) -> list[str]:
 
 
 def check(benches: int, *, stream=None, registry: dict | None = None,
-          browser_provider: str | None = None) -> int:
-    """Return 0 when `benches` simultaneous benches fit, else EXIT_REFUSED after printing why."""
+          browser_provider: str | None = None, tasks: list[str] | None = None) -> int:
+    """Return 0 when `benches` simultaneous benches fit, else EXIT_REFUSED after printing why.
+
+    `tasks` (the launched selection) may select a measured demand profile; omitted keeps global peaks."""
     stream = stream or sys.stderr
     if isinstance(benches, bool) or not isinstance(benches, int) or benches < 0:
         raise ValueError("simultaneous bench count must be a nonnegative integer")
-    registry = for_browser_provider(registry or load_registry(), resolve_browser_provider(browser_provider))
+    registry = for_browser_provider(for_selection(registry or load_registry(), tasks),
+                                    resolve_browser_provider(browser_provider))
     if not registry["canonical"]:
         print(f"⚠️  provider limits from {REGISTRY_ENV}={registry['path']} (validated; not the reviewed "
               f"{CANONICAL_LABEL})", file=stream, flush=True)
+    profile = registry["demand_profile"]
+    if profile is not None:
+        print(f"🧮 provider demand profile {profile['id']}: every selected task is in catalog group "
+              f"{profile['task_group']} ({profile['demand_measurement']})", file=stream, flush=True)
     message = refusal_message(registry, benches)
     if message is not None:
         print(message, file=stream, flush=True)
@@ -285,7 +395,9 @@ def _table(registry: dict) -> dict:
         return dict(id=item["id"], name=item["name"], limit=_limit_text(item), credential_env=item["credential_env"],
                     per_bench_peak=f"{_number_text(item['per_bench_peak'])} {item['per_bench_peak_unit']}",
                     max_concurrent_benches=item["cap"])
+    profile = registry.get("demand_profile")
     return dict(max_concurrent_benches=registry["cap"], browser_provider=registry.get("browser_provider"),
+                demand_profile=profile["id"] if profile else None,
                 production_reserve=_percent(registry["reserve"]),
                 measurement=registry["measurement"]["id"], registry=str(registry["path"]),
                 enforced=[row(item) for item in registry["enforced"]],
@@ -302,13 +414,17 @@ def main(argv: list[str] | None = None) -> int:
     for command in (checking, capping):
         command.add_argument("--browser-provider", choices=BROWSER_PROVIDERS,
                              help="fleet browser provider (default: CLOUDBENCH_BROWSER_PROVIDER, then back-end/.env)")
+        command.add_argument("--task", action="append", dest="tasks", metavar="NAME",
+                             help="a launched task (repeat); a measured demand profile applies only when every "
+                                  "task is in its catalog group")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
             if args.benches < 0:
                 parser.error("--benches must be a nonnegative integer")
-            return check(args.benches, browser_provider=args.browser_provider)
-        registry = for_browser_provider(load_registry(), resolve_browser_provider(args.browser_provider))
+            return check(args.benches, browser_provider=args.browser_provider, tasks=args.tasks)
+        registry = for_browser_provider(for_selection(load_registry(), args.tasks),
+                                        resolve_browser_provider(args.browser_provider))
         print(json.dumps(_table(registry), indent=2) if args.json else registry["cap"])
         return 0
     except RegistryError as error:

@@ -2,14 +2,15 @@
 """Size a deploy's smoke width from LIVE usage of provider accounts every deploy shares.
 
 The reviewed registry cap (cloudbench-provider-capacity.py) assumes one fleet is
-alone on each provider account. Tilion's 20 browsers are ONE account shared by
-production, dev and every devbox's deploys, so two concurrent deploys that each
-sized their smoke run to the full cap (16) asked for 32 and starved each other
-and production. Tilion lists the account's live sessions (GET /v1/sessions, the
-call the backend orphan reaper already makes), so admission derives the width
+alone on each provider account. Tilion's browsers (250 on 2026-11-15; 20 on the
+original pilot) are ONE account shared by production, dev and every devbox's
+deploys, so two concurrent deploys that each sized their smoke run to the full
+pilot cap (16) asked for 32 and starved each other and production. Tilion lists
+the account's live sessions (GET /v1/sessions, the call the backend orphan
+reaper already makes), so admission derives the width
 from that live state instead of from a new lease store:
 
-    usable   = limit * (1 - production_reserve_fraction)        # 20 * 0.8 = 16
+    usable   = limit * (1 - production_reserve_fraction)        # 250 * 0.8 = 200
     headroom = floor((usable - live_sessions) / per_bench_peak)  # every deploy + prod
     width    = min(requested, registry cap, headroom)
 
