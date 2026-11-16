@@ -1,7 +1,8 @@
 /**
- * Per-provider shareable accounts and grant validation (docs/plans/active/share-all-integrations.md).
+ * Per-provider shareable accounts and grant validation (docs/plans/completed/share-all-integrations.md).
  * Every account is exact: an inbox, the single legacy row, a pinned meeting-notes account, one Plaid
- * institution login, one repo, one compute account or one CLI connection. Nothing fans out silently.
+ * institution login, one repo, one compute account, one CLI connection or one MCP server. Nothing fans
+ * out silently.
  */
 import { prisma } from '../../providers/database';
 import { MEETING_NOTE_PROVIDERS, SINGLE_ACCOUNT_PROVIDERS } from '../../providers/teamAccess';
@@ -13,6 +14,11 @@ const single = new Set<string>(SINGLE_ACCOUNT_PROVIDERS);
 const meeting = new Set<string>(MEETING_NOTE_PROVIDERS);
 /** Providers whose Integration row is one account, named by its non-empty accountId. */
 const BY_ACCOUNT_ID = new Set(['github_repo', 'claude_code', 'gpt_code', 'cli']);
+/**
+ * One MCP server per Integration row, shared by the row's id: its accountId is the server URL,
+ * which may carry a credential (`?api_key=…`) and must never reach teammates through a grant.
+ */
+const BY_INTEGRATION_ID = new Set(['mcp']);
 
 interface IntegrationFields {
   id: string;
@@ -32,11 +38,11 @@ const trimmed = (value: string | null | undefined): string | null => {
 const normalizedEmail = (value: string | null | undefined): string | null =>
   trimmed(value)?.toLowerCase() ?? null;
 
-/** Human label for an account row: CLI name, repo ref, else the provider account email. */
+/** Human label for an account row: CLI or MCP server name, repo ref, else the provider account email. */
 export function integrationLabel(
   row: Pick<IntegrationFields, 'name' | 'accountId' | 'accountEmail' | 'config'>
 ): string | null {
-  if (row.name === 'cli') {
+  if (row.name === 'cli' || row.name === 'mcp') {
     const config = row.config as { name?: unknown } | null;
     return typeof config?.name === 'string' ? trimmed(config.name) : null;
   }
@@ -119,6 +125,13 @@ export async function shareableAccounts(
           accountEmail: null,
           label: trimmed(item.institutionName),
         });
+    } else if (BY_INTEGRATION_ID.has(integration.name)) {
+      push({
+        id: integration.id,
+        accountId: integration.id,
+        accountEmail: null,
+        label: integrationLabel(integration),
+      });
     } else if (BY_ACCOUNT_ID.has(integration.name)) {
       if (integration.accountId !== '')
         push({
@@ -199,6 +212,9 @@ export function validateGrant(
     return item && item.userId === row.ownerUserId && item.integrationId === integration.id
       ? { label: trimmed(item.institutionName) }
       : null;
+  }
+  if (BY_INTEGRATION_ID.has(row.provider)) {
+    return row.accountId === integration.id ? { label: integrationLabel(integration) } : null;
   }
   if (BY_ACCOUNT_ID.has(row.provider)) {
     return row.accountId !== '' && integration.accountId === row.accountId

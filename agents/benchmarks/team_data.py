@@ -13,6 +13,7 @@ TASK_FIXTURES = {
     'team-daily-access-boundaries': ('ROSE-TEAM-BOUNDARIES', 'team_data_v1'),
     'team-daily-shared-integrations': ('ROSE-TEAM-SHARED', 'team_integrations_v1'),
     'team-daily-shared-repo': ('ROSE-TEAM-REPO', 'team_repo_v1'),
+    'team-daily-shared-mcp': ('ROSE-TEAM-MCP', 'team_mcp_v1'),
 }
 
 
