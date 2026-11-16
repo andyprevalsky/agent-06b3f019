@@ -29,7 +29,7 @@ def format_team_context(data: dict) -> str:
     fields = {
         "you": ("userId",),
         "teams": ("id", "name", "role"),
-        "accounts": ("teamId", "ownerUserId", "ownerName", "provider", "accountId", "accountEmail"),
+        "accounts": ("teamId", "ownerUserId", "ownerName", "provider", "accountId", "accountEmail", "label"),
         "projects": ("projectId", "teamId", "teamName", "ownerUserId", "name"),
     }
 
@@ -43,5 +43,6 @@ def format_team_context(data: dict) -> str:
         "## Connected Teams and Shared Data\n"
         + json.dumps(safe, ensure_ascii=False)
         + "\ngrep and list_agents cover this shared data; filter by owner_user_id, team_id, account_id or project_id. "
+        "Shared bank transactions need an explicit owner_user_id or team_id. "
         "Use exact ids; never guess identities."
     )

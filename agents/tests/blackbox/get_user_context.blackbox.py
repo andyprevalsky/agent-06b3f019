@@ -707,6 +707,46 @@ def test_format_user_context_sync_failed_uses_config_connected_emails():
     assert "gmail: a@roselabs.ai, andyprevalsky111@gmail.com" in result
 
 
+def test_format_user_context_names_google_sources_for_full_grant():
+    """A full Google grant syncs Gmail, Calendar and Drive; the planner must see
+    all three as grep-searchable, or it plans a browser read of Google Calendar
+    (google-calendar-day-recall, descend 2026-11-06). A credential missing a
+    scope (needs_reconnect) or a config-only fallback makes no such claim."""
+    from helpers.get_user_context import _format_user_context
+
+    def line(credential_state, readable=("rose.benchmark@example.com",)):
+        result = _format_user_context(
+            authenticated_sites=["google.com"],
+            user_settings={},
+            recent_messages=[],
+            frequent_contacts=[],
+            integrations=[
+                {
+                    "name": "gmail",
+                    "status": "CONNECTED",
+                    "emailCredentials": [{"email": "Rose.Benchmark@example.com", "state": credential_state}],
+                    "readableInboxEmails": list(readable),
+                }
+            ],
+        )
+        return next(row for row in result.splitlines() if row.startswith("- gmail"))
+
+    assert line("connected") == "- gmail: rose.benchmark@example.com (synced: Gmail, Google Calendar, Google Drive)"
+    assert line("needs_reconnect", readable=("rose.benchmark@example.com",)) == "- gmail: rose.benchmark@example.com"
+    fallback = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=[
+            {"name": "gmail", "status": "SYNC_FAILED", "emailCredentials": None,
+             "config": {"connectedEmail": "a@roselabs.ai"}},
+        ],
+    )
+    assert "- gmail: a@roselabs.ai\n" in fallback + "\n"
+    assert "synced: Gmail" not in fallback
+
+
 def test_format_user_context_null_email_credentials_does_not_raise():
     """Null emailCredentials must not abort the whole user-context format path."""
     from helpers.get_user_context import _format_user_context
@@ -1101,6 +1141,7 @@ async def run_all_tests():
         "fmt_ctx_sync_failed_data_integration",
         test_format_user_context_lists_sync_failed_data_integrations,
     )
+    r.record("fmt_ctx_google_sources_full_grant", test_format_user_context_names_google_sources_for_full_grant)
     r.record("fmt_ctx_snapshot", test_format_user_context_snapshot)
     r.record("fmt_ctx_skips_disconnected", test_format_user_context_skips_disconnected_no_creds)
     r.record(

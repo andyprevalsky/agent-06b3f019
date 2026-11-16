@@ -87,6 +87,16 @@ export function loadBlackboxSupervisorResponseFixture(
 }
 
 /** Reuse per-key fixture sequences for notification composers without a global fallback. */
+/**
+ * In outbound-capture blackbox runs, whether a test registered this fixture key.
+ * Optional model steps (lifecycle compose) run only when a test opted in, so
+ * unrelated captured-delivery tests stay deterministic and offline.
+ */
+export function blackboxFixtureRegistered(key: string): boolean | null {
+  if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND !== '1') return null;
+  return fixtureOverrides.has(key);
+}
+
 export function loadBlackboxFixtureObject(
   key: string,
   messages: readonly CompletionMessage[]

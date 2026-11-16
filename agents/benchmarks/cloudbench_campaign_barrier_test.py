@@ -313,41 +313,54 @@ def test_campaign_start_barrier_bounds_and_releases_each_complete_cohort(tmp_pat
         assert min(executed) > max(ready)
 
 
-def test_campaign_start_barrier_twenty_original_polar_jobs_use_tilion_cap_in_two_strict_cohorts(tmp_path):
-    """Offline scheduling qualification only; mock workers earn no benchmark credit."""
+def test_campaign_start_barrier_original_polar_jobs_use_tilion_cap_in_two_strict_cohorts(tmp_path):
+    """Offline scheduling qualification only; mock workers earn no benchmark credit.
+
+    Four more original polar jobs than the real Tilion fleet cap for a Polar-only
+    selection run as one cap-wide strict cohort and a second four-job cohort.
+    """
     from collections import Counter
 
-    tasks = [f"polar-bu-{index:03d}" for index in range(51, 61)]
+    polar = [task["name"] for task in json.loads((ROOT / "agents/benchmarks/polar_tasks.json").read_text())]
     env = dict(os.environ, CLOUDBENCH_BROWSER_PROVIDER="tilion")
     env.pop("CLOUDBENCH_PROVIDER_LIMITS_FILE", None)
     cap = subprocess.run(
         [sys.executable, str(ROOT / "scripts/cloudbench-provider-capacity.py"),
-         "cap", "--browser-provider", "tilion"],
+         "cap", "--browser-provider", "tilion", *[f"--task={task}" for task in polar]],
         env=env, capture_output=True, text=True, check=True,
     )
-    assert cap.stdout.strip() == "16", cap.stdout + cap.stderr
+    # Tilion's own row admits 200 (250 browsers, 20% production reserve). Polar's
+    # measured demand profile lifts Parallel to 147, so the unscoped Kernel row binds at 135.
+    assert cap.stdout.strip() == "135", cap.stdout + cap.stderr
+    width = int(cap.stdout.strip())
+    tasks = polar[: width + 4]
+    runs = 1
     result, summary, events = run_campaign(
-        tmp_path, tasks=tasks, runs=2, concurrency=int(cap.stdout.strip()),
+        tmp_path, tasks=tasks, runs=runs, concurrency=width,
+        # A cohort wider than the app delegating-guest ceiling (default 70) also needs the
+        # fleet's own override; the launch preflight refuses it otherwise.
         extra_env={"CLOUDBENCH_BROWSER_PROVIDER": "tilion",
-                   "CLOUDBENCH_PROVIDER_LIMITS_FILE": str(ROOT / "scripts/cloudbench-provider-limits.json")},
+                   "CLOUDBENCH_PROVIDER_LIMITS_FILE": str(ROOT / "scripts/cloudbench-provider-limits.json"),
+                   "CLOUDBENCH_DELEGATING_PRIMARY_CEILING": str(width)},
     )
     assert result.returncode == 0, result.stdout + result.stderr
     jobs = summary["jobs"]
-    expected = [(f"r{run:03d}-j{(run - 1) * 10 + offset:04d}", task, run)
-                for run in (1, 2) for offset, task in enumerate(tasks, 1)]
+    expected = [(f"r{run:03d}-j{(run - 1) * len(tasks) + offset:04d}", task, run)
+                for run in range(1, runs + 1) for offset, task in enumerate(tasks, 1)]
+    assert len(expected) == width + 4
     assert [(job["job_id"], job["task"], job["run"]) for job in jobs] == expected
-    assert Counter(job["task"] for job in jobs) == Counter({task: 2 for task in tasks})
-    assert summary["peak_concurrency"] == 16
+    assert Counter(job["task"] for job in jobs) == Counter({task: runs for task in tasks})
+    assert summary["peak_concurrency"] == width
     assert all(job["status"] == "passed" and job["finished_at"] for job in jobs)
     cohorts = summary["startup_cohorts"]
-    assert [cohort["expected_count"] for cohort in cohorts] == [16, 4]
-    assert [cohort["released_count"] for cohort in cohorts] == [16, 4]
+    assert [cohort["expected_count"] for cohort in cohorts] == [width, 4]
+    assert [cohort["released_count"] for cohort in cohorts] == [width, 4]
     assert [cohort["failed_count"] for cohort in cohorts] == [0, 0]
     for kind in ("started", "ready", "execute", "teardown"):
         assert Counter(event["job"] for event in events if event["event"] == kind) == Counter(
             job["job_id"] for job in jobs
         ), kind
-    first, second = {job[0] for job in expected[:16]}, {job[0] for job in expected[16:]}
+    first, second = {job[0] for job in expected[:width]}, {job[0] for job in expected[width:]}
     for ids in (first, second):
         ready = [event["at"] for event in events if event["job"] in ids and event["event"] == "ready"]
         execute = [event["at"] for event in events if event["job"] in ids and event["event"] == "execute"]
@@ -363,7 +376,7 @@ def test_campaign_start_barrier_twenty_original_polar_jobs_use_tilion_cap_in_two
         elif event["event"] == "teardown":
             active -= 1
             assert active >= 0
-    assert active == 0 and peak <= 16
+    assert active == 0 and peak <= width
 
 
 def test_campaign_start_barrier_failed_infra_canary_runs_once_per_cohort_and_next_cohort_can_retry(tmp_path):

@@ -2154,6 +2154,24 @@ class CompletedFindingsDispositionTest(unittest.TestCase):
         with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()): self.invoke()
         self.assertEqual(after, self.path.read_bytes())
 
+    def test_completed_override_accepts_an_audited_no_reviewable_paths_prefix_entry(self):
+        # A docs-only HEAD recorded as no-reviewable-paths consumed no review budget (PR #1865 ledger).
+        entry = {'number': 4, 'kind': 'no-reviewable-paths', 'head': 'd' * 40, 'status': 'completed',
+                 'result': 'clean', 'disposition': 'no-reviewable-paths', 'inherited_from': HEAD_B,
+                 'started_at': '2026-10-31T09:20:00Z', 'finished_at': '2026-10-31T09:20:00Z'}
+        self.state['cycles'].insert(2, entry)
+        self.save()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.invoke(), 0)
+        state = MODULE.read_state(self.path)
+        self.assertEqual(state['cycles'][2], entry)
+        self.assertEqual(state['cycles'][-1]['disposition'], 'overridden')
+        self.state['cycles'][2] = dict(entry, kind='unknown-kind')
+        self.save()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.invoke()
+
     def test_completed_transition_rejects_concurrent_prefix_change(self):
         original = MODULE._validate_completed_review if hasattr(MODULE, '_validate_completed_review') else None
         if original is None:

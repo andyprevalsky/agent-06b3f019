@@ -115,8 +115,8 @@ export async function claimCommand(
       select: { id: true },
     });
     if (inFlight !== null) return new IPhoneError(409, 'A phone request is still running');
-    const privacyError = await claimPrivacy(tx, device, input, actor, observation, taskBound);
-    if (privacyError !== null) return privacyError;
+    const privacy = await claimPrivacy(tx, device, leaseId, input, actor, observation, taskBound);
+    if (privacy !== null) return privacy;
     const gated = observation
       ? null
       : await setupGate(tx, device.id, lease, input, actor, inputHash, requestEncrypted);

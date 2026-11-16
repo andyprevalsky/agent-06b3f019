@@ -168,11 +168,15 @@ export function assertNoRoutingLeaks(message: string, agentId: string): void {
   );
 }
 
-/** The per-agent deep link (roselabs.ai?agent-id=…) must be present. */
+/**
+ * The per-agent link must be present: roselabs.ai?agent-id=… for in-flight
+ * notices, or the roselabs.ai/a/… share link (with its link preview) on start
+ * and finish texts.
+ */
 export function assertAgentLinkPresent(message: string, agentId: string): void {
   assert(
-    message.includes(`agent-id=${agentId}`),
-    `Expected per-agent deep link (agent-id=${agentId}) in SMS, got: ${message}`
+    message.includes(`agent-id=${agentId}`) || message.includes(`roselabs.ai/a/${agentId}`),
+    `Expected per-agent link (agent-id=${agentId} or /a/${agentId}) in SMS, got: ${message}`
   );
 }
 
@@ -200,7 +204,9 @@ export function assertLinkShorteningDisabled(body: Record<string, unknown>): voi
  */
 export function assertOnlyAgentLinkUrl(message: string, agentId: string): void {
   assertAgentLinkPresent(message, agentId);
-  const withoutAgentLink = message.replace(/https?:\/\/\S*agent-id=\S+/gi, '');
+  const withoutAgentLink = message
+    .replace(/https?:\/\/\S*agent-id=\S+/gi, '')
+    .replace(new RegExp(`https://roselabs\\.ai/a/${agentId}`, 'g'), '');
   assert(
     !/https?:\/\//i.test(withoutAgentLink),
     `Expected no non-agent URL in SMS body, got: ${message}`

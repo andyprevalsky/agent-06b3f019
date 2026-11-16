@@ -189,3 +189,43 @@ was absent afterward. The original whole-domain failure remains archived and
 unchanged paid judges are retained separately. No new stage, runtime timeout,
 model call or publication behavior is introduced. The final source-bound
 coverage composition is recorded separately from this causal pair.
+
+## November 11 recurrence: deploy planner explicit state context (OPEN)
+
+Gate: INTRODUCED. Native focused44 on source
+`3a17a82150c28c67669f27a51682a2d234c2a452` failed
+`deploy-test-github/Executor.test_capacity_counts_only_gates_this_host_runs`
+at its unchanged `self.assertEqual(0, code)` assertion. The original 68-test
+execution and native one-test rerun both failed; occurrence
+`331d3d0f7eca422dbf2982decd578cc9` remains complete=false.
+
+The deploy-only mass quarantine repair correctly forwards an explicitly
+resolved `state_dir` through `deploy_gates.run` and `build_template` to the
+planner. This test replaced the planner with `standard(host=())`, so Python
+raised `standard() got an unexpected keyword argument 'state_dir'` before
+the capacity callback ran. The facade caught the TypeError and returned
+internal exit2. The fixture modeled the older callable contract; production
+capacity behavior and planner state isolation were not the failure.
+
+The same original 68 tests against the prior4185 deploy_gates runtime passed
+in2.892s; current3a17 failed exactly this assertion in2.913s. Accepting the
+new optional keyword in the existing fixture made the same68 pass in3.022s.
+All68 test-method ASTs and the fixture return body remain identical. The
+existing owning test is the permanent regression; no new test framework,
+assertion change, timeout, waiver or production branch is needed. These are
+local offline checks using the configured deploy environment, not native44
+PASS or cleanup credit. Initial system-Python attempts also lacked boto3;
+that environment diagnostic is retained separately from the clean causal pair.
+
+Step6a: keep the one shared planner API and align the obsolete fixture rather
+than add fallback dispatch or duplicate planner state. Golden reference: not
+applicable (no approval-gated hunk). Archive searches for standard_template,
+state_dir, unexpected keyword and fixture identified this same incomplete
+successful-stub contract; its original and prior recurrence histories remain.
+No additional human feedback was received about this recurrence.
+
+Correction is prepared externally only under
+`/var/tmp/deploy-mf1108/rca-structural44-github/`. Shared source is untouched
+while healthy native44 lanes run. This recurrence stays OPEN until the deploy
+coordinator integrates at quiescence and obtains fresh complete native
+structural validation. No old failure is rewritten.

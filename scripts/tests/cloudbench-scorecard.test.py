@@ -65,6 +65,30 @@ def job(index, status, verdict, infra, *, run_id=None, fleet=None, pid=None, att
                 lifecycle_verified=released if status in ("passed", "failed") else None)
 
 
+def boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip() if Path("/proc/self/stat").exists() else "none"
+
+
+def process_birth(pid: int) -> str:
+    """The identity form cloudbench-campaign-inventory.sh records (Linux proc-start, else ps lstart)."""
+    if Path("/proc/self/stat").exists():
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return f"proc-start:{boot_id()}:{fields[19]}"
+    return subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="], text=True).strip()
+
+
+def live_controller() -> dict:
+    """This test process as a summary.json controller identity, so a running fixture is provably live."""
+    return {"pid": os.getpid(), "birth": process_birth(os.getpid())}
+
+
+def reaped_pid() -> int:
+    """A guaranteed-exited, already-reaped PID."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
 class Fixtures:
     def __init__(self, base: Path):
         self.base = base
@@ -84,7 +108,7 @@ class Fixtures:
                          run_dir=str(run), triggered_at=T0)
         return run
 
-    def campaign(self) -> Path:
+    def campaign(self, controller="live") -> Path:
         directory = self.base / "campaigns/campaign-20261018-192852-7"
         fleet = self.base / "fleet/runs/20261018-193000-11"
         write(fleet / "_batch/report-card.json", card(fleet.name, [task("task-2", "failed", reason="Expected tool 'spawn_browser_agent' not found in messages")]))
@@ -93,7 +117,17 @@ class Fixtures:
                 job(5, "queued", None, None)]
         write(directory / "summary.json", {"campaign_id": directory.name, "started_at": "2026-10-18T19:28:52+00:00",
                                            "e2e_started_at_epoch": T0, "status": "running", "runs": 1, "task_count": 5,
-                                           "total_jobs": 5, "jobs": jobs})
+                                           "total_jobs": 5, "jobs": jobs,
+                                           "shared_inventory": {"directory": str(directory / "shared-inventory"),
+                                                                "publisher_pid": 1}})
+        if controller:
+            # The campaign inventory publisher records its parent controller's PID + birth.
+            pid, start = {"live": (os.getpid(), process_birth(os.getpid())),
+                          "dead": (reaped_pid(), process_birth(os.getpid())),
+                          "reused": (os.getpid(), "proc-start:" + boot_id() + ":1" if Path("/proc/self/stat").exists()
+                                     else "Thu Jan  1 00:00:00 1970")}[controller]
+            write(directory / "shared-inventory/owner", f"app=navi-whisper-lux-bench\npid=1\npid_start=x\n"
+                  f"token=t\nparent_pid={pid}\nparent_start={start}\n")
         LEDGER["record"]("launch", directory.name, ledger=self.ledger, goal="campaign-goal", slice="mixed5",
                          kind="campaign", run_dir=str(directory), triggered_at=T0)
         return directory
@@ -169,6 +203,50 @@ class Fixtures:
         LEDGER["record"]("launch", admission.name, ledger=self.ledger, goal="70-tasks", slice="70-tasks",
                          kind="sharded", run_dir=str(admission), triggered_at=T0, scheduled_total=scheduled)
         return admission
+
+    def workspace_campaign(self, specs=(("alpha", "passed", "PASSED", True), ("beta", "failed", "FAILED", True),
+                                         ("gamma", "passed", "PASSED", False))) -> Path:
+        """A finished plain (--retry-infra 0) campaign in its workspace layout, shaped like
+        campaign-20261107-211039-3331466: summary.json jobs carry only the exit verdict, while each
+        job's fleet run holds the controller's teardown receipts. j0003's provider teardown never
+        verified (no epoch), so it must stay unverified."""
+        root = (self.base / "ws").resolve()
+        directory = root / ".context/benchmarks/campaigns/campaign-20261107-211039-3331466"
+        audits = root / ".git/cloudbench-fleet-audits"
+        jobs = []
+        for index, (task_name, status, verdict, verified) in enumerate(specs, start=1):
+            run_id, owner = f"20261107-212636-354385{index}", f"{index:032x}"
+            fleet = root / ".context/fleet/runs" / run_id
+            meta = (f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp=navi-whisper-lux-bench\n"
+                    f"workspace_root={root}\nstatus=provider-teardown-verified\n")
+            for audit in (audits / owner, fleet / "teardown-ownership"):
+                write(audit / "meta", meta)
+                if verified:
+                    write(audit / "provider-teardown-verified.epoch", str(int(T0 + 900)))
+            write(fleet / "teardown-ownership.path", f"{audits / owner}\n")
+            write(fleet / "_batch/lifecycle.json", {"version": 1, "run_id": run_id, "status": "verified",
+                                                    "workspace_root": str(root), "fleet_owner_token": owner,
+                                                    "controller_exit_code": 0, "hub_publication_failed": False})
+            write(fleet / "_batch/run.json", {"run_id": run_id, "tasks": [
+                {"name": task_name, "status": "COMPLETED", "benchmark_status": verdict,
+                 "passed": verdict == "PASSED", "lifecycle_stage": "released"}]})
+            write(fleet / "_batch/report-card.json", card(run_id, [task(
+                task_name, status, reason=None if verdict == "PASSED" else "Expected tool 'spawn_browser_agent' not found in messages")]))
+            job_id = f"r001-j{index:04d}"
+            log = write(directory / f"{job_id}.log", f"Monitor:\n    {root / 'scripts/run-bench'} monitor {fleet}\n")
+            jobs.append({"index": index, "job_id": job_id, "task": task_name, "run": 1, "status": status,
+                         "controller_exit_code": 0 if status == "passed" else 1,
+                         "started_at": "2026-10-18T19:40:00+00:00", "finished_at": "2026-10-18T19:50:00+00:00",
+                         "wall_clock_seconds": 600.0, "log": str(log), "attempt": 1,
+                         "controller_pid": 3543850 + index, "task_status": verdict, "infra_failure": False,
+                         "terminal_task": True})
+        write(directory / "summary.json", {"campaign_id": directory.name, "started_at": "2026-10-18T19:28:52+00:00",
+                                           "e2e_started_at_epoch": T0, "finished_at": "2026-10-18T19:51:00+00:00",
+                                           "status": "failed", "runs": 1, "task_count": len(jobs), "total_jobs": len(jobs),
+                                           "retry_infra": 0, "jobs": jobs})
+        LEDGER["record"]("launch", directory.name, ledger=self.ledger, goal="campaign-goal", slice="mixed3",
+                         kind="campaign", run_dir=str(directory), triggered_at=T0)
+        return directory
 
 
 def render(path, fixtures, **kw):
@@ -691,7 +769,7 @@ class Scorecard(unittest.TestCase):
                 LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=T0 + i * 1000 + 100,
                                  state="ABORTED" if i == 10 else "COMPLETE")
         directory = self.tmp / ids[-1]
-        write(directory / "summary.json", {"campaign_id": ids[-1], "status": "running",
+        write(directory / "summary.json", {"campaign_id": ids[-1], "status": "running", "controller": live_controller(),
               "started_at": "2026-10-18T22:48:52Z", "jobs": [], "total_jobs": 1})
         before = self.f.ledger.read_bytes()
         data = CARD["build"](directory, ledger=self.f.ledger, history_ids=list(reversed(ids)),
@@ -733,7 +811,7 @@ class Scorecard(unittest.TestCase):
                 LEDGER["record"]("end", ident, ledger=self.f.ledger,
                                  ended_at=T0 + i * 100 + 20, state="COMPLETE")
         run = self.tmp / ids[-1]
-        write(run / "summary.json", {"campaign_id": ids[-1], "status": "running",
+        write(run / "summary.json", {"campaign_id": ids[-1], "status": "running", "controller": live_controller(),
                                     "started_at": T0 + 600, "jobs": [], "total_jobs": 1})
         before = self.f.ledger.read_bytes()
         early = CARD["build"](run, ledger=self.f.ledger, history_ids=ids, iterations=6, now=T0 + 700)
@@ -829,7 +907,7 @@ class Scorecard(unittest.TestCase):
                     if i < 5:
                         LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=ends[i], state="ABORTED" if i == 2 else "COMPLETE")
                 run = self.tmp / ids[-1]
-                write(run / "summary.json", {"campaign_id": ids[-1], "status": "running", "jobs": [], "total_jobs": 1})
+                write(run / "summary.json", {"campaign_id": ids[-1], "status": "running", "controller": live_controller(), "jobs": [], "total_jobs": 1})
                 before = self.f.ledger.read_bytes()
                 card = CARD["build"](run, ledger=self.f.ledger, iterations=5, history_ids=ids, now=T0 + 10000)
                 text = CARD["render_text"](card)
@@ -868,7 +946,7 @@ class Scorecard(unittest.TestCase):
             if i == 7:
                 LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=end7, state="INCOMPLETE")
         run = self.tmp / launch_ids[-1]
-        write(run / "summary.json", {"campaign_id": launch_ids[-1], "status":"running", "jobs":[]})
+        write(run / "summary.json", {"campaign_id": launch_ids[-1], "status":"running", "controller": live_controller(), "jobs":[]})
         before = self.f.ledger.read_bytes()
         card = CARD["build"](run, ledger=self.f.ledger, history_ids=launch_ids, iterations=7, now=end7+10000)
         self.assertAlmostEqual(card["iteration_speed"]["per_hour"], .448424642929202)
@@ -1122,6 +1200,84 @@ if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
                          "retained retry attempts stay in the infra denominator; the job counts once")
         self.assertEqual(exp["state"], "RUNNING")
         self.assertEqual(exp["reasons"][0][1], "Expected tool 'spawn_browser_agent' not found in messages")
+        self.valid(data)
+
+    def test_campaign_with_live_controller_renders_running(self):
+        data = render(self.f.campaign("live"), self.f)
+        self.assertEqual((data["experiment"]["state"], data["since"]), ("RUNNING", {"state": "RUNNING"}))
+        self.assertIn("QUEUED 1 · IN_PROGRESS 1 · COMPLETED 3/5", CARD["render_text"](data))
+
+    def test_campaign_with_lost_controller_never_renders_running(self):
+        for controller in ("dead", "reused"):
+            with self.subTest(controller=controller):
+                self.tmp = Path(tempfile.mkdtemp(prefix="scorecard-test-"))
+                self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+                self.f = Fixtures(self.tmp)
+                directory = self.f.campaign(controller)
+                os.utime(directory / "summary.json", (T0 + 1800, T0 + 1800))
+                data = render(directory, self.f)
+                exp = data["experiment"]
+                self.assertEqual(exp["state"], "CONTROLLER LOST")
+                self.assertEqual(exp["progress"], {"queued": 1, "in_progress": 1, "completed": 3, "unobserved": 0},
+                                 "every recorded count is preserved")
+                self.assertEqual(exp["outcomes"]["PASS"], 1)
+                self.assertNotEqual(data["since"], {"state": "RUNNING"})
+                text = CARD["render_text"](data)
+                lines = text.splitlines()
+                self.assertTrue(lines[0].startswith("🧪 EXPERIMENT #1 · 🔴 CONTROLLER LOST · last update Oct 18, 12:58:52 PM PDT"), lines[0])
+                self.assertNotIn("RUNNING", text)
+                self.assertNotIn("IN_PROGRESS 1", text)
+                self.assertIn("QUEUED 1 · INTERRUPTED/UNRECONCILED 1 · COMPLETED 3/5", text)
+                lost = [i for i in data["issues"] if i["text"].startswith("Campaign controller lost")]
+                self.assertEqual(len(lost), 1, data["issues"])
+                self.assertEqual(lost[0]["severity"], "red")
+                self.assertIn("exact-owner recovery", lost[0]["action"])
+                document = self.valid(data)
+                self.assertNotIn("RUNNING", document.split('id="scorecard-data"')[0])
+                self.assertIn("CONTROLLER LOST", document)
+
+    def test_campaign_without_inventory_owner_uses_its_recorded_controller(self):
+        # CodeRabbit PR #1865: a concurrency-1 campaign has no shared-inventory owner file;
+        # the controller identity it records in summary.json proves liveness instead.
+        directory = self.f.campaign(None)
+        summary = json.loads((directory / "summary.json").read_text())
+        summary["controller"] = {"pid": os.getpid(), "birth": process_birth(os.getpid())}
+        write(directory / "summary.json", summary)
+        data = render(directory, self.f)
+        self.assertEqual(data["experiment"]["state"], "RUNNING")
+        summary["controller"] = {"pid": reaped_pid(), "birth": process_birth(os.getpid())}
+        write(directory / "summary.json", summary)
+        os.utime(directory / "summary.json", (T0 + 1800, T0 + 1800))
+        self.assertEqual(render(directory, self.f)["experiment"]["state"], "CONTROLLER LOST")
+
+    def test_unreadable_boot_id_is_unverified_not_a_crash(self):
+        # CodeRabbit PR #1865: an OSError reading /proc boot_id must not crash load_campaign.
+        if not Path("/proc/self/stat").exists():
+            self.skipTest("needs /proc process births")
+        directory = self.f.campaign("reused")
+        summary = json.loads((directory / "summary.json").read_text())
+        real = Path.read_text
+
+        def guarded(path, *args, **kwargs):
+            if str(path) == "/proc/sys/kernel/random/boot_id":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", guarded):
+            liveness = CARD["controller_liveness"](directory, summary)
+        self.assertEqual(liveness["state"], "UNVERIFIED")
+        self.assertIn("another host boot", liveness["detail"])
+
+    def test_campaign_without_controller_identity_is_unverified_not_running(self):
+        data = render(self.f.campaign(None), self.f)
+        exp = data["experiment"]
+        self.assertEqual(exp["state"], "UNVERIFIED")
+        self.assertEqual(exp["progress"]["in_progress"], 1)
+        text = CARD["render_text"](data)
+        self.assertTrue(text.startswith("🧪 EXPERIMENT #1 · 🟠 UNVERIFIED · last update "), text.splitlines()[0])
+        self.assertNotIn("RUNNING", text)
+        self.assertIn("IN_PROGRESS (UNVERIFIED) 1", text)
+        self.assertTrue(any(i["text"].startswith("Campaign controller liveness UNVERIFIED") for i in data["issues"]))
         self.valid(data)
 
     def test_campaign_monitor_receipts(self):
@@ -1613,6 +1769,40 @@ if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
         exports = next(i for i in exp["lifecycle"] if i["label"] == "Evidence exports verified")
         self.assertEqual(exports["state"], "ok")
         self.assertEqual(before, {str(p): p.read_bytes() for p in admission.rglob("*.json")})
+
+    def test_plain_campaign_counts_verified_fleet_teardown_receipts(self):
+        # I-29: a --retry-infra 0 campaign's summary never recorded release, so a fully torn-down
+        # run rendered "Guests released · 0/16 terminal jobs · no native audit".
+        directory = self.f.workspace_campaign()
+        before = (directory / "summary.json").read_bytes()
+        data = render(directory, self.f)
+        exp, text = data["experiment"], CARD["render_text"](data)
+        self.assertIn("🟠 Guests released · 2/3 terminal jobs · no native audit", text)
+        self.assertIn("🟠 Lifecycle verified · 2/3 terminal jobs", text)
+        self.assertEqual((exp["released"], exp["lifecycle_verified"]), ({"yes": 2, "of": 3}, {"yes": 2, "of": 3}))
+        self.assertEqual(exp["reasons"][0][1], "Expected tool 'spawn_browser_agent' not found in messages",
+                         "the verified fleet handle also binds the job's report card")
+        self.assertEqual((directory / "summary.json").read_bytes(), before, "rendering never rewrites evidence")
+        self.valid(data)
+
+    def test_campaign_with_malformed_release_receipts_renders_them_unverified(self):
+        # A looping or malformed receipt is an unverified release, never a failed render.
+        directory = self.f.workspace_campaign(tuple((name, "passed", "PASSED", True)
+                                                    for name in ("alpha", "beta", "gamma", "delta")))
+        runs = self.tmp / "ws/.context/fleet/runs"
+        loop = runs / "20261107-212636-3543852/loop"
+        loop.symlink_to(loop)
+        write(loop.parent / "teardown-ownership.path", f"{loop}\n")  # Path.resolve() -> RuntimeError
+        write(runs / "20261107-212636-3543853/_batch/run.json", "[" * 100000 + "]" * 100000)  # RecursionError
+        write(runs / "20261107-212636-3543854/_batch/run.json", [])  # AttributeError
+        summary = json.loads((directory / "summary.json").read_text())
+        CARD["refresh_release"](directory, summary)  # the campaign's own verifier, in memory only
+        self.assertEqual([job.get("resources_released") is True for job in summary["jobs"]], [True, False, False, False])
+        # main's campaign_receipts binds the direct teardown-ownership receipts (not run.json),
+        # so the card still renders; the malformed run.json never crashes it.
+        data = render(directory, self.f)
+        CARD["render_text"](data)
+        self.valid(data)
 
     def test_missing_data_renders_explicit_states(self):
         empty = self.tmp / "empty"

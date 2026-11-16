@@ -1,9 +1,11 @@
 // eslint-disable-next-line no-restricted-imports -- domain-specific vCard library, single consumer
 import vCardsJS from 'vcards-js';
 import * as repo from './repo';
+import { isLinqEnabled } from '../../providers/linq';
 import { createLogger } from '../../providers/logger';
 import {
-  ROSE_PHONE,
+  SURGE_PHONE,
+  linqFromPhone,
   ROSE_EMAIL,
   ROSE_ORG,
   ROSE_URL,
@@ -19,15 +21,30 @@ const log = createLogger('VCard');
 // drifting against a hand-rolled interface.
 type VCard = ReturnType<typeof vCardsJS>;
 
+/**
+ * Rose's number for this recipient: the Linq number when their texts route via
+ * Linq (same rule as smsQueue), else the Surge number. Saving a number that
+ * never answers them would strand their replies.
+ */
+export function rosePhoneFor(recipientPhone?: string | null): string {
+  const linqPhone = linqFromPhone();
+  if (linqPhone === '') return SURGE_PHONE;
+  const routed =
+    recipientPhone !== null && recipientPhone !== undefined && recipientPhone !== ''
+      ? isLinqEnabled(recipientPhone)
+      : isLinqEnabled();
+  return routed ? linqPhone : SURGE_PHONE;
+}
+
 function applyDefaultPhoto(vCard: VCard) {
   vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');
 }
 
-function buildBaseVCard(name: string): VCard {
+function buildBaseVCard(name: string, phone: string = rosePhoneFor()): VCard {
   const vCard = vCardsJS();
   vCard.firstName = name;
   vCard.lastName = '';
-  vCard.cellPhone = ROSE_PHONE;
+  vCard.cellPhone = phone;
   vCard.email = ROSE_EMAIL;
   vCard.organization = ROSE_ORG;
   vCard.url = ROSE_URL;
@@ -58,7 +75,7 @@ export async function generatePersonalizedVCard(userId: string): Promise<{
       user?.systemName !== null && user?.systemName !== undefined && user.systemName !== ''
         ? user.systemName
         : DEFAULT_SYSTEM_NAME;
-    const vCard = buildBaseVCard(systemName);
+    const vCard = buildBaseVCard(systemName, rosePhoneFor(user?.phone));
     const sanitized = systemName
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, '-')

@@ -19,7 +19,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import structlog
 
@@ -137,7 +137,13 @@ class MemoryRetrieval:
         }
 
 
-async def _ensure_critical_path(hit: MemoryHit, *, agent_id: Optional[str], user_id: Optional[str]) -> bool:
+async def _ensure_critical_path(
+    hit: MemoryHit,
+    *,
+    agent_id: Optional[str],
+    user_id: Optional[str],
+    llm_auth: Optional[Mapping[str, Any]] = None,
+) -> bool:
     """Lease, fill, and store one cache entry. Concurrent non-owners do no expensive work."""
     from providers.planner_memory.transcript import load_bundle_transcript
 
@@ -164,7 +170,7 @@ async def _ensure_critical_path(hit: MemoryHit, *, agent_id: Optional[str], user
             # search time and still carry a failed bundle (e.g. a verdict flip).
             logger.info("planner_memory.skip_failed_transcript", root_agent_id=hit.id, outcome=transcript.outcome)
             return False
-        record = await compress_transcript(transcript, agent_id=agent_id, user_id=user_id)
+        record = await compress_transcript(transcript, agent_id=agent_id, user_id=user_id, llm_auth=llm_auth)
         hit.critical_path = record
         hit.compressed_now = True
         stored = await backend.store_critical_path(
@@ -191,8 +197,12 @@ async def retrieve_memories(
     exclude_root_agent_id: Optional[str],
     agent_id: Optional[str] = None,
     config: Optional[RetrievalConfig] = None,
+    llm_auth: Optional[Mapping[str, Any]] = None,
 ) -> MemoryRetrieval:
-    """Never raises: any failure yields an empty retrieval with ``error`` set."""
+    """Never raises: any failure yields an empty retrieval with ``error`` set.
+
+    ``llm_auth`` is the caller's leased compute token, lent to any plan-time compression.
+    """
     config = config or DEFAULT_CONFIG
     started = time.perf_counter()
     result = MemoryRetrieval(query=goal)
@@ -223,7 +233,8 @@ async def retrieve_memories(
                 result.skipped_uncompressed += 1
         if pending:
             tasks = [
-                asyncio.create_task(_ensure_critical_path(hit, agent_id=agent_id, user_id=user_id)) for hit in pending
+                asyncio.create_task(_ensure_critical_path(hit, agent_id=agent_id, user_id=user_id, llm_auth=llm_auth))
+                for hit in pending
             ]
             _done, unfinished = await asyncio.wait(tasks, timeout=COMPRESSION_BATCH_TIMEOUT_SECONDS)
             if unfinished:

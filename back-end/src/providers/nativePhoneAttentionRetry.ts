@@ -11,9 +11,11 @@ export async function nativeCompletionRetry(
   request: NativeRequest,
   device: IPhoneDevice,
   target: NativePhoneTarget,
-  initiallyCompleted: boolean
+  initiallyCompleted: boolean,
+  response: string
 ) {
-  if (request.attentionRequest.userResponse !== '__AUTH_ASSISTANCE_COMPLETED__')
+  // A retry must repeat the committed intent; a different owner action is stale.
+  if (request.attentionRequest.userResponse !== response)
     throw new NativePhoneAttentionError(409, 'Native attention is no longer current');
   await tx.$queryRaw`SELECT id FROM "Agent" WHERE id=${request.agentId} FOR SHARE`;
   const agent = await tx.agent.findFirst({
@@ -66,5 +68,6 @@ export async function nativeCompletionRetry(
     retrySideEffects: initiallyCompleted && current && inFlight === null,
     workflowId: request.attentionRequest.workflowId,
     userMessage: null,
+    response,
   };
 }

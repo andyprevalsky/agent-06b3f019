@@ -20,3 +20,8 @@ export const INTEGRATION_ADD_BUTTON_CLASSES =
   'h-9 w-9 shrink-0 rounded-lg flex items-center justify-center transition-all duration-200 bg-primary text-primary-foreground hover:bg-primary/90';
 export const INTEGRATION_TEXT_ACTION_CLASSES =
   'h-8 shrink-0 rounded-lg bg-muted px-2.5 text-xs font-medium text-foreground hover:bg-muted/80 disabled:opacity-60';
+
+/** Rose Desktop inline row forms (CLIs, MCP servers, integration requests). */
+export const TOOL_ROW_INPUT_CLASSES =
+  'h-8 min-w-0 rounded-md border border-border bg-background px-2.5 text-[13px] outline-none placeholder:text-muted-foreground focus:border-foreground/40';
+export const TOOL_ROW_ERROR_CLASSES = 'text-xs text-destructive dark:text-red-300';

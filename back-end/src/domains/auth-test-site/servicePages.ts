@@ -289,7 +289,7 @@ export function renderAccountPage(
       <dt>Member number</dt>
       <dd id="member-number">${escapeHtml(memberNumber ?? 'Unavailable')}</dd>
       <dt>Plan</dt>
-      <dd>Rose Shop Annual</dd>
+      <dd>${site.behavior.shop && site.behavior.membershipFeeCents === 0 ? 'a free account' : 'Rose Shop Annual'}</dd>
       <dt>Status</dt>
       <dd>Active</dd>
     </dl>
