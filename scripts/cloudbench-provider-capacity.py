@@ -33,6 +33,13 @@ other tasks is refused by those tasks' own (global) check.
 Usage:
     cloudbench-provider-capacity.py check --benches N [--browser-provider P] [--task T ...]  # exit 0, or 78
     cloudbench-provider-capacity.py cap [--json] [--browser-provider P] [--task T ...]       # print the cap
+    cloudbench-provider-capacity.py delegating --benches N [--task T ...]                    # exit 0, or 78
+
+`delegating` is the separate app-wide delegating-guest ceiling that fleet
+admission (scripts/run-bench-fleet admit_lane_capacity) applies to live REAL/SIM
+primaries across devboxes: CLOUDBENCH_DELEGATING_PRIMARY_CEILING, default 70.
+A launch whose own simultaneous REAL/SIM width exceeds it can never be admitted,
+so cloud launchers refuse it up front instead of waiting out admission.
 
 There is no bypass: raising the cap means recording new provider limits in
 scripts/cloudbench-provider-limits.json in a reviewed change.
@@ -64,6 +71,10 @@ MAX_CATALOG_BYTES = 32 * 1024 * 1024
 BROWSER_PROVIDERS = ("tilion", "kernel", "steel", "browser-use")
 MAX_ENV_BYTES = 1024 * 1024
 EXIT_REFUSED = 78  # EX_CONFIG: provider configuration cannot serve this width.
+# The same override and default as scripts/run-bench-fleet admit_lane_capacity.
+DELEGATING_CEILING_ENV = "CLOUDBENCH_DELEGATING_PRIMARY_CEILING"
+DEFAULT_DELEGATING_CEILING = 70
+LANE_ENV = "CLOUDBENCH_LANE"
 EXIT_INVALID = 2
 MAX_REGISTRY_BYTES = 256 * 1024
 
@@ -228,9 +239,8 @@ def load_registry(path: Path | None = None) -> dict:
                 cap=min(row["cap"] for row in rows))
 
 
-def task_groups(names: set[str], catalogs: tuple[Path, ...] = TASK_CATALOGS) -> dict[str, str | None]:
-    """Catalog group of each named task; absent names are unknown (global demand)."""
-    groups: dict[str, str | None] = {}
+def _catalog_entries(names: set[str], catalogs: tuple[Path, ...]):
+    """Every readable catalog row whose name is in `names`."""
     for path in catalogs:
         try:
             if not path.is_file() or path.stat().st_size > MAX_CATALOG_BYTES:
@@ -239,11 +249,17 @@ def task_groups(names: set[str], catalogs: tuple[Path, ...] = TASK_CATALOGS) -> 
         except (OSError, UnicodeDecodeError, ValueError):
             continue
         for entry in entries if isinstance(entries, list) else ():
-            name = entry.get("name") if isinstance(entry, dict) else None
-            if name not in names:
-                continue
-            group = entry.get("group") if isinstance(entry.get("group"), str) else None
-            groups[name] = group if groups.get(name, group) == group else None  # conflicting rows: unknown
+            if isinstance(entry, dict) and entry.get("name") in names:
+                yield entry
+
+
+def task_groups(names: set[str], catalogs: tuple[Path, ...] = TASK_CATALOGS) -> dict[str, str | None]:
+    """Catalog group of each named task; absent names are unknown (global demand)."""
+    groups: dict[str, str | None] = {}
+    for entry in _catalog_entries(names, catalogs):
+        name = entry["name"]
+        group = entry.get("group") if isinstance(entry.get("group"), str) else None
+        groups[name] = group if groups.get(name, group) == group else None  # conflicting rows: unknown
     return groups
 
 
@@ -390,6 +406,61 @@ def check(benches: int, *, stream=None, registry: dict | None = None,
     return 0
 
 
+def delegating_ceiling() -> int:
+    """The app-wide live REAL/SIM primary ceiling fleet admission enforces."""
+    raw = os.environ.get(DELEGATING_CEILING_ENV) or str(DEFAULT_DELEGATING_CEILING)
+    if not re.fullmatch(r"[0-9]{1,6}", raw):
+        raise RegistryError(f"{DELEGATING_CEILING_ENV} must be a non-negative integer")
+    return int(raw)
+
+
+def requested_delegating_benches(benches: int, tasks: list[str] | None,
+                                 catalogs: tuple[Path, ...] = TASK_CATALOGS) -> int:
+    """Simultaneous REAL/SIM primaries a launch of `benches` copies of `tasks` can request.
+
+    Mirrors admit_lane_capacity's lanes: CLOUDBENCH_LANE=demo|infra requests none,
+    and catalog `demo_cache: on` tasks run in the separate DEMO lane. Any other or
+    unknown task makes the whole width count (which copies overlap is not known
+    before launch), as mixed selections keep the global provider peaks."""
+    lane = os.environ.get(LANE_ENV) or ""
+    if lane in ("demo", "infra"):
+        return 0
+    if not lane and tasks:
+        demo = {entry["name"] for entry in _catalog_entries(set(tasks), catalogs)
+                if entry.get("demo_cache", entry.get("fast_cache")) == "on"}
+        if set(tasks) <= demo:
+            return 0
+    return benches
+
+
+def delegating_refusal_message(requested: int, ceiling: int) -> str | None:
+    if requested <= ceiling:
+        return None
+    return "\n".join([
+        f"❌ Delegating-guest ceiling: requested {requested} simultaneous REAL/SIM copies, maximum {ceiling} "
+        f"({DELEGATING_CEILING_ENV}, default {DEFAULT_DELEGATING_CEILING}).",
+        "Fleet admission counts every live REAL/SIM primary on the app (all devboxes) against this ceiling, so this "
+        "launch can never be admitted: its copies would wait out admission and be recorded as INFRA.",
+        f"Lower the simultaneous width to {ceiling} or fewer (fewer tasks or -k copies, or a rolling campaign with "
+        f"--concurrency {ceiling} or less).",
+        f"Raising {DELEGATING_CEILING_ENV} needs a measured backend/provider load at the wider width; "
+        f"{DEFAULT_DELEGATING_CEILING} is the widest proven-safe width.",
+    ])
+
+
+def delegating_check(benches: int, *, stream=None, tasks: list[str] | None = None,
+                     catalogs: tuple[Path, ...] = TASK_CATALOGS) -> int:
+    """Return 0 when the launch's own REAL/SIM width fits the app ceiling, else EXIT_REFUSED after printing why."""
+    stream = stream or sys.stderr
+    if isinstance(benches, bool) or not isinstance(benches, int) or benches < 0:
+        raise ValueError("simultaneous bench count must be a nonnegative integer")
+    message = delegating_refusal_message(requested_delegating_benches(benches, tasks, catalogs), delegating_ceiling())
+    if message is None:
+        return 0
+    print(message, file=stream, flush=True)
+    return EXIT_REFUSED
+
+
 def _table(registry: dict) -> dict:
     def row(item: dict) -> dict:
         return dict(id=item["id"], name=item["name"], limit=_limit_text(item), credential_env=item["credential_env"],
@@ -411,6 +482,10 @@ def main(argv: list[str] | None = None) -> int:
     checking.add_argument("--benches", required=True, type=int, help="global simultaneous bench count")
     capping = commands.add_parser("cap", help="print the provider concurrency cap")
     capping.add_argument("--json", action="store_true", help="print every provider's cap as JSON")
+    delegating = commands.add_parser("delegating", help="refuse a REAL/SIM width above the app delegating-guest ceiling")
+    delegating.add_argument("--benches", required=True, type=int, help="global simultaneous bench count")
+    delegating.add_argument("--task", action="append", dest="tasks", metavar="NAME",
+                            help="a launched task (repeat); DEMO-lane tasks request no delegating primaries")
     for command in (checking, capping):
         command.add_argument("--browser-provider", choices=BROWSER_PROVIDERS,
                              help="fleet browser provider (default: CLOUDBENCH_BROWSER_PROVIDER, then back-end/.env)")
@@ -419,6 +494,14 @@ def main(argv: list[str] | None = None) -> int:
                                   "task is in its catalog group")
     args = parser.parse_args(argv)
     try:
+        if args.command == "delegating":
+            if args.benches < 0:
+                parser.error("--benches must be a nonnegative integer")
+            try:
+                return delegating_check(args.benches, tasks=args.tasks)
+            except RegistryError as error:
+                print(f"❌ {error}; no cloud launch admitted", file=sys.stderr)
+                return EXIT_INVALID
         if args.command == "check":
             if args.benches < 0:
                 parser.error("--benches must be a nonnegative integer")
