@@ -77,6 +77,8 @@ in-flight tasks before `continue_as_new`, as it does mid-turn. 10k behavior: no 
 reads, polling or fan-in. The change only reorders O(own background records) of
 in-memory work that already ran once per phase.
 
+Failed-deploy guard: generation 40e8aa1c8933 was live (8 workers served 25–36 workflows each from 03:03Z to 04:45Z, after both concurrent deploys failed). A deploy that fails or retires can't receive agents. `scripts/worker_pool_cutover.py` publishes the pointer only after the whole bank is healthy with native pollers. `admitQueueContinuation` refuses any continuation whose destination gate is not qualified OPEN for the pointer's surface hash (RETIRING, RETIRED, unqualified, stale hash or unpublished). When it refuses, `_check_generation_handoff` fails open and the agent stays on its current queue. Follow-up regressions assert both halves: `managed-workflow-producers.test.ts` "a failed or retired generation never admits a continuation" (fails with the phase check removed) and `test_generation_handoff.py::test_refused_pointer_read_keeps_the_workflow_on_its_current_generation`.
+
 ## Human feedback
 
 None recorded.

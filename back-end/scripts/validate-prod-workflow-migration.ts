@@ -2,7 +2,7 @@
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
-import { type AgentStatus, type Message } from '@prisma/client';
+import { type AgentStatus, type Message, type Prisma } from '@prisma/client';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import {
   acceptStartedWorkflowReplacement,
@@ -26,7 +26,7 @@ import {
 } from '../src/providers/descendantWorkflowStart';
 import {
   activateTemporalWorkerBuild,
-  cleanupSupersededWorkerActivationMarkers,
+  cleanupSupersededWorkerActivationMarkersWithClient,
   getTemporalClient,
   startAgentWorkflowExecution,
   type TemporalWorkflowExecutionRef,
@@ -47,11 +47,17 @@ import {
 } from '../src/providers/workflowReplacementState';
 import { resumeAgentWorkflow } from '../src/providers/agentResume';
 import { cleanupTerminalAgentWorkflowZombies } from '../src/providers/workflowTerminalCleanup';
+import { type WorkflowDeploymentLease } from '../src/providers/workflowDeploymentLease';
 import {
-  acquireWorkflowDeploymentLease,
-  WorkflowDeploymentLeaseBusyError,
-  type WorkflowDeploymentLease,
-} from '../src/providers/workflowDeploymentLease';
+  beginValidationRun,
+  endValidationRun,
+  liveConcurrentValidationUserIds,
+  observeSingleGeneration,
+  runScopedTemporalClient,
+  terminatorIdentity,
+  VALIDATION_USER_PREFIX,
+  validationUserId,
+} from './workflow-migration-validation-run';
 
 interface ValidationAgent {
   agentId: string;
@@ -66,15 +72,14 @@ interface ValidationResult {
 }
 
 const runId = randomUUID();
-const userId = `prod-workflow-migration-validation-${runId}`;
+const userId = validationUserId(runId);
 const dormantQueue = `navi-prod-migration-validation-${runId}`;
 const results: ValidationResult[] = [];
 const workflowIds = new Set<string>();
 const agentIds = new Set<string>();
 const productionUrl = 'https://navi-j9a9.onrender.com';
 const CHECK_TIMEOUT_MS = 180_000;
-const DEPLOYMENT_LEASE_WAIT_MS = 10 * 60_000;
-let deploymentLease: WorkflowDeploymentLease | null = null;
+let validationRunLease: WorkflowDeploymentLease | null = null;
 
 async function withTimeout<T>(label: string, operation: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
@@ -92,28 +97,6 @@ async function withTimeout<T>(label: string, operation: Promise<T>, timeoutMs: n
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
   }
-}
-
-async function acquireProductionDeploymentLease(): Promise<WorkflowDeploymentLease> {
-  const deadline = Date.now() + DEPLOYMENT_LEASE_WAIT_MS;
-  let lastHolder = 'no contention observed';
-  do {
-    try {
-      return await acquireWorkflowDeploymentLease({ purpose: 'validate-prod-workflow-migration' });
-    } catch (error) {
-      if (!(error instanceof WorkflowDeploymentLeaseBusyError)) throw error;
-      if (error.holderDescription !== lastHolder) {
-        process.stderr.write(
-          `[WorkflowMigrationValidation] cutover lease busy: ${error.message}\n`
-        );
-      }
-      lastHolder = error.holderDescription;
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-    }
-  } while (Date.now() < deadline);
-  throw new Error(
-    `Timed out after ${DEPLOYMENT_LEASE_WAIT_MS}ms waiting for the production cutover lease; current holder: ${lastHolder}`
-  );
 }
 
 function requireProductionOptIn(): void {
@@ -417,11 +400,24 @@ async function activityCount(
  * a naive before/after sample races the handoff arming. Settle until an *active*
  * handoff timer is present (started, not yet fired/canceled) and history stops
  * moving, then prove no further growth inside the poll window (no LLM/tool burn
- * while cold).
+ * while cold). Validation runs no longer hold the cutover lease, so a real
+ * cooperative cutover may hand this parked generation off (continue-as-new onto
+ * the new queue) mid-window; only then is the window re-observed on the new
+ * generation.
  */
 async function assertColdHandoffHistoryStable(
   handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>,
-  { settleMs = 8_000, observeMs = 2_000 }: { settleMs?: number; observeMs?: number } = {}
+  options: { settleMs?: number; observeMs?: number } = {}
+): Promise<WorkflowHistoryMetrics> {
+  return observeSingleGeneration(
+    async () => (await handle.describe()).runId,
+    () => observeColdHistory(handle, options)
+  );
+}
+
+async function observeColdHistory(
+  handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>,
+  { settleMs = 8_000, observeMs = 2_000 }: { settleMs?: number; observeMs?: number }
 ): Promise<WorkflowHistoryMetrics> {
   const settleDeadline = Date.now() + settleMs;
   let last = await activityCount(handle);
@@ -446,7 +442,7 @@ async function assertColdHandoffHistoryStable(
 
 async function main(): Promise<void> {
   requireProductionOptIn();
-  deploymentLease = await acquireProductionDeploymentLease();
+  validationRunLease = await beginValidationRun(runId);
   const root = await createDormantAgent('PAUSED');
   const child = await createDormantAgent('PAUSED', { parentAgentId: root.agentId });
   await prisma.toolUsage.createMany({
@@ -1628,93 +1624,170 @@ async function main(): Promise<void> {
   await check('production_fleet_has_no_stuck_cutover_state', async () => {
     const now = new Date();
     const staleCutoff = new Date(now.getTime() - 10 * 60_000);
+    const stale = (users: Prisma.StringFilter) => ({
+      cleanup: {
+        agent: { userId: users },
+        notBefore: { lte: staleCutoff },
+        OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }],
+      } satisfies Prisma.TemporalWorkflowCleanupWhereInput,
+      pendingStart: {
+        userId: users,
+        temporalWorkflowStartPending: true,
+        createdAt: { lte: staleCutoff },
+        OR: [
+          { temporalWorkflowStartLeaseUntil: null },
+          { temporalWorkflowStartLeaseUntil: { lt: now } },
+        ],
+      } satisfies Prisma.AgentWhereInput,
+      replacementClaim: {
+        userId: users,
+        workflowReplacementToken: { not: null },
+        updatedAt: { lte: staleCutoff },
+      } satisfies Prisma.AgentWhereInput,
+    });
+    // Concurrent validation runs (other owners' lanes) are no longer serialized,
+    // so exclude another run's fixtures only while that run is provably live; a
+    // crashed run's leftovers still count.
+    const otherRuns = stale({ startsWith: VALIDATION_USER_PREFIX, not: userId });
+    const [cleanupOwners, pendingOwners, claimOwners] = await Promise.all([
+      prisma.temporalWorkflowCleanup.findMany({
+        where: otherRuns.cleanup,
+        select: { agent: { select: { userId: true } } },
+      }),
+      prisma.agent.findMany({
+        where: otherRuns.pendingStart,
+        distinct: ['userId'],
+        select: { userId: true },
+      }),
+      prisma.agent.findMany({
+        where: otherRuns.replacementClaim,
+        distinct: ['userId'],
+        select: { userId: true },
+      }),
+    ]);
+    const liveRunUsers = await liveConcurrentValidationUserIds(
+      [
+        ...cleanupOwners.map((row) => row.agent.userId),
+        ...pendingOwners.map((row) => row.userId),
+        ...claimOwners.map((row) => row.userId),
+      ],
+      runId
+    );
+    const fleet = stale({ notIn: [userId, ...liveRunUsers] });
     const [overdueCleanupObligations, stalePendingStarts, staleReplacementClaims] =
       await Promise.all([
-        prisma.temporalWorkflowCleanup.count({
-          where: {
-            agent: { userId: { not: userId } },
-            notBefore: { lte: staleCutoff },
-            OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }],
-          },
-        }),
-        prisma.agent.count({
-          where: {
-            userId: { not: userId },
-            temporalWorkflowStartPending: true,
-            createdAt: { lte: staleCutoff },
-            OR: [
-              { temporalWorkflowStartLeaseUntil: null },
-              { temporalWorkflowStartLeaseUntil: { lt: now } },
-            ],
-          },
-        }),
-        prisma.agent.count({
-          where: {
-            userId: { not: userId },
-            workflowReplacementToken: { not: null },
-            updatedAt: { lte: staleCutoff },
-          },
-        }),
+        prisma.temporalWorkflowCleanup.count({ where: fleet.cleanup }),
+        prisma.agent.count({ where: fleet.pendingStart }),
+        prisma.agent.count({ where: fleet.replacementClaim }),
       ]);
     assert.deepStrictEqual(
       { overdueCleanupObligations, stalePendingStarts, staleReplacementClaims },
       { overdueCleanupObligations: 0, stalePendingStarts: 0, staleReplacementClaims: 0 }
     );
-    return 'zero due-and-unleased cleanup obligations or cutover states stalled for 10+ minutes';
+    return `zero due-and-unleased cleanup obligations or cutover states stalled for 10+ minutes (excluded ${liveRunUsers.length} live concurrent validation run(s))`;
   });
 
   await check('same_sha_old_marker_is_retired_without_retiring_current_attempt', async () => {
     const buildId = process.env.TEMPORAL_WORKER_BUILD_ID!;
-    // Mint both markers under unique validation tokens. Cooperative cutover does
-    // not keep deploy activation markers running, and a prior validation pass may
-    // leave the real deploy-token marker TERMINATED (activate then throws).
-    const currentToken = `validation-current-${runId}`;
-    const oldToken = `validation-old-${runId}`;
-    const currentMarkerId = await activateTemporalWorkerBuild(buildId, currentToken);
-    workflowIds.add(currentMarkerId);
-    const oldMarkerId = await activateTemporalWorkerBuild(buildId, oldToken);
-    workflowIds.add(oldMarkerId);
-    assert.notStrictEqual(oldMarkerId, currentMarkerId);
-
     const client = await getTemporalClient();
-    const visibilityDeadline = Date.now() + 30_000;
-    let visible = false;
-    do {
-      for await (const execution of client.workflow.list({
-        query: 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"',
-      })) {
-        if (execution.workflowId === oldMarkerId) visible = true;
-      }
-      if (!visible) await new Promise((resolve) => setTimeout(resolve, 500));
-    } while (!visible && Date.now() < visibilityDeadline);
-    assert(visible, 'validation activation marker was not visible in the cleanup query');
+    // This run's Temporal identity: every termination its cleanup makes is
+    // recorded under it, so retirement is attributable per run.
+    const identity = userId;
+    const foreignRetirements: string[] = [];
+    for (let attempt = 1; ; attempt += 1) {
+      // Mint both markers under unique validation tokens. Cooperative cutover does
+      // not keep deploy activation markers running, and a prior validation pass may
+      // leave the real deploy-token marker TERMINATED (activate then throws).
+      const currentToken = `validation-current-${runId}-${attempt}`;
+      const oldToken = `validation-old-${runId}-${attempt}`;
+      const currentMarkerId = await activateTemporalWorkerBuild(buildId, currentToken);
+      workflowIds.add(currentMarkerId);
+      const oldMarkerId = await activateTemporalWorkerBuild(buildId, oldToken);
+      workflowIds.add(oldMarkerId);
+      assert.notStrictEqual(oldMarkerId, currentMarkerId);
 
-    // cleanupSupersededWorkerActivationMarkers enumerates markers via Temporal
-    // visibility (Elasticsearch), which is eventually consistent: a just-created
-    // marker that this test already confirmed "Running" can still be absent from
-    // a single subsequent visibility snapshot, so one cleanup pass may not see it
-    // to terminate it. Production activation runs cleanup on every deploy, so a
-    // straggler is retired on the next pass — the property under test is that a
-    // superseded same-SHA marker IS retired, within the visibility-consistency
-    // window, not that a single snapshot catches it. Retry the idempotent cleanup
-    // (bounded) until visibility catches up. The assertion is unchanged: the old
-    // marker must end TERMINATED and the exact current marker must stay RUNNING.
-    const retirementDeadline = Date.now() + 60_000;
-    let oldMarkerStatus = 'RUNNING';
-    do {
-      await cleanupSupersededWorkerActivationMarkers(currentMarkerId);
-      oldMarkerStatus = (await client.workflow.getHandle(oldMarkerId).describe()).status.name;
-      if (oldMarkerStatus === 'TERMINATED') break;
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    } while (Date.now() < retirementDeadline);
-    assert.strictEqual(
-      oldMarkerStatus,
-      'TERMINATED',
-      'superseded same-SHA marker was not retired within the visibility-consistency window'
-    );
-    const current = await client.workflow.getHandle(currentMarkerId).describe();
-    assert.strictEqual(current.status.name, 'RUNNING');
-    return 'same-SHA old attempt marker retired while exact current deployment stayed active';
+      const visibilityDeadline = Date.now() + 30_000;
+      let visible = false;
+      do {
+        for await (const execution of client.workflow.list({
+          query:
+            'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"',
+        })) {
+          if (execution.workflowId === oldMarkerId) visible = true;
+        }
+        if (!visible) await new Promise((resolve) => setTimeout(resolve, 500));
+      } while (!visible && Date.now() < visibilityDeadline);
+      assert(visible, 'validation activation marker was not visible in the cleanup query');
+
+      // The production cleanup is fleet-wide: unscoped, it would retire a
+      // concurrent deploy's freshly activated marker (whose workers gate
+      // production polling on it) and other validation runs' markers. Run the
+      // same production function through a client whose visibility listing
+      // yields only this attempt's two markers.
+      const scopedClient = runScopedTemporalClient(
+        client,
+        [currentMarkerId, oldMarkerId],
+        identity
+      );
+      // cleanupSupersededWorkerActivationMarkers enumerates markers via Temporal
+      // visibility (Elasticsearch), which is eventually consistent: a just-created
+      // marker that this test already confirmed "Running" can still be absent from
+      // a single subsequent visibility snapshot, so one cleanup pass may not see it
+      // to terminate it. Production activation runs cleanup on every deploy, so a
+      // straggler is retired on the next pass — the property under test is that a
+      // superseded same-SHA marker IS retired, within the visibility-consistency
+      // window, not that a single snapshot catches it. Retry the idempotent cleanup
+      // (bounded) until visibility catches up. The assertion is unchanged: the old
+      // marker must end TERMINATED and the exact current marker must stay RUNNING.
+      const retirementDeadline = Date.now() + 60_000;
+      let oldMarkerStatus = 'RUNNING';
+      do {
+        await cleanupSupersededWorkerActivationMarkersWithClient(scopedClient, currentMarkerId);
+        oldMarkerStatus = (await client.workflow.getHandle(oldMarkerId).describe()).status.name;
+        if (oldMarkerStatus === 'TERMINATED') break;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      } while (Date.now() < retirementDeadline);
+      const currentMarkerStatus = (await client.workflow.getHandle(currentMarkerId).describe())
+        .status.name;
+      const terminatedBy = async (workflowId: string, status: string) =>
+        status === 'TERMINATED'
+          ? terminatorIdentity((await client.workflow.getHandle(workflowId).fetchHistory()).events)
+          : null;
+      const oldTerminator = await terminatedBy(oldMarkerId, oldMarkerStatus);
+      const currentTerminator = await terminatedBy(currentMarkerId, currentMarkerStatus);
+      // A fleet-wide cleanup from another process (a validator still on the
+      // pre-run-scoped code, or a manual activate-agent-worker-build.ts /
+      // migrate-open-agent-workflows.ts run) retires every marker but its own
+      // under its own identity. That proves nothing about this run's cleanup
+      // either way, so mint a fresh pair.
+      const foreign = [oldTerminator, currentTerminator].filter(
+        (terminator): terminator is string => terminator !== null && terminator !== identity
+      );
+      if (foreign.length > 0 && attempt < 3) {
+        foreignRetirements.push(`attempt ${attempt}: ${foreign.join(', ')}`);
+        continue;
+      }
+      assert.strictEqual(
+        oldMarkerStatus,
+        'TERMINATED',
+        'superseded same-SHA marker was not retired within the visibility-consistency window'
+      );
+      assert.strictEqual(
+        oldTerminator,
+        identity,
+        `superseded same-SHA marker was retired by ${oldTerminator}, not this run's cleanup`
+      );
+      assert.strictEqual(
+        currentMarkerStatus,
+        'RUNNING',
+        `exact current marker was retired by ${currentTerminator ?? 'unknown'}`
+      );
+      return `same-SHA old attempt marker retired by this run's cleanup while exact current deployment stayed active${
+        foreignRetirements.length > 0
+          ? ` (fresh pair after concurrent cutover retirement: ${foreignRetirements.join('; ')})`
+          : ''
+      }`;
+    }
   });
 }
 
@@ -1773,7 +1846,10 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
         );
       })
       .finally(() => {
-        const release = deploymentLease === null ? Promise.resolve() : deploymentLease.release();
+        const release =
+          validationRunLease === null
+            ? Promise.resolve()
+            : endValidationRun(runId, validationRunLease);
         void release
           .catch(() => undefined)
           .then(() => prisma.$disconnect())
@@ -1811,12 +1887,12 @@ main()
         detail: error instanceof Error ? (error.stack ?? error.message) : String(error),
       });
     }
-    if (deploymentLease !== null) {
+    if (validationRunLease !== null) {
       try {
-        await deploymentLease.release();
+        await endValidationRun(runId, validationRunLease);
       } catch (error) {
         results.push({
-          test: 'deployment_lease_release',
+          test: 'validation_run_lease_release',
           status: 'FAIL',
           detail: error instanceof Error ? error.message : String(error),
         });

@@ -93,6 +93,7 @@ export {
 } from './tilionConfig';
 export {
   TilionApiError,
+  TilionDownloadChallengedError,
   TilionInsufficientCreditsError,
   TilionRateLimitError,
   TilionSessionBusyError,

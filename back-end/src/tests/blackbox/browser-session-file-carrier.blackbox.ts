@@ -260,6 +260,7 @@ async function main(): Promise<void> {
         BrowserOperationWorkerOwnedError: class extends Error {},
       },
       '../../providers/browser/tilion': {
+        TilionDownloadChallengedError: class extends Error {},
         TilionInsufficientCreditsError: class extends Error {},
         TilionSessionBusyError: class extends Error {},
       },

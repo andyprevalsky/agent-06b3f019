@@ -20,6 +20,7 @@ sources:
   - commit 35faef1c1e
   - commit 605e194a2a
   - commit 291a20af54
+  - PR #2342 (merged 7bd19ea7b540cc35f1d3e781809e71e3a75ab0ad)
 repro: python3 scripts/tests/condition-waits.test.py RatchetCase.test_current_tree_passes
 status: fixed
 ---
@@ -87,6 +88,9 @@ Not changed (follow-up): registering this file in a /deploy lane, and making
 
 - A fresh sub-agent, given only the symptom, independently confirmed the
   first bad boundary (35faef1c1e) and the `/push` direct-merge path.
+
+- Shipped in PR #2342, merge 7bd19ea7b5. On the merged main tree the repro
+  exits 0, and the production semantic lane passed (run 43822175655).
 
 ## Human feedback
 
