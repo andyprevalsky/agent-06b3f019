@@ -81,6 +81,18 @@ server had no existing cache there. Preserve those failures as environment
 misconfiguration evidence, not source regressions. The duplicate catalog key
 on origin/main remains a separate full-coverage blocker.
 
+### Catalog serialization repair
+
+Parent independently reviewed and authorized removing the overwritten first
+quarantine key on browser-biometrics-webdecoy. Ordinary JSON parsing before
+and after is byte-for-byte equivalent after canonical serialization of all
+tasks; prompts, evaluators, timeouts, criteria and effective quarantine remain
+unchanged. Git history and the private catalog-semantics receipt retain both
+incident records. Extend the existing duplicate-key regression to parse the
+actual checked-in normal and Polar catalogs strictly, in addition to its
+synthetic negative control. The previously failing auth-test-site-benchmark
+domain now passes (6.5 seconds); full agents coverage is rerunning.
+
 ## Reusable lesson
 
 Extracted shell fixtures must supply an executable at an exec boundary, so
