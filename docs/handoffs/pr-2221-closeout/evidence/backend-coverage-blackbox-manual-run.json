@@ -1,0 +1,17 @@
+{
+ "run": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43690209043",
+ "gate": "backend-coverage-blackbox",
+ "source_head": "546242327b833d5fff63611654fedadcef9abbe7",
+ "complete": true,
+ "case_counts": {
+  "PASS": 272
+ },
+ "units": "PASS",
+ "coverage_threshold": "PASS",
+ "remote": {
+  "run_id": 43690209043,
+  "event_sha": "546242327b833d5fff63611654fedadcef9abbe7",
+  "runner_name": "blacksmith-16vcpu-ubuntu-2404-xf2phi5s53b2pxci",
+  "tag": "deploy-gates/16vcpu/backend-coverage-blackbox-fbcbdcfedbe3e971"
+ }
+}
