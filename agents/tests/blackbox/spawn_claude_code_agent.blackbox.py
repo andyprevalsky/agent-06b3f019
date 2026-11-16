@@ -805,11 +805,12 @@ def test_native_handoff_preserves_single_command_task():
 
         schema = {"fields": [{"name": "value", "type": "str", "required": True}]}
         receipts = json.loads(receipts_path.read_text())
+        assert len(receipts) == 4, receipts
         # Actual transport writer -> filesystem/close reader -> worker validator.
         for receipt, status in zip(receipts[:3], ("blocked", "complete", "failed")):
             parsed, error = _read_handoff(receipt, schema)
             assert error is None and parsed["rose_handoff"]["status"] == status
-        assert [receipt["status"] for receipt in receipts[-2:]] == ["missing", "missing"]
+        assert receipts[-1]["status"] == "missing"
 
 
 def test_handoff_json_schema_carries_declared_field_descriptions():

@@ -11,6 +11,14 @@ const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const DEV_USER_ID = process.env.CODEX_BLACKBOX_USER_ID || '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const apiKeyHeaders = () => ({ 'Content-Type': 'application/json', 'X-API-Key': API_KEY });
+export function isExactRestrictedCommand(command: string | undefined): boolean {
+  return (
+    command === 'yc me --json' ||
+    command === "/bin/bash -lc 'yc me --json'" ||
+    command === "/bin/bash -c 'yc me --json'"
+  );
+}
+
 export async function testSmoke_codexRestrictedCommandHandoff() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   const parent = await smokeParentAgent(DEV_USER_ID);
@@ -69,10 +77,7 @@ export async function testSmoke_codexRestrictedCommandHandoff() {
       unique.length === 1,
       `Expected exactly one shell command, got ${JSON.stringify(unique)}`
     );
-    assert(
-      unique[0].command === "/bin/bash -lc 'yc me --json'" || unique[0].command === 'yc me --json',
-      `Unexpected command: ${unique[0].command}`
-    );
+    assert(isExactRestrictedCommand(unique[0].command), `Unexpected command: ${unique[0].command}`);
     assert(
       !events.some((event) => (event as { type?: string }).type === 'file_change'),
       'Agent modified a file'

@@ -163,3 +163,45 @@ owned by the coordinating parent. No user approval has been requested here.
 ## Reusable lesson
 
 Keep mandatory handoff bookkeeping compatible with the user's permitted actions, and diagnose repeated correct rejection upstream of the verifier.
+
+### Live follow-up on committed candidate 2d3adc093aba
+
+The first real full codex-code gate failed both generic and restricted smokes:
+no handoff file at close. Captured checkpoint CLI logs show valid final JSON,
+then a goal continuation beginning 17–20 ms later. The candidate's per-turn
+reset removed the file. Gate attribution: INTRODUCED versus main bd35eaed,
+which has no such reset. The local delayed-close regression reproduces missing
+versus present without changing model output. Fix: keep a task's last result
+through its goal continuations; only initialize a new task clears prior data.
+
+Independent candidate review also reproduced acknowledgment overwriting a
+newer goal completion and schema mutation before failed steering. The extra
+ack assignment and deliver schema handling were deleted, restoring the original
+steering owner; production respawns restart the CLI for a new output schema.
+No new active-schema lifecycle was added. A waiter regression now requires the
+currently started turn to finish before combining its result with goal completion.
+
+The first follow-up live run was stopped by exact owned runner PID when the
+review arrived; its single owned sandbox was confirmed torn down. It is not a
+pass. The next full live run is recorded separately in private artifacts.
+
+### Final local live gate
+
+The unchanged full command `CODE_SMOKE_PARENT_MODEL=rose-labs/rose-1-ultra
+CODE_SMOKE_SPEED=standard bash scripts/run-blackbox-tests.sh codex-code` passed
+34/34, no skips, in 94.255 seconds (run 1794799399-937600-24822).
+Generic smoke passed in 63.160s and restricted-command smoke in 28.007s.
+Both served GPT-6.1 Sol, xhigh, standard, through user ChatGPT OAuth. The
+restricted run issued exactly one `yc me --json`, observed missing CLI exit127,
+returned a truthful missing result, completed its native goal and delivered a
+valid handoff. The task explicitly permits missing/unauthenticated outcomes.
+Both owned sandboxes were terminated by the runner. This establishes the
+restricted code-session contract, not that original production's successful
+account lookup was reproduced or its paused root was resumed. Deployment and
+root-verifier live proof remain parent-owned; keep the case open.
+
+The immediately prior full gate passed the generic smoke but rejected the
+restricted command's equivalent `/bin/bash -c` wrapper. That was a smoke assertion
+bug: its payload was exactly the requested command. The final assertion accepts
+`-c` and `-lc` with that literal payload only; negative controls reject appended
+commands. No production goal, timeout or evaluator was weakened.

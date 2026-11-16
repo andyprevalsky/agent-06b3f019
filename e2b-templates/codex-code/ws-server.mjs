@@ -1554,7 +1554,8 @@ class CodexAppServer {
       if (this.handoffSchema && this.goalStatus === "active") {
         this.handoffTurnId = p.turn.id;
         this.handoffText = null;
-        this.handoff.reset?.();
+        // A goal continuation belongs to the same task. Keep its last result
+        // until another valid final replaces it or a new task starts.
       }
       this.turnStartedAt = new Date().toISOString();
       this.emit({
@@ -1893,7 +1894,6 @@ class CodexAppServer {
         objective,
         status: "active",
       });
-      this.goalStatus = "active";
     } catch (error) {
       log("warn", "Could not set the thread goal", { error: error.message });
       this.emit({ type: "goal", status: "unavailable", error: error.message });
@@ -1947,23 +1947,6 @@ class CodexAppServer {
       const settings = this.validateSettings(msg.settings);
       let delivery_mode;
       let turn_id;
-      const nextSchema =
-        msg.sender === "agent" && typeof msg.text === "string"
-          ? handoffSchemaFromGoal(msg.text)
-          : null;
-      const nextNativeSchema =
-        nextSchema && this.handoff ? strictOutputSchema(nextSchema) : null;
-      if (nextSchema && this.handoff) {
-        this.handoff.schema = nextSchema;
-        this.handoffSchema = nextNativeSchema;
-        this.handoffText = null;
-        this.handoff.reset?.();
-        input = input.map((item) =>
-          item.type === "text" && nextNativeSchema
-            ? { ...item, text: nativeHandoffTask(item.text) }
-            : item,
-        );
-      }
       if (this.activeTurnId) {
         if (JSON.stringify(settings) !== JSON.stringify(this.settings))
           throw new Error("settings_change_requires_idle");
@@ -1976,15 +1959,12 @@ class CodexAppServer {
         turn_id = response.turnId || this.activeTurnId;
         delivery_mode = "steer";
       } else {
-        turn_id = await this.start(input, settings, msg.id, nextNativeSchema);
-        if (nextNativeSchema) this.handoffTurnId = turn_id;
+        turn_id = await this.start(input, settings, msg.id);
         delivery_mode = "start";
       }
       // A new spawn's task delivered to this live session is its new goal.
       if (msg.sender === "agent" && typeof msg.text === "string")
-        await this.setGoal(
-          nextNativeSchema ? nativeHandoffTask(msg.text) : msg.text,
-        );
+        await this.setGoal(msg.text);
       return {
         delivery_mode,
         turn_id,

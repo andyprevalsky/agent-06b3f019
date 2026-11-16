@@ -13,6 +13,9 @@ import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { WebSocketServer } from 'ws';
+import { waitForCodexOutput } from './codex-ws-output.support';
+import { isExactRestrictedCommand } from './codex-restricted-handoff.case';
 import {
   CODE_AGENT_INSTRUCTIONS_VERSION,
   CODE_AGENT_STOCK_INSTRUCTIONS_VERSION,
@@ -451,4 +454,45 @@ test('handoff system instructions defer persistence to the task without adding s
       /result handoff instructions/
     );
   }
+});
+
+test('Codex smoke waiter requires the current goal turn to end', async () => {
+  const server = new WebSocketServer({ port: 0 });
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  let ended = false;
+  server.on('connection', (ws) => {
+    const send = (data: object) => ws.send(JSON.stringify({ type: 'code_agent_event', data }));
+    send({ type: 'turn_ended', raw_type: 'turn/completed', turn_id: 'old' });
+    send({ type: 'turn_started', turn_id: 'new' });
+    send({ type: 'goal', status: 'complete', turn_id: 'new' });
+    setTimeout(() => {
+      ended = true;
+      send({ type: 'turn_ended', raw_type: 'turn/completed', turn_id: 'new' });
+    }, 30);
+  });
+  try {
+    await waitForCodexOutput(`ws://127.0.0.1:${address.port}`, 1000, true);
+    assert.equal(ended, true, 'waiter resolved before current turn ended');
+  } finally {
+    for (const client of server.clients) client.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('restricted command checks the shell payload without requiring a login shell', () => {
+  for (const command of [
+    'yc me --json',
+    "/bin/bash -c 'yc me --json'",
+    "/bin/bash -lc 'yc me --json'",
+  ])
+    assert.equal(isExactRestrictedCommand(command), true);
+  for (const command of [
+    "/bin/bash -c 'yc me --json; echo done'",
+    'yc me',
+    'python3 bookkeeping.py',
+    undefined,
+  ])
+    assert.equal(isExactRestrictedCommand(command), false);
 });

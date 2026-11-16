@@ -1,3 +1,6 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 export interface CodexWsOutput {
   output: string;
   events: unknown[];
@@ -69,6 +72,7 @@ export async function waitForCodexOutput(
           ) {
             goalCompleted = true;
           }
+          if (typed.type === 'turn_started') turnCompleted = false;
           if (typed.type === 'turn_ended' && typed.raw_type === 'turn/completed') {
             turnCompleted = true;
           }
@@ -77,6 +81,14 @@ export async function waitForCodexOutput(
           exitSeen = true;
           clearTimeout(timeout);
           ws.close();
+          const artifactDir = process.env.BLACKBOX_TEST_ARTIFACT_DIR;
+          if (artifactDir) {
+            const host = new URL(wsUrl).hostname;
+            writeFileSync(
+              join(artifactDir, `codex-events-${host}.json`),
+              JSON.stringify({ output, events }, null, 2)
+            );
+          }
           resolve({
             output,
             events,
