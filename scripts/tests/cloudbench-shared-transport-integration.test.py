@@ -1022,6 +1022,52 @@ with (root/'wireguard-calls').open('a')as stream:
             self.assertEqual(len(started()),2,'concurrent standalone runs must share one default agent')
 
 
+class WireGuardPeerClaimScope(unittest.TestCase):
+    """The one-campaign peer claim belongs to flyctl's effective config dir.
+
+    flyctl keeps config, agent socket and wire_guard_state in FLY_CONFIG_DIR
+    (default ~/.fly). On 2026-11-16 a second rolling campaign launched with its
+    own FLY_CONFIG_DIR (its own agent and peer, 6PN verified) was refused because
+    the claim always used $HOME/.fly.
+    """
+
+    def setUp(self):
+        import runpy
+        self.claim = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))['claim_home_wireguard_peer']
+        directory = tempfile.TemporaryDirectory(prefix='wg-claim-'); self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / 'home'; self.home.mkdir(mode=0o700)
+        self.descriptors = []
+        self.addCleanup(lambda: [os.close(descriptor) for descriptor in self.descriptors])
+
+    def claim_with(self, campaign, **environment):
+        from unittest.mock import patch
+        values = dict(os.environ, HOME=str(self.home)); values.pop('FLY_CONFIG_DIR', None); values.update(environment)
+        with patch.dict(os.environ, values, clear=True):
+            descriptor = self.claim(self.root / campaign)
+        self.descriptors.append(descriptor)
+        return descriptor
+
+    def test_same_config_dir_conflicts_and_distinct_config_dirs_both_claim(self):
+        shared = str(self.root / 'fly-a')
+        self.claim_with('campaign-a', FLY_CONFIG_DIR=shared)
+        with self.assertRaisesRegex(ValueError, 'WireGuard peer.*own FLY_CONFIG_DIR'):
+            self.claim_with('campaign-b', FLY_CONFIG_DIR=shared)
+        self.claim_with('campaign-c', FLY_CONFIG_DIR=str(self.root / 'fly-c'))
+        self.assertTrue((self.root / 'fly-a/rose-campaign-wireguard-peer.lock').is_file())
+        self.assertIn('campaign-c', (self.root / 'fly-c/rose-campaign-wireguard-peer.lock').read_text())
+        self.assertFalse((self.home / '.fly').exists(), 'an explicit FLY_CONFIG_DIR claimed the HOME peer')
+
+    def test_unset_config_dir_keeps_the_home_fly_claim(self):
+        self.claim_with('campaign-a')
+        self.assertIn('campaign-a', (self.home / '.fly/rose-campaign-wireguard-peer.lock').read_text())
+        with self.assertRaisesRegex(ValueError, 'WireGuard peer'):
+            self.claim_with('campaign-b')
+        with self.assertRaisesRegex(ValueError, 'WireGuard peer'):
+            self.claim_with('campaign-c', FLY_CONFIG_DIR=str(self.home / '.fly'))
+        self.claim_with('campaign-d', FLY_CONFIG_DIR=str(self.root / 'fly-d'))
+
+
 
 class RelayAgentExitBound(unittest.TestCase):
     """stop_shared_relay waits a bounded time for the private agent (CodeRabbit 4570070993).

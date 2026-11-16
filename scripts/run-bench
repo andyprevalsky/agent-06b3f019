@@ -9,6 +9,30 @@ benchmark_agent_instructions() {
     cat "$ROOT_DIR/.claude/shared/benchmark-report-format.txt"
 }
 
+# --durable (handled below) supervises cloud controller launches: the ordinary
+# fleet, rolling campaign, sharded operator and fleet recovery. A subcommand or
+# local run is not one; refuse it by name instead of forwarding the flag to a
+# tool that rejects it obscurely or wrapping a local stack in a system service.
+run_bench_durable_flag=0
+run_bench_route_word=""
+run_bench_skip_value=0
+for arg in "$@"; do
+    if [ "$run_bench_skip_value" -eq 1 ]; then run_bench_skip_value=0; continue; fi
+    case "$arg" in
+        --durable|--durable-log=*) run_bench_durable_flag=1 ;;
+        --durable-log) run_bench_durable_flag=1; run_bench_skip_value=1 ;;
+        *) [ -n "$run_bench_route_word" ] || run_bench_route_word="$arg" ;;
+    esac
+done
+if [ "$run_bench_durable_flag" -eq 1 ]; then
+    case "$run_bench_route_word" in
+        report-format|scorecard|stop-all|reclaim-stopped|image-activate|image-build|stability-proof|monitor|list|--list|code-parity|eval|eval-suite|--local|-h|--help)
+            echo "❌ --durable supports cloud benchmark launches only (ordinary fleet, rolling campaign, sharded operator, fleet recovery); run 'scripts/run-bench $run_bench_route_word' without --durable" >&2
+            exit 2
+            ;;
+    esac
+fi
+
 # Read-only and dependency-free, including from a scripts-only checkout.
 if [[ "${1:-}" == "report-format" ]]; then
     [ "$#" -eq 1 ] || { echo "Usage: scripts/run-bench report-format" >&2; exit 2; }
@@ -472,6 +496,8 @@ Durable launch (boxes.dev and other systemd hosts):
                      loudly and falls back to setsid. Stop: sudo -n systemctl stop <unit>.
                      Forwards non-secret launch settings; a campaign records its
                      CLOUDBENCH_* settings in summary.json operator_settings.
+                     Subcommands (monitor, scorecard, image-build, stability-proof,
+                     ...) and --local/eval runs refuse --durable by name.
   --durable-log FILE Append the service's output to FILE (implies --durable;
                      default .context/benchmarks/durable/<unit>.log).
 

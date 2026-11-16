@@ -886,7 +886,9 @@ def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, p
     # cross_check_receipts gained the stopped-owner backend extension proof beside main's prefix proof.
     # Re-pinned for PR #1990 (merge with main, 2026-11-14): BILLING_GUEST still byte-identical; host-side
     # admission isolates well-formed services by default (provenance services_isolated, restore hints).
-    need(hashlib.sha256(helper).hexdigest() == '527af394c95e195aebbab74e1e03af45e47b993a721a10bd61996ba4c3a0486c',
+    # Re-pinned for b55e854061 (main 609cfca1fa, 2026-11-16): BILLING_GUEST still byte-identical; host-side
+    # undelivered_native_stop_record admits the exact verified pre-backend-exit native stop.
+    need(hashlib.sha256(helper).hexdigest() == '85363bbebd490c8336e3c3c04e6c0361160904d2fd7d1371ebc18fc0e362c36b',
          'stopped inert guest producer changed')
     source = next(ast.literal_eval(node.value) for node in ast.parse(helper).body
                   if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'BILLING_GUEST'

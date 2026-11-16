@@ -1188,13 +1188,18 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     Every flyctl agent started in one HOME loads the same wire_guard_state peer.
     A second campaign's private agent opens another session on that peer and
     stalls both tunnels (descend-full69-20261023: lost guest /shutdown replies,
-    retained Machines); so does a standalone run's HOME default agent
-    (2026-11-16: every copy NORESULT). Standalone fleet controllers hold this lock
-    shared (run-bench-fleet claim_home_wireguard_peer_shared), so either launch
-    order refuses. The claim is an open file lock, so a dead holder releases it;
-    the caller hands it to the agent's bootstrap so it ends with that agent.
+    retained Machines); so does a standalone run's default agent (2026-11-16:
+    every copy NORESULT). Standalone fleet controllers hold this lock shared
+    (run-bench-fleet claim_home_wireguard_peer_shared), so either launch order
+    refuses. The claim is an open file lock, so a dead holder releases it; the
+    caller hands it to the agent's bootstrap so it ends with that agent.
+
+    flyctl keeps its config, agent socket and wire_guard_state in FLY_CONFIG_DIR
+    (default ~/.fly), so the peer and this claim belong to that directory: a
+    campaign launched with its own FLY_CONFIG_DIR gets its own peer and can run
+    beside another campaign in the same HOME.
     """
-    directory = Path(os.environ.get('HOME') or Path.home()) / '.fly'
+    directory = Path(os.environ.get('FLY_CONFIG_DIR') or Path(os.environ.get('HOME') or Path.home()) / '.fly')
     directory.mkdir(mode=0o700, exist_ok=True)
     path = directory / 'rose-campaign-wireguard-peer.lock'
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -1208,12 +1213,12 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
         except BlockingIOError:
             holder = os.read(descriptor, 4096).decode(errors='replace').strip() or 'unknown holder'
             os.close(descriptor)
-            raise ValueError(f'another campaign already owns this HOME\'s Fly WireGuard peer ({holder}). '
-                             f'{advice}') from None
+            raise ValueError(f'another campaign already owns this Fly config dir\'s WireGuard peer '
+                             f'({holder}). {advice}, or launch with its own FLY_CONFIG_DIR') from None
         holders = peer_lock_holders(path)
         os.close(descriptor)
-        raise ValueError(f'a standalone run (or the default Fly agent it started) shares this HOME\'s Fly '
-                         f'WireGuard peer: {holders}. {advice}; once no standalone run is live, stop a '
+        raise ValueError(f'a standalone run (or the default Fly agent it started) shares this Fly config '
+                         f'dir\'s WireGuard peer: {holders}. {advice}; once no standalone run is live, stop a '
                          'lingering default agent with `flyctl agent stop`') from None
     except BaseException:
         os.close(descriptor)
@@ -1225,8 +1230,8 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
         raise
     if default_agent is not None:
         os.close(descriptor)
-        raise ValueError(f'a default Fly agent answers on {default_agent} and holds a session on this HOME\'s '
-                         f'Fly WireGuard peer. {advice}; once no standalone run or ad-hoc flyctl tunnel uses '
+        raise ValueError(f'a default Fly agent answers on {default_agent} and holds a session on this Fly '
+                         f'config dir\'s WireGuard peer. {advice}; once no standalone run or ad-hoc flyctl tunnel uses '
                          'this HOME, stop it with `flyctl agent stop` and relaunch')
     os.ftruncate(descriptor, 0)
     os.pwrite(descriptor, f'pid={os.getpid()} campaign={campaign_dir}\n'.encode(), 0)
@@ -1620,6 +1625,20 @@ def provider_capacity_refusal(benches: int, tasks: list[str] | None = None) -> i
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
 
 
+def delegating_ceiling_refusal(benches: int, tasks: list[str] | None = None) -> int:
+    """0 when the app delegating-guest ceiling can admit `benches` simultaneous REAL/SIM copies.
+
+    Fleet admission refuses live REAL/SIM primaries + requested above
+    CLOUDBENCH_DELEGATING_PRIMARY_CEILING after its admission wait, recording
+    INFRA; a campaign (or sharded group) wider than the ceiling can never fit.
+    """
+    capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
+    try:
+        return capacity["delegating_check"](benches, tasks=tasks)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
+
+
 # scripts/run-bench run_bench_secret_like_setting, re-applied here because a
 # recorded name list is untrusted input (parity regression in
 # cloudbench_campaign_inventory_test.py).
@@ -1748,6 +1767,9 @@ def main() -> int:
         refused = provider_capacity_refusal(global_benches, args.task)
         if refused:
             return refused
+    refused = delegating_ceiling_refusal(global_benches, args.task)
+    if refused:
+        return refused
     controller_nice = os.environ.get("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE", "0")
     if controller_nice not in ("0", "10"):
         raise SystemExit("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE must be 0 or 10")
