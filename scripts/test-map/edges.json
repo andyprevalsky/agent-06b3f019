@@ -81,6 +81,11 @@
   ],
   "edges": [
     {
+      "_why": "The project-clone blackbox invokes its real-Git pack fixture and CPU measurement helper as a Python subprocess.",
+      "from": ["back-end/src/tests/blackbox/fixtures/project-delta-pack.py"],
+      "to_lanes": {"backend-blackbox": ["project-clone"]}
+    },
+    {
       "_why": "Backend starts/signals agent workflows by Temporal name and payload; agents tests own the workflow side of that contract.",
       "from": [
         "back-end/src/providers/temporal*",
