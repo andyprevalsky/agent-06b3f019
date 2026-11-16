@@ -103,12 +103,54 @@ replay. Parent owns final publication and golden-reference review.
 
 ## Human feedback
 
-User required read-only investigation initially, no phone actions, no resend,
-no fabricated status, no independent deploy, and parent coordination. Parent
-subsequently authorized only service.py, existing browser blackbox tests and
-this case. Independent review caught latest-screen starvation under alternating
-inputs and a later apps.list; both are covered by the final regression.
+The user requested RCA followed by deployment, with resourceful end-to-end
+ownership. Before a repair, read active Bugs and Bug Report threads, match actual
+work/evidence rather than titles, and reconcile an existing owner. That check
+found the nearby setup-verifier work distinct; both its owner and the phone
+acceptance coordinator confirmed no overlap. The report requires never resending
+and preserving the actual Read observation rather than fabricating Delivered/Sent.
 
 ## Reusable lesson
 
 Preserve native operation identity and its first observed result outside lossy compact history while keeping context limits and incomplete-evidence claims honest.
+
+## Full141-action admission follow-up (proposed compact JSON repair)
+
+The per-operation projection alone remains incomplete at the actual141-action
+archive boundary. At source50439c411c1f580542c521a7761e76b1f0fa92f0, the unchanged
+generic TOOL_RESULT serializer inserts JSON separator spaces before applying the
+160000-character aggregate budget. Only87 intact phone receipts survive; exact
+input45/Send47/Read48 are omitted. This is a second owned admission boundary,
+not evidence that the phone operation itself failed.
+
+The proposed generic one-line repair uses compact JSON separators while keeping
+all keys, values, string whitespace, ordering, default=str and both caps intact.
+It admits100 intact receipts at141. Entire decoded request/result values for
+45/47/48/93/95/101/105/139/141 match the captured original. Existing49/102/122/132
+assertions remain unchanged;141 is added. Original source exits1 only at141;
+the isolated candidate exits0 at every checkpoint. Tool-result character totals
+remain capped; approximate tool token counts fall65917 to55470. These are local
+token estimates, not usage billing or proof of timeout causality.
+
+Controlled model evidence supplied by the parent: three uncompressed attempts
+reached the unchanged180s deadline (an earlier590s experiment returned at223s
+and is not an accepted timeout increase). Two compact-input trials used
+gpt-6.1-sol-gpt in rose-1-ultra and finished at167.627s and154.327s with scores
+1.0 and0.5 respectively, both task_completed=true, send_count=1 and the real
+Read6:26PM status accepted. Source records are exact-semantic-compact1.json and
+exact-semantic-compact2.json. This is2/2 completed local replays, not a new
+production task outcome, and the differing scores remain visible.
+
+The serializer applies to generic TOOL_RESULTs in every verifier including
+declared-evaluator formatting; its JSON values remain unchanged there. Separate
+file evidence, authored result, notification and user/system paths remain byte
+identical. Prior cached-prefix bytes can change. Large string bodies do not
+shrink; bounded omissions remain possible. No new fallback, score, prompt,
+schema, cap, model or phone action is introduced.
+
+References: Codex protocol/src/models.rs2363 serializes structured MCP results
+with compact serde_json::to_string. Hermes agent/tool_guardrails.py207 uses
+compact canonical argument JSON, but is not a result-admission analog. Contrary
+OpenClaw agents/tools/tool-results.ts10 pretty-prints JSON; this repair therefore
+does not claim unanimous reference formatting. It follows Codex's lossless
+structured-result mechanism within Rose's existing character budget.
