@@ -28,7 +28,7 @@ sources:
   - agent 1772a64a lease 45543f2e-e77c-4470-b258-4c19dc135226
   - agent 1772a64a lease 7c1dd8c6-b81e-4bcc-908b-15f76b23d1ed
 repro: back-end/src/tests/blackbox/iphone-control.setup-verifier-replay.cases.ts "live setup verifier: recorded proof screens and controls"
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -66,6 +66,13 @@ Follow-up fix: PR #2250, merged 33ef570dae on 2026-11-15. Production PASS: Rende
 - imessage: a FaceTime screen never proves iMessage, and an Apple Account line naming another identity is disabled.
 - Regressions use the real FaceTime page (as receive_address and as imessage) and the real Saved to iCloud page: messages and keychain confirm, contacts stays unproven without a Contacts row.
 - The replay case fails 3/3 runs on #2210's prompt and passes 10/10 consecutive runs after.
+
+Third gap, icloud_contacts:
+- After #2250, live agent 87c1e09a confirmed gmail, passcode, imessage and receive_address under the stricter verifier.
+- icloud_contacts stayed unknown on the real iCloud See All list (cursors 14 and 38). There Contacts is a switch row with no On text, so OCR can never show its state.
+- The textual proof is Settings > Apps > Contacts > Accounts, where the iCloud row's services line reads 'iCloud Drive, iCloud Mail, Contacts, and' / '10 more...' (cursor 9, split across OCR rows). The verifier said unknown there 3/3.
+
+Fix (backend-only): an Accounts screen whose iCloud row's services line explicitly lists Contacts confirms it. A line that doesn't list Contacts (including one truncated with 'and N more'), or Contacts under another account, is unknown and never disabled. The regressions use the real Accounts and See All screens plus those two mutations. The 21-check replay passes 10/10 after and fails 3/3 before.
 
 Remaining for ready, none of them a verifier defect: device_passcode is disabled (no passcode set); imessage needs the real Send & Receive screen; icloud_contacts needs See All under Saved to iCloud. The agent-guidance wording for the last two is held as draft PR #2262. The coordinator will batch it into thread ph78393fcn3's single Fly cutover once the live setup is done. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
 

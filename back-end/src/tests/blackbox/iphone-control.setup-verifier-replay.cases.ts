@@ -104,6 +104,48 @@ async function recordedProofScreensVerify(): Promise<void> {
       'not_confirmed',
     ],
     [
+      'Contacts Accounts: iCloud services line lists Contacts',
+      'icloud_contacts',
+      o.contacts_accounts_cursor9,
+      'confirmed',
+    ],
+    [
+      'iCloud See All: Contacts switch row has no text',
+      'icloud_contacts',
+      o.icloud_see_all_cursor14,
+      'not_confirmed',
+    ],
+    [
+      'iCloud See All (second capture): Contacts switch row',
+      'icloud_contacts',
+      o.icloud_see_all_cursor38,
+      'not_confirmed',
+    ],
+    [
+      'Contacts Accounts: iCloud services line without Contacts',
+      'icloud_contacts',
+      rewrite(o.contacts_accounts_cursor9, (t) =>
+        t === 'iCloud Drive, iCloud Mail, Contacts, and'
+          ? 'iCloud Drive, iCloud Mail, Calendars, and'
+          : t
+      ),
+      'not_confirmed',
+    ],
+    [
+      'Contacts Accounts: Contacts only under another account',
+      'icloud_contacts',
+      [
+        ...rewrite(o.contacts_accounts_cursor9, (t) =>
+          t === 'iCloud Drive, iCloud Mail, Contacts, and'
+            ? 'iCloud Drive, iCloud Mail, Calendars, and'
+            : t
+        ),
+        { ...o.contacts_accounts_cursor9[5], text: 'Gmail', y: 700 },
+        { ...o.contacts_accounts_cursor9[6], text: 'Mail, Contacts, Calendars', y: 740 },
+      ],
+      'not_confirmed',
+    ],
+    [
       'real FaceTime page sent as imessage',
       'imessage',
       o.facetime_settings_cursor71,
