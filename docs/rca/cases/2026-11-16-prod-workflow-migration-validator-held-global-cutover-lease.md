@@ -24,6 +24,8 @@ sources:
   - commit fdfed5132e
   - PR #2265
   - PR #2318
+  - PR #2336
+  - commit a37d62c611
   - commit cc4e5ba05d
 status: fixed
 repro: back-end/src/tests/unit/workflow-migration-validation-run.test.ts
@@ -108,6 +110,16 @@ forbids the validator from using the cutover lease or the fleet-wide cleanup.
 At 10k agents: admission is one insert per run, and the stuck-state check adds
 one indexed `operationKey IN (...)` read bounded by the number of concurrent
 validator runs. Nothing is per-agent.
+
+Shipped in PR #2336 (merged a37d62c611, 2026-11-16). Production proof on the
+merged SHA: two `validate-prod-workflow-migration.ts --execute` runs (the lane
+command and environment) started concurrently at 2026-11-16T08:10:29.621Z and
+08:10:29.622Z. Both finished at 08:16:44.942Z with exit 0 and 45/45 rows PASS
+(runs 1ddd737d and dfed9291), including
+`same_sha_old_marker_is_retired_without_retiring_current_attempt` (retired by
+each run's own cleanup), `production_fleet_has_no_stuck_cutover_state` and
+`fixture_cleanup`. Neither run waited on the cutover lease. Each took 6m15s, the
+same as a solo run.
 
 ## Human feedback
 
