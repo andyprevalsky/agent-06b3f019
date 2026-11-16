@@ -7660,7 +7660,7 @@ def test_build_verifier_context_messages_no_screenshot_stays_text():
     msgs = build_verifier_context_messages(ctx, "system")
     # No multimodal messages
     assert all(isinstance(m["content"], str) for m in msgs)
-    assert 'TOOL_RESULT {"tool_name": "search"' in msgs[-1]["content"]
+    assert '"tool_name":"search"' in msgs[-1]["content"] or '"tool_name": "search"' in msgs[-1]["content"]
 
 
 def test_build_verifier_context_messages_formats_tool_result_payload():
@@ -7688,10 +7688,9 @@ def test_build_verifier_context_messages_formats_tool_result_payload():
     msgs = build_verifier_context_messages(ctx, "system")
     content = msgs[-1]["content"]
 
-    assert '"tool_name": "spawn_general_purpose_agent"' in content
-    assert '"tool_call_id": "tc-1"' in content
-    assert '"title": "Spawning sub-agent"' in content
-    assert '"result": {"entity_name": "Opticality Ventures", "source_url": "https://example.com"}' in content
+    payload = json.loads(content.split("TOOL_RESULT ", 1)[1].splitlines()[0])
+    assert payload == {"tool_name": "spawn_general_purpose_agent", "tool_call_id": "tc-1",
+                       "title": "Spawning sub-agent", "result": {"entity_name": "Opticality Ventures", "source_url": "https://example.com"}}
     assert "structured_response" not in content
     assert "toolStatus" not in content
     assert "status" not in content
@@ -7716,7 +7715,7 @@ def test_build_verifier_context_messages_formats_camelcase_structured_response()
     msgs = build_verifier_context_messages(ctx, "system")
     content = msgs[-1]["content"]
 
-    assert '"result": {"answer": "from persisted metadata"}' in content
+    assert json.loads(content.split("TOOL_RESULT ", 1)[1].splitlines()[0])["result"] == {"answer": "from persisted metadata"}
     assert "structuredResponse" not in content
     assert "fallback text" not in content
 
@@ -7755,7 +7754,8 @@ def test_build_verifier_context_messages_includes_only_dag_reasoning_assistant_r
 
     assert 'AUTHORED_RESULT {"source": "reasoning"' in content
     assert 'TOOL_RESULT {"tool_name": "reasoning"' not in content
-    assert 'TOOL_RESULT {"tool_name": "report_bug", "tool_call_id": "bug-1", "result": "Bug report submitted"}' in content
+    tool_payloads = [json.loads(line[len("TOOL_RESULT "):]) for line in content.splitlines() if line.startswith("TOOL_RESULT ")]
+    assert {"tool_name": "report_bug", "tool_call_id": "bug-1", "result": "Bug report submitted"} in tool_payloads
     assert '"result": "thirty hook-tested openings"' in content
     assert '"dag_task_index": 4' in content
     assert "ordinary assistant narration should stay hidden" not in content
@@ -7798,7 +7798,7 @@ def test_build_verifier_context_messages_includes_assistant_file_evidence_withou
     msgs = build_verifier_context_messages(ctx, "system", verifier_file_evidence_by_message=evidence)
     content = msgs[-1]["content"]
 
-    assert '"tool_name": "artifact_file"' in content
+    assert '"tool_name":"artifact_file"' in content or '"tool_name": "artifact_file"' in content
     assert "calendar.csv" in content
     assert "2026-07-06,YouTube" in content
     assert "ordinary assistant narration should stay hidden" not in content
@@ -7985,6 +7985,34 @@ def test_verifier_file_evidence_keeps_full_top100_deliverable_json():
     assert '"rank": 1' in kept or '"rank":1' in kept
     assert '"rank": 50' in kept or '"rank":50' in kept
     assert '"rank": 100' in kept or '"rank":100' in kept
+
+
+def test_verifier_compact_json_preserves_decoded_values_and_bounds():
+    from datetime import datetime, timezone
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOOL_RESULT_CHARS, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    value = {"items": [{"id": number, "value": number} for number in range(450)],
+             "text": "  Unicode 雪, colon: comma,\n\ttwo  spaces  ",
+             "observed_at": datetime(2026, 11, 16, tzinfo=timezone.utc),
+             "failed": False, "unknown": None}
+    context = [{"role": "TOOL", "metadata": {"toolName": "capture", "toolCallId": "exact-call",
+                "structured_response": value, "toolStatus": "ERROR"}, "text": "ignored summary"},
+               {"role": "TOOL", "text": "hidden-secret", "metadata": {"excludeFromModel": True}}]
+    def lines(messages):
+        return [line for message in messages if isinstance(message.get("content"), str)
+                for line in message["content"].splitlines() if line.startswith("TOOL_RESULT ")]
+    rendered = lines(build_verifier_context_messages(context, "Verify"))
+    expected = {"tool_name": "capture", "tool_call_id": "exact-call", "result": value}
+    assert len(json.dumps(expected, ensure_ascii=False, default=str)) > VERIFIER_MAX_TOOL_RESULT_CHARS
+    assert len(json.dumps(expected, ensure_ascii=False, default=str, separators=(",", ":"))) < VERIFIER_MAX_TOOL_RESULT_CHARS
+    assert len(rendered) == 1
+    assert json.loads(rendered[0][len("TOOL_RESULT "):]) == json.loads(json.dumps(expected, default=str))
+    assert len(rendered[0]) <= VERIFIER_MAX_TOOL_RESULT_CHARS
+    assert "hidden-secret" not in rendered[0]
+    full = lines(build_verifier_context_messages(context * 40, "Verify"))
+    assert sum(map(len, full)) <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+    declared = lines(build_verifier_context_messages(context, "Verify", call_site="benchmark_declared_evaluator"))
+    assert json.loads(declared[0][len("TOOL_RESULT "):]) == json.loads(json.dumps(expected, default=str))
 
 
 def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent():
@@ -8206,8 +8234,11 @@ def test_build_verifier_context_messages_filters_subagent_tree_rows():
     content = "\n".join(str(m["content"]) for m in msgs)
 
     assert "child UI summary should be hidden" not in content
-    assert '"tool_name": "spawn_general_purpose_agent_for_each"' in content
-    assert '"items": [{"index": 0, "agent_id": "child-1", "status": "completed"' in content
+    assert '"tool_name":"spawn_general_purpose_agent_for_each"' in content or '"tool_name": "spawn_general_purpose_agent_for_each"' in content
+    payloads = [json.loads(line[len("TOOL_RESULT "):]) for line in content.splitlines() if line.startswith("TOOL_RESULT ")]
+    assert {"tool_name": "spawn_general_purpose_agent_for_each", "tool_call_id": "tc-1",
+            "result": {"items": [{"index": 0, "agent_id": "child-1", "status": "completed",
+                                  "structured_response": {"answer": "done"}}]}} in payloads
 
 
 def test_build_verifier_context_messages_prunes_superseded_browser_protocol_failure():
@@ -8255,8 +8286,10 @@ def test_build_verifier_context_messages_prunes_superseded_browser_protocol_fail
     content = "\n".join(str(m["content"]) for m in messages)
 
     assert "unsupported protocol" not in content
-    assert '"fcaptcha_risk_score_display": "0.16"' in content
-    assert '"checkbox_mode_passed": true' in content
+    payloads = [json.loads(line[len("TOOL_RESULT "):]) for line in content.splitlines() if line.startswith("TOOL_RESULT ")]
+    assert any(payload.get("result") == {"fcaptcha_risk_score_display": "0.16",
+               "checkbox_mode_passed": True, "invisible_form_submitted": True,
+               "visible_verdict_text": "Verified! / Form submission allowed!"} for payload in payloads)
 
 
 async def test_build_llm_messages_prunes_superseded_browser_protocol_failure():
@@ -11992,6 +12025,7 @@ async def run_all_tests():
         "verifier_file_evidence_budget_prefers_deliverable",
         test_resolve_verifier_file_evidence_budget_prefers_deliverable,
     )
+    r.record("verifier_compact_json_preserves_decoded_values_and_bounds", test_verifier_compact_json_preserves_decoded_values_and_bounds)
     r.record(
         "verifier_ctx_tool_result_budget_truncates_spawn_agent",
         test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent,

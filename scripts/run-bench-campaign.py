@@ -1134,8 +1134,13 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     stalls both tunnels (descend-full69-20261023: lost guest /shutdown replies,
     retained Machines). The claim is an open file lock, so a dead holder releases
     it; the caller hands it to the agent's bootstrap so it ends with that agent.
+
+    flyctl keeps its config, agent socket and wire_guard_state in FLY_CONFIG_DIR
+    (default ~/.fly), so the peer and this claim belong to that directory: a
+    campaign launched with its own FLY_CONFIG_DIR gets its own peer and can run
+    beside another campaign in the same HOME.
     """
-    directory = Path(os.environ.get('HOME') or Path.home()) / '.fly'
+    directory = Path(os.environ.get('FLY_CONFIG_DIR') or Path(os.environ.get('HOME') or Path.home()) / '.fly')
     directory.mkdir(mode=0o700, exist_ok=True)
     path = directory / 'rose-campaign-wireguard-peer.lock'
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -1144,9 +1149,10 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     except BlockingIOError:
         holder = os.read(descriptor, 4096).decode(errors='replace').strip() or 'unknown holder'
         os.close(descriptor)
-        raise ValueError(f'another campaign already owns this HOME\'s Fly WireGuard peer ({holder}); '
+        raise ValueError(f'another campaign already owns this Fly config dir\'s WireGuard peer ({holder}); '
                          'a second Fly agent on that peer stalls both tunnels. Run these tasks in that '
-                         'campaign, wait for it to finish, or use a sharded campaign') from None
+                         'campaign, wait for it to finish, launch with its own FLY_CONFIG_DIR, or use a '
+                         'sharded campaign') from None
     except BaseException:
         os.close(descriptor)
         raise
@@ -1542,6 +1548,69 @@ def provider_capacity_refusal(benches: int, tasks: list[str] | None = None) -> i
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
 
 
+def delegating_ceiling_refusal(benches: int, tasks: list[str] | None = None) -> int:
+    """0 when the app delegating-guest ceiling can admit `benches` simultaneous REAL/SIM copies.
+
+    Fleet admission refuses live REAL/SIM primaries + requested above
+    CLOUDBENCH_DELEGATING_PRIMARY_CEILING after its admission wait, recording
+    INFRA; a campaign (or sharded group) wider than the ceiling can never fit.
+    """
+    capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
+    try:
+        return capacity["delegating_check"](benches, tasks=tasks)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
+
+
+CLEANUP_RESERVE_DISK_REFUSED = 78  # EX_CONFIG, like the provider-capacity refusals.
+
+
+def cleanup_reserve_disk_refusal(root: Path, width: int, *, environ: Mapping[str, str] = os.environ,
+                                 stream=None, free_bytes: int | None = None) -> int:
+    """0 unless free disk cannot hold even one standalone fleet teardown reserve.
+
+    A rolling campaign (more jobs than --concurrency) gives every live fleet its
+    own CLOUDBENCH_CLEANUP_DISK_RESERVE_MB reserve plus
+    CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB headroom under the git common dir. A
+    fleet that cannot hold them waits for peers to release theirs, so a width
+    above free disk only narrows effective concurrency: warn with actions.
+    """
+    stream = stream or sys.stderr
+    reserve = environ.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512")
+    headroom = environ.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256")
+    wait = environ.get("CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS", "1800")
+    if not (reserve.isdigit() and headroom.isdigit()) or width < 1:
+        return 0  # The fleet validates its own storage policy before any mutation.
+    per_mb = int(reserve) + int(headroom)
+    location = root
+    if free_bytes is None:
+        try:
+            common = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                    capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+            location = Path(common) if common else root
+        except (OSError, subprocess.SubprocessError):
+            location = root
+        observed = os.statvfs(location)
+        free_bytes = observed.f_bavail * observed.f_frsize
+    free_mb = free_bytes // 1048576
+    fits = free_mb // per_mb if per_mb else width
+    if fits >= width:
+        return 0
+    need = f"{width} controllers x ({reserve}MB reserve + {headroom}MB headroom) = {width * per_mb / 1024:.1f} GiB"
+    if fits < 1:
+        print(f"❌ cleanup reserve disk preflight: {free_mb}MB free on {location} cannot hold even one fleet's "
+              f"{per_mb}MB emergency teardown reserve and headroom ({need}). Free disk (retire finished "
+              "worktrees, .context run directories) or wait for other campaigns to finish; "
+              "no campaign controller admitted.", file=stream, flush=True)
+        return CLEANUP_RESERVE_DISK_REFUSED
+    print(f"⚠️  cleanup reserve disk preflight: {need} exceeds {free_mb / 1024:.1f} GiB free on {location}. "
+          f"About {fits} fleets can hold reserves at once; the rest WAIT up to {wait}s each "
+          "(CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS) for peers to release theirs, then record CAPACITY_DEFERRED "
+          f"(not INFRA_ERROR). For full width free {(width * per_mb - free_mb) / 1024:.1f} GiB more, or run with "
+          f"--concurrency {fits}.", file=stream, flush=True)
+    return 0
+
+
 # scripts/run-bench run_bench_secret_like_setting, re-applied here because a
 # recorded name list is untrusted input (parity regression in
 # cloudbench_campaign_inventory_test.py).
@@ -1668,6 +1737,16 @@ def main() -> int:
         print("🧊 provider rate-limit cap not applied: --demo-cache replay makes no live task-agent provider calls")
     else:
         refused = provider_capacity_refusal(global_benches, args.task)
+        if refused:
+            return refused
+    refused = delegating_ceiling_refusal(global_benches, args.task)
+    if refused:
+        return refused
+    local_jobs = len(campaign_jobs(args.task, args.runs, shard["task_indexes"], shard["task_total"]))
+    if not strict_start and local_jobs > args.concurrency:
+        # Rolling campaigns allocate standalone per-fleet reserves (ticketed
+        # cohorts budget theirs up front when the cleanup tickets are prepared).
+        refused = cleanup_reserve_disk_refusal(root, min(args.concurrency, local_jobs))
         if refused:
             return refused
     controller_nice = os.environ.get("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE", "0")

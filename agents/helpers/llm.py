@@ -1309,7 +1309,7 @@ def build_verifier_context_messages(
             # covers resolved file pointers; spawn_agent / artifact_file tool
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
-            dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
+            dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str, separators=(",", ":"))
             if str(call_site or "") == "benchmark_declared_evaluator" or (
                 metadata.get("benchmark_final_evidence") is True
                 and call_site == "semantic_output_field_recovery_judge"

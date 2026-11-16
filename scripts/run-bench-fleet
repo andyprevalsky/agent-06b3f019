@@ -1806,6 +1806,20 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ] && [ "$INFRA_PRO
             || provider_capacity_status=$?
         [ "$provider_capacity_status" -eq 0 ] || exit "$provider_capacity_status"
     fi
+    # admit_lane_capacity caps live REAL/SIM primaries app-wide (all devboxes) and
+    # refuses only after its admission wait, recording INFRA. A launch (or its
+    # campaign/sharded group) whose own REAL/SIM width exceeds that ceiling can
+    # never fit: refuse it here, before credentials or any Fly call.
+    delegating_ceiling_width="$(provider_capacity_simultaneous_benches)" || exit 2
+    delegating_ceiling_tasks=()
+    for delegating_ceiling_task in "${BENCHES[@]}"; do
+        delegating_ceiling_tasks+=(--task "$delegating_ceiling_task")
+    done
+    delegating_ceiling_status=0
+    python3 -I -S -B "$ROOT_DIR/scripts/cloudbench-provider-capacity.py" \
+        delegating --benches "$delegating_ceiling_width" ${delegating_ceiling_tasks[@]+"${delegating_ceiling_tasks[@]}"} \
+        || delegating_ceiling_status=$?
+    [ "$delegating_ceiling_status" -eq 0 ] || exit "$delegating_ceiling_status"
 fi
 
 [ "$RECOVER_STALE_ONLY" = "1" ] \
@@ -2003,6 +2017,12 @@ flyctl() {
 # shellcheck source=lib/cloudbench-inventory.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived-reuse.sh"
+# Read-only view of the shared app-environment maintenance lock: the same file
+# run-bench-cloud holds for --setup/--refresh-deps/--refresh-wmh. The fleet
+# never acquires it; await_stopped_warm_source only reads its live owner.
+APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
+# shellcheck source=lib/cloudbench-app-env-lock.sh
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-app-env-lock.sh"
 
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
@@ -7009,7 +7029,7 @@ release_registry_recovery_lock() {
     release_registry_recovery_guard
 }
 
-reserve_cleanup_disk_space() {
+reserve_cleanup_disk_space() {  # [capacity wait seconds; default 0 refuses at once]
     if [ -n "${RUN_BENCH_CLEANUP_COHORT_DIR:-}" ]; then
         local ticket_amount ticket_job="${RUN_BENCH_CLEANUP_JOB:-${RUN_BENCH_CAMPAIGN_JOB_ID:-}}"
         local -a ticket_nested=() ticket_deadline=()
@@ -7037,6 +7057,18 @@ reserve_cleanup_disk_space() {
     [ "$headroom_mb" -le 16384 ] || return 1
     [ "$minimum_mb" -le 4096 ] || return 1
     [ "$minimum_mb" -le "$reserve_mb" ] || minimum_mb="$reserve_mb"
+    # A disk shortage (allocator exit 75, nothing held) is capacity: wait for
+    # peer fleets to release their reserves instead of failing as infra. A
+    # sealed startup cohort keeps its own barrier clock and never waits here.
+    local wait_seconds="${1:-0}" retry_seconds="${CLOUDBENCH_CLEANUP_RESERVE_RETRY_SECONDS:-10}"
+    local status deadline remaining
+    case "$wait_seconds" in ''|*[!0-9]*) return 1 ;; esac
+    case "$retry_seconds" in ''|*[!0-9]*|0) return 1 ;; esac
+    [ "$wait_seconds" -le 86400 ] || return 1
+    [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] || wait_seconds=0
+    deadline=$((SECONDS + wait_seconds))
+    while :; do
+    status=0
     allocated_mb="$(python3 - "$CLEANUP_DISK_RESERVE_FILE" "$reserve_mb" \
         "$headroom_mb" "$minimum_mb" \
         "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" \
@@ -7719,6 +7751,7 @@ try:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
     print(amount)
 except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+    rolled_back = opened_reserve is None
     if opened_reserve is not None:
         # Keep the kernel FD lock until exact physical cleanup and ledger
         # rollback finish. Failed rollback leaves the durable debit recoverable.
@@ -7735,13 +7768,18 @@ except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as
                     if inflight.get(debit_id) == debit_record:
                         retire_debit(groups, inflight, failures, debit_id, "allocation-failed: " + str(exc))
                         persist(state_file, groups, inflight, failures)
+                rolled_back = True
             finally:
                 if lock_fd is not None:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
         except (OSError, ValueError, TypeError, KeyError) as rollback_error:
             print("cleanup reserve rollback pending: " + str(rollback_error), file=sys.stderr)
     print("cleanup reserve admission failed: " + str(exc), file=sys.stderr)
-    raise SystemExit(1)
+    # Exit 75 only for a disk shortage whose exact file and debit are gone: the
+    # caller may wait for peers to release space. Integrity, identity and
+    # unrecovered rollback failures stay fatal.
+    capacity = isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT)
+    raise SystemExit(75 if capacity and rolled_back else 1)
 finally:
     if opened_reserve is not None:
         os.close(opened_reserve)
@@ -7749,10 +7787,49 @@ finally:
         os.close(lock_fd)
 
 PY
-)" || return 1
+)" || status=$?
+    [ "$status" -ne 0 ] || break
+    [ "$status" -eq 75 ] || return 1
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+        echo "CLOUDBENCH_RETRYABLE_CAPACITY=cleanup_disk_reserve" >&2
+        echo "❌ local disk could not hold the ${reserve_mb}MB emergency teardown reserve plus ${headroom_mb}MB controller headroom within the ${wait_seconds}s capacity wait; no provider mutation was attempted. Free disk or lower campaign concurrency." >&2
+        return 75
+    fi
+    [ "$retry_seconds" -le "$remaining" ] || retry_seconds="$remaining"
+    echo "⏳ local disk cannot hold the emergency teardown reserve yet; no provider mutation. Waiting for peer fleets to release reserves: retry in ${retry_seconds}s (${remaining}s left of ${wait_seconds}s)" >&2
+    sleep "$retry_seconds"
+    done
     if [ "$allocated_mb" -lt "$reserve_mb" ]; then
         echo "⚠️  cleanup reserve scaled to ${allocated_mb}MB to preserve ${headroom_mb}MB controller headroom and pending cohort floors" >&2
     fi
+}
+
+admit_cleanup_disk_reserve() {
+    # Startup reserve admission. A shortage that outlasts the bounded wait is
+    # recorded as an explicit capacity deferral, which the aggregate reports as
+    # CAPACITY_DEFERRED instead of INFRA_ERROR; every other refusal is unchanged.
+    local wait_seconds="${CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS:-1800}" status=0
+    case "$wait_seconds" in
+        ''|*[!0-9]*) echo "❌ CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS must be a nonnegative integer" >&2; return 1 ;;
+    esac
+    reserve_cleanup_disk_space "$wait_seconds" || status=$?
+    [ "$status" -ne 0 ] || return 0
+    if [ "$status" -eq 75 ]; then
+        python3 - "$FLEET_DIR/_batch" "$wait_seconds" <<'PY' || status=1
+import json, os, sys, time
+from pathlib import Path
+batch = Path(sys.argv[1])
+batch.mkdir(parents=True, exist_ok=True)
+marker = batch / "capacity-deferred.json"
+temporary = batch / (".capacity-deferred." + str(os.getpid()) + ".tmp")
+temporary.write_text(json.dumps({"schema": "cloudbench-capacity-deferred-v1", "reason": "cleanup_disk_reserve",
+                                 "wait_seconds": int(sys.argv[2]), "observed_at_epoch": time.time()}) + "\n")
+os.replace(temporary, marker)
+PY
+    fi
+    echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
+    return "$status"
 }
 
 release_cleanup_disk_reserve() {  # [exact reserve path for a proven-dead registry]
@@ -10257,6 +10334,7 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir> [failed-runtime-
     local local_path maximum status_code machine_status_evidence stopped_proof
     local machine_status_temporary stopped_verified remote_zero zero_evidence
     local runner_lifecycle debug_manifest_status receipt_kind archived_runner_receipt
+    local prebackend_exit
     local -a identity_args validation_args
     owner="${owner##*/}"
     [ -s "$EXACT_SESSION_CLEANUP_HELPER" ] || {
@@ -10499,6 +10577,22 @@ PY
                         --stopped-proof "$stopped_proof"; then
                     rm -f "$machine_status_temporary"
                     echo "❌ [$bench] stopped exact Machine has no sealed provider-state proof" >&2
+                    # A delivered guest whose driver exited before its backend
+                    # started has no provider-session log anywhere. Its sealed
+                    # guest state plus this exact stopped status become the
+                    # native-stop record the original-volume capture admits.
+                    if [ ! -e "$manifest" ] && [ ! -e "$output/guest-native-stop.json" ] \
+                        && [ -s "$machine_status_evidence" ] \
+                        && python3 "$EXACT_SESSION_CLEANUP_HELPER" prove-prebackend-exit \
+                            "${identity_args[@]}" --backend-log "$backend_evidence" \
+                            --state-receipt "$state_evidence" 2>>"$guest_log"; then
+                        python3 "$EXACT_SESSION_CLEANUP_HELPER" publish-prebackend-native-stop \
+                            "${identity_args[@]}" --state-receipt "$state_evidence" \
+                            --clone-name "$clone_name" \
+                            --volume-id "$(registry_meta_value "$registry/clones/$clone_name" volume_id)" \
+                            --machine-status "$machine_status_evidence" --stop-requests 0 \
+                            && echo "🧭 [$bench] exact guest exited before its backend started; already stopped Machine recorded for original-volume capture"
+                    fi
                     if [ ! -e "$manifest" ] && [ -f "$output/guest-native-stop.json" ]; then
                         # The controller natively stopped this guest before its
                         # shutdown was delivered, so its provider-session log
@@ -10584,6 +10678,7 @@ PY
                     "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
                     "/repo/.context/cloudbench/logs/backend.log" \
                     "$backend_evidence" 536870912 30
+                prebackend_exit=0
                 if [ "$status_code" != "200" ] \
                     || ! python3 "$EXACT_SESSION_CLEANUP_HELPER" \
                         build-active-provider-manifest \
@@ -10591,16 +10686,43 @@ PY
                         --backend-log "$backend_evidence" \
                         --state-receipt "$state_evidence" \
                         --manifest "$manifest"; then
-                    echo "❌ [$bench] active exact guest has no sealed provider-session identity" >&2
-                    failed=1
-                    continue
+                    # Only an exact 404 plus a sealed state proving the driver
+                    # exited before any services manifest, backend log or run
+                    # record existed admits the pre-backend native stop.
+                    if [ "$status_code" = "404" ] && [ ! -e "$manifest" ] \
+                        && [ ! -e "$output/guest-native-stop.json" ] \
+                        && python3 "$EXACT_SESSION_CLEANUP_HELPER" prove-prebackend-exit \
+                            "${identity_args[@]}" --backend-log "$backend_evidence" \
+                            --state-receipt "$state_evidence" 2>>"$guest_log"; then
+                        prebackend_exit=1
+                        echo "🧭 [$bench] exact guest exited before its backend started; natively stopping it for original-volume capture"
+                    else
+                        echo "❌ [$bench] active exact guest has no sealed provider-session identity" >&2
+                        failed=1
+                        continue
+                    fi
                 fi
                 FLY machine stop "$machine_id" -a "$APP" >>"$guest_log" 2>&1 || true
                 stopped_verified=0
                 for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
                     machine_status_temporary="$machine_status_evidence.tmp.$$"
                     rm -f "$machine_status_temporary"
-                    if machine_status_exact_read "$machine_id" \
+                    if [ "$prebackend_exit" = 1 ] \
+                        && machine_status_exact_read "$machine_id" \
+                            >"$machine_status_temporary" 2>>"$guest_log" \
+                        && cloudbench_seal_guest_evidence_file \
+                            "$machine_status_temporary" "$machine_status_evidence" 1048576 \
+                        && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                            publish-prebackend-native-stop "${identity_args[@]}" \
+                            --state-receipt "$state_evidence" --clone-name "$clone_name" \
+                            --volume-id "$(registry_meta_value "$registry/clones/$clone_name" volume_id)" \
+                            --machine-status "$machine_status_evidence" --stop-requests 1 \
+                            2>>"$guest_log"; then
+                        stopped_verified=1
+                        break
+                    fi
+                    if [ "$prebackend_exit" != 1 ] \
+                        && machine_status_exact_read "$machine_id" \
                             >"$machine_status_temporary" 2>>"$guest_log" \
                         && cloudbench_seal_guest_evidence_file \
                             "$machine_status_temporary" "$machine_status_evidence" 1048576 \
@@ -10621,6 +10743,16 @@ PY
                 done
                 if [ "$stopped_verified" != "1" ]; then
                     echo "❌ [$bench] exact Machine $machine_id did not prove stopped; retaining sealed ownership" >&2
+                    failed=1
+                    continue
+                fi
+                if [ "$prebackend_exit" = 1 ]; then
+                    # Zero sessions still require the stopped volume's own
+                    # absence proof; name that capture and keep ownership.
+                    python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-original-volume-capture.py" \
+                        --next-step --registry "$registry" --bench "$bench" \
+                        --machine-id "$machine_id" \
+                        --volume-id "$(registry_meta_value "$registry/clones/$clone_name" volume_id)" >&2 || true
                     failed=1
                     continue
                 fi
@@ -12502,6 +12634,27 @@ else:
     provenance = json.loads(provenance_path.read_text())
     assert not contract['validate_task_matrix_binding'](provenance, matrix)
     assert [{'name': task['name'], 'world_model_mode': 'simulate' if task['mode'] == 'SIM' else 'real'} for task in tasks] == matrix['tasks']
+def probe_without_runtime_evidence(out, run_id):
+    """Durable fleet signature of a child that skipped its autoscaler (probe/skip mode).
+
+    The fleet writes exactly these three markers instead of starting an
+    autoscaler, whose own path always leaves autoscaler.pid and autoscaler.log.
+    Any runtime-evidence ownership, worker, or missing guest ACK keeps the
+    ordinary validation.
+    """
+    def exact(name, content):
+        path = out / name
+        return path.is_file() and not path.is_symlink() and path.stat().st_size <= 4096 \
+            and path.read_bytes() == content
+    absent = ('runtime-evidence.owner.json', 'runtime-evidence.pending', 'autoscaler.pid',
+              'autoscaler.log', 'autoscaler.acceptance-failed', 'worker-runtime-evidence',
+              'remote-logs/runtime-evidence')
+    workers = out / 'worker-clones.ids'
+    return (exact('autoscaler.ready', b'') and exact('autoscaler.completed-after-child', b'')
+            and exact('desired-worker-count', b'0\n')
+            and exact('guest-shutdown.confirmed', (run_id + '\n').encode())
+            and not any(os.path.lexists(out / name) for name in absent)
+            and (not os.path.lexists(workers) or exact('worker-clones.ids', b'')))
 for index, task in enumerate(tasks):
     name = task['name']
     assert re.fullmatch(r'[A-Za-z0-9._-]+', name) and name not in ('.', '..')
@@ -12532,6 +12685,12 @@ for index, task in enumerate(tasks):
     admitted = (out / 'runtime-evidence.owner.json').exists() or (out / 'post-config-start.accepted').exists()
     if not admitted:
         assert not (out / 'worker-runtime-evidence').exists()
+        continue
+    if probe_without_runtime_evidence(out, meta['run_id']):
+        # An --infra-probe / --skip-autoscaler child never owns runtime
+        # evidence (run-bench-cloud cloudbench_skip_held_driver_teardown_race),
+        # exactly as the normal final check exempts it. Its acknowledged guest
+        # cleanup is the only obligation; there is no bundle to retain.
         continue
     identity = out / '.cid'
     assert identity.is_file() and not identity.is_symlink()
@@ -16880,10 +17039,7 @@ fleet_scorecard_report() {
         --goal "$goal" "${fields[@]}" >/dev/null 2>&1 || true
 }
 fleet_scorecard_report launch
-reserve_cleanup_disk_space || {
-    echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
-    exit 1
-}
+admit_cleanup_disk_reserve || exit $?
 # Visibility can fail on imports, credentials, or HTTP. Publish controller
 # authority and arm its finalizer before those calls so startup failures get
 # the same durable teardown as failures after allocation.
@@ -17218,17 +17374,62 @@ read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
 # The direct read can see the donor stopped while a shared inventory snapshot
 # still holds the generation that recorded the transient state, so re-list only
 # from a newer generation, within the same stop budget.
+# Dependency maintenance for another source ref (run-bench-cloud --refresh-deps,
+# ~8-10 min) keeps the donor started while it holds the shared app-environment
+# lock, and parks the donor before releasing that lock. On 2026-11-16 two
+# launches with different refs let the ordinary 300s stop budget expire
+# mid-refresh, and the INFRA failures crossed the 5% stop twice. While a LIVE
+# lock owner explains the transitional donor, keep waiting in ordinary stop-wait
+# rounds, bounded from the start of this wait by the lock's documented wait
+# budget (CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS, sized to outlast its longest
+# legitimate holder; 0 restores the plain stop budget). An unexplained started
+# donor still fails after the original budget. This wait precedes provisioning,
+# so it is outside every bench's execution timeout and start-barrier clock.
 await_stopped_warm_source() {  # sets warm_json warm_state warm_kind warm_cpus warm_memory
     local warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
     local warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"
-    local warm_stop_deadline warm_generation warm_shape
+    local maintenance_budget="${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-3600}"
+    local warm_stop_deadline warm_generation warm_shape round_attempts
+    local maintenance_owner maintenance_deadline maintenance_remaining
+    case "$maintenance_budget" in
+        ''|*[!0-9]*)
+            echo "❌ CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS must be a non-negative integer (got: $maintenance_budget)" >&2
+            return 1
+            ;;
+    esac
+    maintenance_deadline=$((SECONDS + maintenance_budget))
     echo "⏳ warm source is $warm_state; waiting until stopped before fleet provisioning"
-    warm_stop_deadline=$((SECONDS + warm_stop_attempts * warm_stop_sleep))
-    cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID" \
-        "$warm_stop_attempts" "$warm_stop_sleep" || {
-        echo "❌ warm source must be stopped before fleet provisioning (state=$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown))" >&2
-        return 1
-    }
+    round_attempts="$warm_stop_attempts"
+    while :; do
+        warm_stop_deadline=$((SECONDS + round_attempts * warm_stop_sleep))
+        cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID" \
+            "$round_attempts" "$warm_stop_sleep" && break
+        warm_state="$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown)"
+        maintenance_owner=""
+        case "$warm_state" in
+            started|starting|stopping|replacing|updating|restarting)
+                maintenance_owner="$(app_environment_lock_live_owner)" || maintenance_owner=""
+                ;;
+        esac
+        if [ -z "$maintenance_owner" ]; then
+            echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
+            return 1
+        fi
+        maintenance_remaining=$((maintenance_deadline - SECONDS))
+        if [ "$maintenance_remaining" -le 0 ] || [ "$maintenance_remaining" -lt "$warm_stop_sleep" ]; then
+            echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state; shared app environment maintenance owner=$maintenance_owner still live after the ${maintenance_budget}s lock wait budget)" >&2
+            return 1
+        fi
+        echo "⏳ warm source is $warm_state under live shared app environment maintenance (lock owner=$maintenance_owner); waiting up to ${maintenance_remaining}s more"
+        # The stop wait does not sleep after its final read; keep the cadence,
+        # and end each round within the remaining budget.
+        sleep "$warm_stop_sleep"
+        round_attempts="$warm_stop_attempts"
+        if [ "$warm_stop_sleep" -gt 0 ] \
+            && [ $((maintenance_remaining / warm_stop_sleep)) -lt "$round_attempts" ]; then
+            round_attempts=$((maintenance_remaining / warm_stop_sleep))
+        fi
+    done
     while :; do
         warm_generation="$(machines_snapshot_identity)"
         campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?

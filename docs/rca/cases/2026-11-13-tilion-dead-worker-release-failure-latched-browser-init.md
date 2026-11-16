@@ -4,15 +4,15 @@ date: 2026-11-13
 title: Dead Tilion east worker (sess_993d70) failed CDP and DELETE; unconfirmed release skipped the retry create and latched the browser-init receipt so every worker retry failed
 surface: back-end
 component: tilion-browser-provider
-classification: third-party-failure
+classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: back-end/src/providers/browser/tilion.ts createRemote threw on an unconfirmed release before its second create; back-end/src/providers/browser/initialization.ts initializeLogicalBrowser then marked the receipt FAILED for that untyped error
 symptoms:
   - "Tilion session sess_993d70... failed validation and cleanup"
   - "Browser initialization failed before readiness"
   - "Browser session init failed after 5 transient-proxy retries"
-  - "Tilion HTTP 503 on DELETE /v1/session/sess_993d70"
   - "Failed to resume browser task error=AggregateError"
+  - "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2"
 tags:
   - tilion
   - browser-provider
@@ -21,6 +21,7 @@ tags:
   - retry
   - dead-worker
 sources:
+  - PR #1865 round-67 smoke, source 5abe46f38d, task browser-auth-email-otp (FLAKY 6c5f96b1), Hub group deploy-95ec39d8, run 20261113-021234-3200691, root 26193c9c (2026-11-13T02:25Z)
   - PR #1975 r7/r8 smoke (sess_993d70aa, sess_993d7010, sess_993d70a1, sess_993d707b, sess_993d7042)
   - PR #1981 r11, PR #2005 r2, PR #2008 smoke (2026-11-13 02:00-05:30Z)
   - task local probe east.back.tilion.dev 2026-11-13T05:16Z and 05:20Z (create X-Request-ID 4b75055ec1144521)
@@ -89,8 +90,9 @@ cleanup)` without trying another worker.
 Repro: `browser-session-tilion-dead-worker.fixture.ts` drives real `initSession`,
 the receipt coalescer, the Tilion adapter, `tilionClient` HTTP and Playwright
 `connectOverCDP` against a loopback replay of the captured ALB 503 bytes. On the
-buggy revision, scenarios `dead-then-healthy` and `dead-dead-then-healthy` each
-made 1 create and saw `failed validation and cleanup` plus 5× `before readiness`.
+buggy revision, scenarios `dead-then-healthy` and `all-adapter-creates-dead-then-healthy`
+each made 1 create and saw `failed validation and cleanup` on the first worker call
+plus `before readiness` on the other 4.
 
 Exact task outcome (`scripts/run-bench --local browser-smoke`, unchanged task). The live
 worker had been drained, so a local forwarder (an experiment script, not committed)
@@ -284,6 +286,107 @@ spawned fixture file itself as unregistered because the call is dynamic, but the
 domain still runs it. The original incident's CDP error
 (`browserType.connectOverCDP: WebSocket error: 503 Service Temporarily Unavailable`)
 does not appear in these guest logs.
+
+## PR #1865 round-67 occurrence: browser-auth-email-otp (FLAKY 6c5f96b1, repaired 2026-11-16)
+
+Deploy smoke for PR #1865 (Hub group `deploy-95ec39d8…`, run `20261113-021234-3200691`,
+root `26193c9c-3dde-44e3-ba39-ea56531a8ab0`) failed `browser-auth-email-otp` with
+`Tool 'spawn_browser_agent' exceeded its exact root call limit during execution:
+expected 1, got 2 … Agent status: ACTIVE`. A same-source rerun (root `a65bd420`) passed.
+Its source, `5abe46f38d` (the PR head from 11-12 23:55Z to 11-13 03:41Z; the Hub
+records `code=null`), contains neither `2f201dbe23` nor `7d3fc34cac`. This is a
+recurrence on a pre-fix source, not a failed guardrail.
+
+The guest logs, read on the originating devbox
+(`remote-logs/runtime-evidence/logs/{backend,worker}.log`), follow this case step by step:
+
+- 02:25:33.688Z: `Tilion session allocated sessionId=sess_993d7089ebfd…`.
+- `connectOverCDP` got `503 Service Temporarily Unavailable` three times, then
+  `DELETE /v1/session/sess_993d7089…` returned 503 four times with `requestId=null`.
+- 02:25:37.399Z: `Failed to init browser session error=AggregateError: Tilion session
+  sess_993d7089… failed validation and cleanup`. No second create was made.
+- Worker attempts 2–4 (02:25:42–52Z) and the fifth call each got `Browser
+  initialization failed before readiness` (`POST /api/browser-session/init -> 500`,
+  about 12 ms). Then: `Browser session init failed after 5 transient-proxy retries`,
+  task `21a89273-177f-5d9f-a36e-c8352ddeefc3`, `session_id: null`.
+- The root's second spawn (`/root/member_number_retry`, 02:26:06Z) logged
+  `agent_id 26193c9c` and the same task id `21a89273` (worker.log 325–391). It hit
+  the same latched receipt, because `logicalBrowserTaskId` derives from the root
+  agent id. Every call failed `before readiness`. That second `spawn_browser_agent`
+  broke the task's exact count of 1, and the root stayed ACTIVE.
+
+The repro is the identical command
+`node --experimental-test-module-mocks --import tsx src/tests/blackbox/browser-session-tilion-dead-worker.fixture.ts`,
+run from `back-end/` with `CONDUCTOR_WORKSPACE_NAME=rose` and local `victoria_rose`.
+For `5abe46f38d`, main's fixture is laid over the `git archive` of `back-end/`.
+Two test-only constants are added: `TILION_TASK_CREATE_ATTEMPTS = 2`, which matches
+5abe's hard-coded `attempt < 2`, and `TILION_SESSION_CREATE_MAX_ATTEMPTS = 8`.
+`tilion.ts` and `initialization.ts` are left byte-identical.
+
+- `5abe46f38d`: exit 1, failing on `dead-then-healthy: a worker retry inherited the
+  failed receipt` with one create on `sess_993d70` and `bound: null, status: PAUSED`.
+  This is the smoke signature.
+- main `26714e91d0`: exit 0. `dead-then-healthy` binds `sess_c3d0eb` ACTIVE with no
+  errors, and the run passed 5 of 5 consecutive times (about 80 s each).
+
+Correction to the earlier repro proof. An independent review found that on a pre-fix
+source the fixture's exit 1 came from somewhere else. The fake server's
+`assert(worker !== undefined, 'more Tilion creates than the scenario planned')`
+threw inside its HTTP handler during the neighbouring `no-connect-url` scenario.
+That crashed the process before the collected scenario `failures` were asserted and
+before cleanup ran. The 16f0be6d3 "exit 1" above most likely had the same flaw.
+
+The fixture now records a create beyond the plan in `unexpected` and answers 500.
+One assertion covers both the scenario `failures` and `unexpected`, so a pre-fix exit
+names its boundary and every unplanned create is still reported. A second check,
+made after cleanup, fails the run on a create that arrives during teardown. A
+flakiness cross-review found no new risk: the branch only runs once a plan is used
+up, a 500 is outside the client's retry set, and rows are keyed per run.
+
+Cloud proof, task unchanged: `scripts/run-bench browser-auth-email-otp -k 5 --concurrency 5
+--ref 26714e91d0` (campaign `campaign-20261116-021338-1326195`) scored 5 of 5 PASS, with
+0 infra failures and every guest release verified (runs `20261116-021359-{1330109,1330116,1330124,1330131,1330138}`).
+
+An earlier attempt overlapped a standalone fleet run with a `-k 4` campaign in the same
+HOME. Two Fly agents shared one WireGuard peer, so all 5 guests printed `passed` but
+scored NORESULT/INFRA. That is open item (1) of
+`2026-10-18-campaign-children-started-second-fly-agent-on-shared-wireguard-peer`,
+handed off as repair thread ph75ad04jetrf28c71t4thrs818ja0qr. Recovery of 4 of those
+owners is blocked by a single-volume `attached_machine_id: null` read, handed off as
+repair thread ph71rk67w9v8r071m4vee1hxg98jbvs6. Neither is this cause.
+
+The `browser-auth-email-otp` quarantine marker (`6c5f96b1`) is released. Deploy smoke
+does not select this task (category `auth`, outside the floor), so its streak could
+never start from deploy rows. The five scored fleet passes on main stand in for the
+five-pass release rule.
+
+The regression stays in `/deploy` through `browser-session.blackbox.ts`
+(`select_affected_tests.py --lanes-for` → `backend-blackbox browser-session`).
+That file statically imports `browser-session-logical.cases.ts`, which runs
+`runTilionDeadWorkerInitCases`, and that executes the fixture.
+
+Classification is corrected to `our-bug`. Tilion's dead worker was the trigger, but
+both failing layers are ours: the adapter's skipped second create and the
+coalescer's permanent `FAILED` receipt. An owned recovery path that is broken is
+never an external blocker.
+
+Shipped: PR #2276 (merged `e3416343194e`, 2026-11-16) released the marker and carried the
+fixture correction. Its gates passed 17 of 17 after one NOT_INTRODUCED structural failure:
+main's stale `provider_capacity_refusal` stubs, fixed on main by `41a8cc0362`. Production
+render, backend probes and semantic checks passed (semantic run 43804741510, verified by
+live descendant `e338087dfd7c`).
+
+Still open on main by design. Each of these latches the receipt for the root's
+lifetime and can produce this same exact-count symptom:
+
+- an unsettled create (timeout, network error, or a 409 in flight until the window
+  ends, including a capacity rejection after a lost reply);
+- a create with no session id, or no `connect_url`;
+- an untyped error after allocation (row persist, credential preparation, the
+  activation transaction, or the binding announce).
+
+The receipt has no expiry or reconciler: prod root `83aef77e` is still FAILED. That
+is a separate design gap and outside this repair.
 
 ## Human feedback
 

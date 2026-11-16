@@ -573,6 +573,12 @@ GATES = (
         "cloudbench-composite-root-cleanup",
         ("python3", "scripts/tests/cloudbench-exact-session-multi-root.test.py"),
     ),
+    # Quarantined guests stopped before a provider session existed: undelivered
+    # (K12) and delivered-but-exited-before-backend native stops.
+    Gate(
+        "cloudbench-undelivered-native-stop-capture",
+        ("python3", "scripts/tests/cloudbench-undelivered-native-stop-capture.test.py"),
+    ),
     Gate(
         "cloudbench-quiesced-forensic-retirement",
         ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"), expected_seconds=83
@@ -619,6 +625,10 @@ GATES = (
         ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
     ),
     Gate("agents-structural", ("bash", "scripts/tests/agents-structural.test.sh")),
+    Gate(
+        "deploy-agents-recover",
+        ("bash", "scripts/tests/deploy-agents-recover.test.sh"),
+    ),
     Gate(
         "deploy-agent-clone-recovery",
         ("bash", "scripts/tests/deploy-agent-clone-recovery.test.sh"),

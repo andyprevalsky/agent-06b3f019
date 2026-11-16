@@ -5384,12 +5384,6 @@
   },
   {
     "name": "browser-auth-email-otp",
-    "quarantine": {
-      "since": "2026-11-13",
-      "repair": "https://boxes.dev/thread/ph7dyx05get1qq4vywxe4781dx8jaeb6",
-      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 1} | Agent status: ACTIVE (expected COMPLETED)",
-      "evidence": "PR1865 round 67 smoke: Tilion CDP 503 then FAILED browser initialization receipt blocked every transient-proxy retry (back-end/src/providers/browser/initialization.ts)"
-    },
     "title": "Hosted Sign-In: Code To The User's Own Inbox",
     "description": "The user's account is under an inbox they connected; the browser agent signs in with a code emailed there, not with the minted identity.",
     "prompt": "Tell me my member number for {auth_test_site_url}",
@@ -11380,7 +11374,7 @@
     "name": "browser-1015-eventim-request-card",
     "quarantine": {
       "since": "2026-11-15",
-      "repair": "pending-handoff:1a300d2aa77e422d967712eebe2f5768",
+      "repair": "https://boxes.dev/thread/ph7bjwpm123kcre4wqemkvknv98jba90",
       "error": "Expected attention kind payment_approval, observed write_lock | Expected payment_approval attention request (to ignore) but none was triggered",
       "evidence": "PR #2175 deploy 78861efa12 smoke: first attempt (agent b93df823-5d99-4c0e-b109-a8e7378b94c4) coordinate-clicked the cross-origin Stripe 'Secure address input frame' on checkout.eventim.us; write_lock_probe.py returned opaque_frame and the container-text fallback matched purchase pattern 'complete your purchase' (write_lock.py), raising a write_lock purchase approval before request_payment_card; same-source rerun PASSED (FLAKY 1a300d2a); NOT_INTRODUCED, #2175 changes only back-end/src/domains/test-payment lifecycle code, never requested by this task"
     },

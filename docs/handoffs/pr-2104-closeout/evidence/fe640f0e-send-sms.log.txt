@@ -1,0 +1,115 @@
+=== attempt 1 (FAIL) ===
+
+=== attempt 2 (PASS) ===
+Send SMS Black-Box Tests
+
+Testing against: http://localhost:12024
+Case concurrency: 30
+
+[36m[2026-11-15T04:25:29.707Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=Agent operation=findFirst duration_ms=18 status=ok[0m
+[36m[2026-11-15T04:25:29.708Z] INFO [SmsSupervisorTools] Increasing budget phase=budget agentId=9ecf4242-2eac-4610-b36d-feec9a879b88 currentLimitCents=100 addCents=200 newLimitCents=300 treeCostCents=0[0m
+[36m[2026-11-15T04:25:29.710Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$queryRaw duration_ms=1 status=ok[0m
+[36m[2026-11-15T04:25:29.711Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=Agent operation=findUnique duration_ms=1 status=ok[0m
+[36m[2026-11-15T04:25:29.712Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=ToolSideEffect operation=createMany duration_ms=1 status=ok[0m
+[36m[2026-11-15T04:25:29.713Z] INFO [SmsSupervisorTools] Pending op committed kind=increase_budget success=true durationMs=24[0m
+
+  POST / (send) -- contract
+  PASS  no auth -> 401 (15ms)
+  PASS  missing phone -> 400 (15ms)
+  PASS  missing message -> 400 (15ms)
+  PASS  empty phone -> 400 (15ms)
+  PASS  empty message -> 400 (17ms)
+  PASS  happy path (200 or Surge error) (19ms)
+  PASS  Surge API error -> provider status (69ms)
+  PASS  Surge network failure -> 500 (69ms)
+  PASS  response Content-Type: application/json (69ms)
+
+  POST /direct -- contract
+  PASS  no auth -> 401 (68ms)
+  PASS  missing both fields -> 400 (68ms)
+  PASS  missing user_id -> 400 (69ms)
+  PASS  missing message -> 400 (69ms)
+  PASS  unknown user -> 400 (no phone) (71ms)
+  PASS  happy path (73ms)
+
+  POST /notify -- contract
+  PASS  no auth -> 401 (69ms)
+  PASS  empty body -> 400 (68ms)
+  PASS  invalid event type -> 400 (68ms)
+  PASS  missing user_id -> 400 (68ms)
+  PASS  missing agent_id -> 400 (69ms)
+  PASS  missing event_type -> 400 (69ms)
+  PASS  Zod error includes details (69ms)
+  PASS  all valid event types -> 200 (97ms)
+  PASS  completion happy path (70ms)
+  PASS  unknown agent -> skipped (71ms)
+  PASS  deleted agent -> skipped (90ms)
+  PASS  response Content-Type: application/json (71ms)
+
+  Auth boundary
+  PASS  all endpoints require auth (87ms)
+  PASS  invalid API key rejected (68ms)
+
+  Error surface
+  PASS  wrong methods on / rejected (89ms)
+  PASS  wrong methods on /direct rejected (82ms)
+  PASS  wrong methods on /notify rejected (82ms)
+  PASS  all validation errors include error field (81ms)
+
+  Concurrency
+  PASS  10 parallel send validations -> 400 (66ms)
+  PASS  10 parallel notify validations -> 400 (69ms)
+
+  Reproducibility
+  PASS  same input -> same output (3x) (74ms)
+
+  Boundary capture
+  PASS  send validation -> 0 outbound calls (2ms)
+  PASS  direct validation -> 0 outbound calls (2ms)
+  PASS  notify validation -> 0 outbound calls (1ms)
+  PASS  direct unknown user -> 0 outbound calls (2ms)
+  PASS  send calls Surge API with exact params (2ms)
+  PASS  direct calls Surge API with exact params (4ms)
+  PASS  notify completion calls Surge API (18ms)
+  PASS  notify agent_started calls Surge API (10ms)
+  PASS  notify agent_started keeps long goal inside agent (12ms)
+  PASS  notify feeds provider rejection to model and sends correction (11ms)
+  PASS  notify summarizes internal goal links while preserving the task (11ms)
+  PASS  notify repairs omission of the exact canonical action link (11ms)
+  PASS  notify does not rewrite auth, routing, or rate-limit rejections (47ms)
+  PASS  notify repairs an explicit HTTP 400 body rejection (11ms)
+  PASS  notify does not retry ambiguous gateway failure (10ms)
+  PASS  real notification model keeps delivery contract (opt-in) (1ms)
+  PASS  notify cost_limit includes task goal (8ms)
+  PASS  notify write_lock uses natural language only (11ms)
+  PASS  notify write_lock sends only the initial SMS (17ms)
+  PASS  notify write_lock strips markdown and keeps full draft (10ms)
+  PASS  notify agentcard_setup includes setup link (7ms)
+  PASS  notify write_lock sends structured MMS with image (462ms)
+  PASS  notify write_lock renders generic_write return details (11ms)
+  PASS  notify write_lock renders payment card (merchant/reviews/cost/link) (10ms)
+  PASS  notify agent_started suppressed for benchmark agent (5ms)
+  PASS  notify completion renders benchmark preview without outbound SMS (4ms)
+
+  Completion scope (SMS/WhatsApp agent interaction)
+  PASS  SMS-created agent -> notified (15ms)
+  PASS  web agent the SMS agent replied to -> notified (126ms)
+  PASS  web root whose child question was relayed by SMS -> notified (28ms)
+  PASS  web agent whose budget the SMS agent raised -> notified (42ms)
+  PASS  web root whose child the SMS agent replied to -> notified (tree marker only) (129ms)
+  PASS  web agent whose write-lock approval was relayed by SMS -> notified (29ms)
+  PASS  web agent whose cost-limit notice was relayed by SMS -> notified (26ms)
+  PASS  web agent whose AgentCard setup was relayed by SMS -> notified (23ms)
+  PASS  relay from a child without busId still notifies the root (27ms)
+  PASS  WhatsApp-created agent -> notified on WhatsApp (18ms)
+  PASS  web agent the WhatsApp agent replied to -> notified on WhatsApp (130ms)
+  PASS  Mac app agent whose question WhatsApp relayed -> notified on WhatsApp (29ms)
+  PASS  untouched web agent (kickoff only) -> no completion notice (26ms)
+  PASS  untouched running agent -> kickoff and questions still sent (31ms)
+
+==================================================
+
+Results: 76 passed, 0 failed, 76 total (caseConcurrency=30)
+
+ALL BLACK-BOX TESTS PASSED
+
