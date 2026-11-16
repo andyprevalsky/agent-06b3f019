@@ -16,6 +16,7 @@ SEEDERS = {
     'team_data_v1': (BLACKBOX / 'data-teams.fixture.ts', None),
     'team_integrations_v1': (BLACKBOX / 'team-integrations.fixture.ts', 'TEAM_INTEGRATIONS_MARKER'),
     'team_repo_v1': (BLACKBOX / 'team-integrations.fixture.ts', 'TEAM_REPO_MARKER'),
+    'team_mcp_v1': (BLACKBOX / 'team-integrations.fixture.ts', 'TEAM_MCP_MARKER'),
 }
 GREP_FIXTURES = {'team_data_v1', 'team_integrations_v1'}
 
@@ -101,6 +102,27 @@ def test_shared_repo_task_requires_a_code_agent_on_the_shared_ref():
     assert 'octocat' not in task['prompt'].lower() and 'github_repo_ref' in task['prompt']
 
 
+def test_shared_mcp_task_requires_a_code_agent_calling_the_shared_server():
+    task = _catalog()['team-daily-shared-mcp']
+    seeder = SEEDERS['team_mcp_v1'][0].read_text()
+    judge = next(e['judge_prompt'] for e in task['evaluators'] if e['method'] == 'single_turn_llm_judge')
+    assert task['requires_claude_code'] is True and task['min_tool_counts'] == {'spawn_claude_code_agent': 1}
+    assert {'spawn_agent', 'spawn_claude_code_agent'} <= set(task['expected_tools'])
+    assert 'spawn_claude_code_agent' not in task['forbidden_tools']
+    assert 'e2b_code_sandbox' in task['environment']['services']
+    url = re.search(r"url: '([^']+)'", seeder).group(1)
+    assert task['environment']['live_targets'] == [url]
+    for fact in ('ROSE-TEAM-MCP Docs', 'resolve-library-id', 'type=code', 'react', 'tool evidence'):
+        assert fact.lower() in judge.lower()
+    assert "tool: 'resolve-library-id'" in seeder and 'name: `${marker} Docs`' in seeder
+    # The reader must own no MCP server, so the code agent's tool can only come through the share.
+    assert "the shared-MCP fixture needs a reader without one" in seeder
+    for private in ('ROSE-TEAM-MCP Private Tools', 'tools.private.example.test'):
+        assert private in judge and private in seeder and private not in task['prompt']
+    # The agent must find the server in its shared data map; the prompt never names it.
+    assert 'context7' not in task['prompt'].lower() and 'provider mcp' in task['prompt']
+
+
 @pytest.mark.parametrize('base,database', [
     ('https://api.roselabs.ai', 'postgresql://localhost/victoria_test'),
     ('http://localhost:4001', 'postgresql://prod.example/victoria_test'),
@@ -132,6 +154,7 @@ def test_fixture_passes_exact_local_identity_and_reports_failure():
     ('team-daily-access-boundaries', 'ROSE-TEAM-BOUNDARIES'),
     ('team-daily-shared-integrations', 'ROSE-TEAM-SHARED'),
     ('team-daily-shared-repo', 'ROSE-TEAM-REPO'),
+    ('team-daily-shared-mcp', 'ROSE-TEAM-MCP'),
 ])
 def test_each_task_dispatches_its_own_marker(task_name, marker):
     from types import SimpleNamespace
