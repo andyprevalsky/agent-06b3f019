@@ -337,8 +337,11 @@ def test_campaign_start_barrier_original_polar_jobs_use_tilion_cap_in_two_strict
     runs = 1
     result, summary, events = run_campaign(
         tmp_path, tasks=tasks, runs=runs, concurrency=width,
+        # A cohort wider than the app delegating-guest ceiling (default 70) also needs the
+        # fleet's own override; the launch preflight refuses it otherwise.
         extra_env={"CLOUDBENCH_BROWSER_PROVIDER": "tilion",
-                   "CLOUDBENCH_PROVIDER_LIMITS_FILE": str(ROOT / "scripts/cloudbench-provider-limits.json")},
+                   "CLOUDBENCH_PROVIDER_LIMITS_FILE": str(ROOT / "scripts/cloudbench-provider-limits.json"),
+                   "CLOUDBENCH_DELEGATING_PRIMARY_CEILING": str(width)},
     )
     assert result.returncode == 0, result.stdout + result.stderr
     jobs = summary["jobs"]
