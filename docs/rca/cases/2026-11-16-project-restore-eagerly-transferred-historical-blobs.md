@@ -102,8 +102,13 @@ review found no matching project-clone repair.
 
 Use a 512-MiB-per-thread delta-base cache for E2B restore Git commands, including
 initial clones and subsequent fetches. The default sandbox grid starts at
-4 GiB; Git normally uses at most three index-pack threads, bounding this cache
-at 1.5 GiB per sandbox. Local executors retain their existing configuration.
+4 GiB; Git v2.34.1 automatically selects four index-pack threads on eight CPUs,
+so the cache target there is 2 GiB; retained bases may exceed that target.
+A real supported 8-vCPU/4-GiB replay on Git2.34.1 completed in93947ms,
+exit0: sampled owned-process-group peak RSS2025902080 bytes, kernel-reported
+child maximum RSS2015736KiB, minimum VM MemAvailable1735824KiB. It released
+its owned sandbox. These observations establish headroom for that measured
+configuration, not a hard process-memory bound or every custom Git setting. Local executors retain their existing configuration.
 Clone start/end capture includes session identity, source kind and duration,
 without URLs, credentials or file contents. Full clones, all history/refs,
 project files, tool behavior, concurrency, output assertions and timeout remain
@@ -116,16 +121,27 @@ Identical isolated command, before and after:
 Before uses the exact original f14f0cc workspace blob
 89dbc8c8cab66e2cbfa9729dfa33981970df12b0: exit 1,
 `session preparation must avoid repeated delta-base reconstruction`,
-23.433909 clone CPU seconds versus 11.288030 reference CPU seconds.
+23.433909 clone CPU seconds versus11.288030 reference CPU seconds initially;
+with the fixture server pinned independently,23.680813 versus11.733399.
 After: exit 0, 11.960606 versus 11.631840, with the same 1.6 ratio assertion.
 The fixture scales the captured cache/base-size ratio down by 96 and preserves
 the delta reconstruction mechanism using real Git. CPU comparison excludes
 scheduler waits. Negative controls assert full history, another remote branch,
 current/historical file bytes and restored private env-file mode. The test runs
 in backend-blackbox/project-clone; the Python fixture has an explicit selection
-edge. The official stability runner passed five consecutive unchanged runs under
-8-slot CPU load (257s). Fresh cross-review, the original cloud task and full
-deployment are in progress; no completed repair is claimed yet.
+edge. Loaded stability passed5/5 twice (257s and227s), the latter with the fixture
+server cache pinned independently of the client. Cross-review confirmed the
+mechanism and found memory-accounting and interrupted-helper cleanup gaps.
+The memory proof above resolves the former; a parent-death watchdog,
+owned-group termination/reaping, explicit expected-parent identity, masked
+spawn/registration, and actual parent-kill/dead-parent regressions resolve
+the latter. The original helper failed cleanup after60000ms and incorrectly
+started work after its expected parent had exited; both corrected cases pass. Current and historical contents are checked against full Git blob
+hashes. Final three-case stability passed5/5 unchanged under8-slot CPU load
+(260s; receipt20261116T202309). Fresh cross-review resolved all P2/P3
+findings in turn01a1e607-39b8-7b81-aefc-971ffe116786.
+The original cloud task and full deployment remain pending; no completed
+repair is claimed yet.
 Golden reference: not applicable (no approval-gated hunk).
 
 ## Human feedback
@@ -137,3 +153,13 @@ report, quarantine or attribution does not complete this assigned repair.
 ## Reusable lesson
 
 Measure clone transport and reconstruction separately, then replay the identical pack before attributing preparation latency or changing the workspace contract.
+
+
+## Evidence preservation
+
+The original packet, rejected experiments, exact immutable pack/index and
+controlled replay outputs are independently preserved in the encrypted object
+`r2://trace-archive/devbox-closeout-private/pr2415/20261116T2018-rca-phase1.tar.gz.aesgcm`.
+The full-readback-verified receipt is
+`docs/handoffs/pr-2415-closeout/rca-archive-receipt.json` (125 files,149 frames).
+Final native gate/production evidence is added during closeout.

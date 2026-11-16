@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr2415/20261116T2018-rca-phase1.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "131f464e4da0728a465408fed13b3410daf8b81c6b01e3934fcef531f0de2248",
+  "gzip_sha256": "57a99e3a2099420d47c3f4319066ca9ab41e5fe6e6c930a27e6e1f6008745b03",
+  "stored_bytes": 1243535843,
+  "frames": 149,
+  "files": 125,
+  "original_bytes": 1255132988,
+  "manifest_sha256": "5f120287960bece8b0a3252368466d4b4112babcdac30d2aa470a7624145d323",
+  "full_readback_verified": true
+}
