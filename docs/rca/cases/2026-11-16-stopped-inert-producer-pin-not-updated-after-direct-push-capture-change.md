@@ -21,6 +21,8 @@ sources:
   - commit b55e854061
   - commit 609cfca1fa
   - commit 670f0a3eb7
+  - PR #2294
+  - commit e613116d32
 repro: scripts/tests/deploy-test-cycle.test.py
 status: fixed
 ---
@@ -58,11 +60,11 @@ for PR #1927, the PR1682 merge and PR #1990. Only the trigger to apply it was sk
 
 ## Solution
 
-Commit 670f0a3eb7 re-pins the check to 85363bbebd490c8336e3c3c04e6c0361160904d2fd7d1371ebc18fc0e362c36b. It
+Shipped in PR #2294 (merged e613116d32, 2026-11-16). Commit 670f0a3eb7 re-pins the check to 85363bbebd490c8336e3c3c04e6c0361160904d2fd7d1371ebc18fc0e362c36b. It
 adds a "Re-pinned for b55e854061 ..." comment recording that `BILLING_GUEST` is still byte-identical
 and what changed on the host side. The existing `StoppedInertAllocationIsolation` tests in the
 `deploy-test-cycle` structural gate are the regression: they failed before the fix and pass after it
-(5/5 consecutive runs). The change is a constant in deploy tooling, so it has no 10k-agent runtime effect.
+(5/5 consecutive runs). They also pass on the merged main e613116d32. All 15 /deploy gates passed, and the production semantic lane passed (run 43805336421). The change is a constant in deploy tooling, so it has no 10k-agent runtime effect.
 Sibling: branch `fix/stopped-guest-volume-attachment-list-proof` re-pins the same line for its own helper
 version and must rebase its pin onto this one.
 Open follow-up (not shipped here): the pin covers the whole helper file, so every host-side edit trips it again.
