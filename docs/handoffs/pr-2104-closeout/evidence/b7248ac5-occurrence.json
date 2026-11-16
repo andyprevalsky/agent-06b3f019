@@ -1,0 +1,20 @@
+{
+  "id": "b7248ac5873d434aa5320ab2bea17f4c",
+  "gate": "deploy-command-structural",
+  "unit": "cloudbench-cohort-reconcile",
+  "check": "deploy-command-structural/deploy-command-structural",
+  "native_result": "FLAKY",
+  "attempts": 2,
+  "detail": "passed on rerun: cloudbench-cohort-reconcile\n.F......\n======================================================================\nFAIL: test_campaign_noop_and_mutation_share_the_completed_barrier (__main__.CohortReconciliation.test_campaign_noop_and_mutation_share_the_completed_barrier) (mutated=True)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/runner/_work/rose/rose/scripts/tests/cloudbench-cohort-reconcile.test.py\", line 276, in test_campaign_noop_and_mutation_share_the_completed_barrier\n    code,out,err=f.join(f.spawn(index));self.assertEqual(code,0,out+err)\n                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 1 != 0 : \n\n----------------------------------------------------------------------\nRan 8 tests in 2.263s\n\nFAILED (failures=1)\n\nfailed unittest headers:\nFAIL: test_campaign_noop_and_mutation_share_the_completed_barrier (__main__.CohortReconciliation.test_campaign_noop_and_mutation_share_the_completed_barrier) (mutated=True)",
+  "evidence": "/tmp/deploy-structural-nz2motf_/cloudbench-cohort-reconcile.log",
+  "source": {
+    "head": "34fa5830ed7d63eb429fdc5ed6b398ac4068c150",
+    "digest": "f99cfcbfeb54ada54ad074daa1f15b7739f63ef9e8cda8be07114639793ff5af"
+  },
+  "phase": "initial",
+  "round": 2,
+  "detected_at": 1794708711.2762709,
+  "unit_finished_at": 1794708698.7121024,
+  "attribution": null,
+  "instruction": "/RCA: this unit FAILED and passed its single rerun on the same source (FLAKY). Return the evidence-backed INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. INTRODUCED: fix before merge, no quarantine. NOT_INTRODUCED: add the quarantine marker with its repair link (.claude/commands/deploy.md). UNKNOWN blocks the merge. Do not weaken assertions/timeouts."
+}

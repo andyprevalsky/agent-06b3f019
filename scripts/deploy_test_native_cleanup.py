@@ -2307,7 +2307,7 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         result = source_validation_refusal(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree)
         need(used == set(bindings), 'source refusal proof file closure')
         return result
-    if layout in {'campaign-unlaunched-v1', 'campaign-unlaunched-relay-v1', 'campaign-inventory-init-failure-v1'}:
+    if layout in {'campaign-unlaunched-v1', 'campaign-unlaunched-relay-v1', 'campaign-inventory-init-failure-v1', 'campaign-peer-refusal-v1'}:
         # Missing host tooling can stop inventory before any controller exists.
         # Reconcile only that zero-admission boundary, retaining every native
         # UNVERIFIED outcome. A launched campaign still needs the fleet audit.
@@ -2321,6 +2321,47 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
             need("No such file or directory: 'flyctl'" in cli_text, 'missing executable boundary')
         elif layout == 'campaign-unlaunched-relay-v1':
             unlaunched_relay_retired(campaign, bound, document)
+        elif layout == 'campaign-peer-refusal-v1':
+            # This exact producer persists relay location before any relay admission.
+            # Retire only its failed zero-admission attempt; never grant test credit.
+            producers = {'scripts/run-bench-campaign.py': '1c2a9436b1bc7a268553e6c63e6b9417b96c3542380a76ebe2a81463801e15f1', 'scripts/cloudbench-campaign-inventory.sh': 'e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d', 'scripts/lib/cloudbench-inventory.sh': '382f3f54470e1481f5a6875cb7f343f06102db7fe1d6fad603aeb8eb8629636c', 'scripts/lib/cloudbench-env.sh': 'da75192f236602e90b44ee4ba992375c9b81b9d70d8bcc012218662b144cc711', 'scripts/cloudbench-campaign-machines.py': '22d34e69a3df5cdcf6d6be1005d56c623a05d9814ab1ab2c9615e86c04231155', 'scripts/cloudbench-machine-readiness.py': '5843e509a64380711147b140c346e81622a2f904b300d3af5a247415f5488797'}
+            for relative, expected in producers.items():
+                raw = bound(root / relative, historical_head=receipt['source']['head'])
+                need(hashlib.sha256(raw).hexdigest() == expected, 'peer refusal producer changed')
+                if relative != 'scripts/run-bench-campaign.py':
+                    need(bound(campaign / 'shared-inventory/scripts' / Path(relative).name) == raw,
+                         'peer refusal captured producer changed')
+            summary = document(campaign / 'summary.json')
+            settings = summary.get('operator_settings', {})
+            need(settings.get('CLOUDBENCH_CAMPAIGN_SHARED_RELAY') == '1'
+                 and settings.get('CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY') == '1'
+                 and settings.get('CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT') == '1',
+                 'pre-relay admission configuration changed')
+            need(not request.get('skips') and len(request['checks']) == 8
+                 and receipt.get('cases') == dict.fromkeys(request['checks'], 'UNVERIFIED')
+                 and adapter.get('cases') == receipt['cases'], 'peer refusal outcomes changed')
+            command = adapter.get('native_command')
+            need(command == ['bash', 'scripts/run-bench', *request['checks'], '--runs', '1',
+                             '--concurrency', '8', '--retry-infra', '0', '--ref', receipt['source']['head']],
+                 'peer refusal command changed')
+            for name in ('shared-relay', 'shared-relay-location.json'):
+                path = campaign / name
+                need(not path.exists() and not path.is_symlink(), 'peer refusal admitted relay')
+            supervisor = document(runs.parent / 'cli.log.process.json')
+            summary = document(campaign / 'summary.json')
+            controller = summary.get('controller', {})
+            need(type(adapter.get('native_exit')) is int and adapter['native_exit'] != 0
+                 and supervisor.get('native_exit') == adapter['native_exit']
+                 and supervisor.get('child_pid') == controller.get('pid')
+                 and supervisor.get('quiescent') is True and supervisor.get('orphaned_children') is False
+                 and supervisor.get('cancelled') is False and supervisor.get('timed_out') is False
+                 and supervisor.get('remaining') == [] and supervisor.get('error') is None,
+                 'peer refusal supervisor not quiescent')
+            retired_local_process(controller)
+            pids = [supervisor.get('supervisor_pid'), supervisor.get('child_pid')]
+            pids.extend(entry.get('pid') for entry in supervisor.get('reaped', []))
+            need(all(type(pid) is int and pid > 1 and not Path('/proc', str(pid)).exists() for pid in pids),
+                 'peer refusal process remains or identity unavailable')
         else:
             inventory_init_failure(root, runs, campaign, request, receipt, adapter, bound, document)
         summary = document(campaign / 'summary.json')
@@ -2438,7 +2479,8 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
              and (reference.get('native_directory') == str(campaign) or (staged_preallocation or layout == 'campaign-v1')
                   and reference.get('native_directory') is None and adapter.get('fleet_directory') is None
-                  and adapter.get('reason') == 'cloud command interrupted or source changed')
+                  and adapter.get('reason') in {'cloud command interrupted or source changed',
+                                               'cloud command ran while the source changed'})
              and str(campaign) in cli_text, 'campaign root binding')
         summary = document(campaign / 'summary.json')
         checks, jobs = request['checks'], summary['jobs']
