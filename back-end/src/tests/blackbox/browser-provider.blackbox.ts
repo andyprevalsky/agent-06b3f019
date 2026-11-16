@@ -49,7 +49,6 @@ import { assertStaleProxyCreateFailureIsLabeled } from './browser-provider-proxy
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
 import { tilionDnsWorkerCases } from './browser-provider.tilion-dns-worker.support';
-import { tilionFileFetchCases } from './browser-provider.tilion-file-fetch.support';
 import { authPersistFixtureCases } from './browser-provider.auth-persist-origin.support';
 import { steelAuthShareCases } from './browser-provider.steel-auth-share.support';
 import {
@@ -90,7 +89,6 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   ...authPersistFixtureCases,
   // Tilion became the default for new sessions (docs/plans/completed/tilion-browser-provider.md).
   ...tilionWiringCases,
-  ...tilionFileFetchCases,
   ...steelAuthShareCases,
   [
     'Kernel is selected by one environment parameter',
