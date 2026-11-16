@@ -14187,7 +14187,10 @@ class RelayStartupEvidence(unittest.TestCase):
         replacements=dict(campaign_workspace=lambda root,_forward:(root,None),provider_capacity_refusal=lambda _n,_tasks=None:None,
                           scorecard_hooks=lambda:None,start_shared_inventory=refuse_inventory,
                           publish_campaign_group=lambda *_a,**_kw:True)
-        with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),             patch.dict(os.environ,{'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'command-proof'}):
+        # 600 simultaneous copies exceed the app delegating-guest ceiling (default 70); like the other
+        # wide fixtures, use the fleet's own override so the real preflight admits this width.
+        with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),             patch.dict(os.environ,{'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'command-proof',
+                                   'CLOUDBENCH_DELEGATING_PRIMARY_CEILING':'600'}):
             self.assertEqual(module['main'](),1)
         summary=json.loads((self.base/'campaigns/command-proof/summary.json').read_text())
         self.assertEqual(summary['peak_concurrency'],0)
