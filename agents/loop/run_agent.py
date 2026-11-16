@@ -860,6 +860,7 @@ async def run_agent(
                         "now with your best answer, explicitly noting any gaps you could not fill."
                     ),
                     "timestamp": _safe_now().isoformat(),
+                    "metadata": {"internal_instruction": True},
                 }
             )
             winddown_injected = True
@@ -2102,6 +2103,7 @@ async def run_agent(
                                 "Do not repeat the same call again."
                             ),
                             "timestamp": _safe_now().isoformat(),
+                            "metadata": {"internal_instruction": True},
                         }
                     )
                 else:
@@ -2581,6 +2583,7 @@ async def run_agent(
                     "role": "SYSTEM",
                     "text": nudge,
                     "timestamp": _safe_now().isoformat(),
+                    "metadata": {"internal_instruction": True},
                 }
             )
         else:
