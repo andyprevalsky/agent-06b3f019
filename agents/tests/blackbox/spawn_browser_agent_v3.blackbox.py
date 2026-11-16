@@ -40,9 +40,6 @@ from _test_utils import (
     teardown_mock,
 )
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "lib"))
-from test_quarantine import quarantine
-
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -17093,12 +17090,6 @@ async def test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label
             await browser.close()
 
 
-@quarantine(
-    since="2026-11-16",
-    repair="pending-handoff:0e5f6905bb444c74ba092235d99fcfb1",
-    error="dom_service_cross_origin_iframe_coordinates_include_frame_offset: AssertionError",
-    evidence="PR2289 round final agents-coverage-blackbox spawn-browser-agent-v3 FLAKY 0e5f6905 on 71f2cd2668: first attempt AssertionError, same-source rerun passed; select_affected_tests shows the PR diff (back-end worker-deployment-queue only) does not reach this test",
-)
 async def test_dom_service_cross_origin_iframe_coordinates_include_frame_offset():
     """Regression for b4466499 (prod agent-payment-production-purchase, 2026-11-15).
 
@@ -17207,10 +17198,31 @@ async def test_dom_service_cross_origin_iframe_coordinates_include_frame_offset(
                 dom._session = _FakeSession()
                 dom._selector_map = {email.backend_node_id: email, pay.backend_node_id: pay}
 
+                async def _await_oopif_input_routing(selector, coords):
+                    # Chromium routes mouse input to an OOPIF from the browser's
+                    # hit-test data, which is published only after the frame's
+                    # next compositor frame. Under CPU load a click right after
+                    # load or scroll lands on the top page's <iframe> element
+                    # or on a stale point in the frame. Wait until a pointer
+                    # move at these exact coordinates is delivered to the target.
+                    target = frame.locator(selector)
+                    await target.evaluate(
+                        "element => { element.dataset.pointerSeen = '';"
+                        " element.addEventListener('pointermove', () => { element.dataset.pointerSeen = '1'; }); }"
+                    )
+                    deadline = asyncio.get_running_loop().time() + 30
+                    while await target.get_attribute("data-pointer-seen") != "1":
+                        assert asyncio.get_running_loop().time() < deadline, (
+                            f"pointer at {coords} never reached {selector} in the OOPIF"
+                        )
+                        await page.mouse.move(0, 0)
+                        await page.mouse.move(*coords)
+
                 coords = await dom.get_click_coordinates(email.backend_node_id)
                 # Email box in top-level viewport: (722..922, 162..192), center (822, 177).
                 assert coords is not None
                 assert abs(coords[0] - 822) <= 12 and abs(coords[1] - 177) <= 8, coords
+                await _await_oopif_input_routing("#email", coords)
                 await page.mouse.click(*coords)
                 await page.keyboard.type("a@roselabs.ai")
                 assert await frame.locator("#email").input_value() == "a@roselabs.ai"
@@ -17218,6 +17230,7 @@ async def test_dom_service_cross_origin_iframe_coordinates_include_frame_offset(
                 coords = await dom.get_click_coordinates(pay.backend_node_id)
                 assert coords is not None
                 assert 0 <= coords[0] < 1366 and 0 <= coords[1] < 625, coords
+                await _await_oopif_input_routing("#pay", coords)
                 await page.mouse.click(*coords)
                 assert await frame.locator("#pay").get_attribute("data-clicked") == "1", coords
             finally:
