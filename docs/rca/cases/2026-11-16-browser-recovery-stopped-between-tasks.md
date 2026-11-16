@@ -145,3 +145,29 @@ lease, then checks that reads stop after the unchanged lease expires. The same
 four-case command passes (exit 0). No application code, semantic assertion or
 budget changed in this follow-up. Final load stability, full frontend coverage
 and immutable-source final gates remain required.
+
+
+### Qualification infrastructure and source preservation
+
+Five initial Blacksmith jobs failed before test execution in the unchanged
+workflow's authenticated Git fetch, reporting `Repository not found` (exit 128).
+The deployment coordinator also detected local source edits and became stale;
+its attempts to cancel the remaining jobs hit the shared GitHub quota. Their
+later native artifacts completed successfully, but the original coordinator
+UNVERIFIED outcomes are preserved and not adopted as passing cycle credit.
+Cleanup is reconciled only through the canonical server-bound artifact proof.
+
+A temporary checkout-only diagnostic used the same `contents: read` permission,
+job tokens and sticky mirror, comparing cached, isolated, and cached-control
+Git contexts on six 2/4/8-vCPU jobs. All 18 reads returned HTTP 200 with the current
+effective authorization header. This did not reproduce credential contamination;
+the earlier rejection's exact cause remains unknown. The diagnostic workflow
+is removed from the shipped tree, with its source and sanitized reports retained
+at tag `checkout-probes/browser-chip-91d77620` and Actions run `43802314392`.
+No permission, authentication behavior, retry policy or test budget changed.
+Every unexecuted or interrupted gate remains required on the new frozen source;
+there is no provider waiver or delegated substitute for execution.
+
+The inherited local branch history is preserved in a complete-history Git
+bundle, encrypted and fully read back. Receipt:
+`docs/handoffs/browser-chip-count-repair/inherited-branches.json`.
