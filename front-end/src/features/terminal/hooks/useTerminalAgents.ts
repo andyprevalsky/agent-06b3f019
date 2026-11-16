@@ -56,7 +56,7 @@ export function useSelectedAgentModel(
   }, [defaultModel, isInitialLoadRef, model, modelOwnerId, selectedAgentId, setSelectedModel]);
 }
 
-/** New-agent model default: rose-flash for signed-in Rose Desktop accounts. */
+/** New-agent model default: rose-flash for the default Rose Desktop UI. */
 export function defaultModelForAccount(auth: {
   isAnonymous: boolean;
   isFullySignedIn: boolean;
@@ -65,7 +65,7 @@ export function defaultModelForAccount(auth: {
   const user = auth.isFullySignedIn ? auth.user : null;
   const saved = readQueryPreferences(user?.id).model;
   if (saved) return saved;
-  return !auth.isAnonymous && isRoseDesktopUser(user) ? ROSE_DESKTOP_DEFAULT_MODEL : DEFAULT_MODEL;
+  return isRoseDesktopUser(user) ? ROSE_DESKTOP_DEFAULT_MODEL : DEFAULT_MODEL;
 }
 
 function useContextSelectedAgentModel(
