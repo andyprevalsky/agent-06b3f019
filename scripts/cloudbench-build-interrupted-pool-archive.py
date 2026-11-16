@@ -324,12 +324,22 @@ def build(args) -> None:
                         continue
                     parent = primary_by_id[original["source_machine_id"]]
                     base = run / parent["task"] / "worker-runtime-evidence" / machine
-                    worker_manifest = json.loads(read(base / "capture/manifest.json", 1048576))
                     worker = {"machine_id": machine, "volume_id": original["volume_id"],
                               "primary_machine_id": parent["machine_id"], "task": parent["task"],
                               "run_token": parent["run_token"], "proof_credit": 0, "files": {}}
-                    for relative in ("owner.json", "capture/manifest.json", *("capture/" + name for name in worker_manifest["files"])):
-                        data = read(base / relative, 512 * 1024 * 1024)
+                    if os.path.lexists(base / "not-launched.json"):
+                        # An inert clone whose wrapper never launched has no
+                        # runtime to capture; preserve its sealed receipts and
+                        # the exact stage log, rechecked by the consumer.
+                        worker["kind"] = "not-launched"
+                        originals = forensic["verify_unlaunched_worker"](
+                            run / parent["task"], machine, parent["machine_id"], parent["run_token"])
+                    else:
+                        worker_manifest = json.loads(read(base / "capture/manifest.json", 1048576))
+                        originals = {relative: read(base / relative, 512 * 1024 * 1024) for relative in (
+                            "owner.json", "capture/manifest.json",
+                            *("capture/" + name for name in worker_manifest["files"]))}
+                    for relative, data in originals.items():
                         worker["files"][relative] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
                         info = tarfile.TarInfo(f"_normal_workers/{machine}/{relative}")
                         info.size, info.mode, info.mtime = len(data), 0o600, 0
@@ -348,12 +358,16 @@ def build(args) -> None:
         with archive_path.open("rb") as original:
             os.fsync(original.fileno())
         archive_bytes = archive_path.stat().st_size
-        assert archive_bytes <= 512 * 1024 * 1024
+        # The fresh consumer bounds the packet by one producer runtime budget
+        # per guest it covers; the pool consumer keeps its fixed bound.
+        limit = (forensic["forensic_archive_limit"](len(rows) + len(normal_workers))
+                 if fresh else 512 * 1024 * 1024)
+        assert archive_bytes <= limit, f"forensic archive {archive_bytes} bytes exceeds {limit}"
         manifest = {
             "schema": "cloudbench-forensic-retirement-v1" if fresh else "cloudbench-interrupted-pool-evidence-v1",
             "owner": owner, "run_id": meta["run_id"], "proof_credit": 0,
             "archive_bytes": archive_bytes,
-            "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+            "archive_sha256": forensic["regular_sha256"](archive_path, limit),
             "tasks": rows,
             **({"uncompressed_bytes": uncompressed, "normal_workers": normal_workers,
                 "preserved_files": preserved} if fresh else {}),

@@ -413,7 +413,7 @@ class PreServiceArchiveTest(unittest.TestCase):
             self.verify()
 
     def generic(self, native_worker=False, missing_worker_log=False, preserved_note=False,
-                multichunk_original=False):
+                multichunk_original=False, published_run_bytes=0):
         f = self.fixture
         owner, machine, volume, clone = (bootstrap_test.OWNER, bootstrap_test.MACHINE,
                                          bootstrap_test.VOLUME, bootstrap_test.CLONE)
@@ -424,6 +424,13 @@ class PreServiceArchiveTest(unittest.TestCase):
         (f.out / "runtime-evidence.owner.json").write_text(json.dumps(
             dict(version=1, machine_id=machine, run_token=bootstrap_test.TOKEN)))
         (f.out / "runtime-evidence.pending").write_bytes((f.out / "runtime-evidence.owner.json").read_bytes())
+        if published_run_bytes:
+            # The normal collector published the canonical result and cleared
+            # pending; the guest sealed run.json up to the producer's bound.
+            (f.out / "runtime-evidence.pending").unlink()
+            record = json.dumps({"pad": "x" * published_run_bytes}).encode()
+            (f.out / "cloudbench-run.json").write_bytes(record)
+            bootstrap_test.write(f.out / "remote-logs/runtime-evidence/run.json", record)
         (f.out / "guest-shutdown.confirmed").write_text(bootstrap_test.RUN + "\n")
         bootstrap_test.pairs(f.audit / "fresh" / clone,
                              dict(version=1, fleet_owner_token=owner, run_id=bootstrap_test.RUN,
@@ -652,6 +659,125 @@ class PreServiceArchiveTest(unittest.TestCase):
                 with self.assertRaises((AssertionError, KeyError, ValueError)):
                     self.verify_built_native()
 
+    UNLAUNCHED = "5678abcd"
+
+    def add_unlaunched_worker(self):
+        """An owned autoscaler clone allocated inert whose wrapper never launched.
+
+        Mirrors the production shape (c0961355 polar-bu-083 / 86551e4c762738):
+        owner.json plus the fleet's sealed not-launched.json, and no capture.
+        """
+        f = self.fixture
+        worker, clone, volume = self.UNLAUNCHED, "cloudbench-unlaunched", "vol_unlaunched1"
+        bootstrap_test.pairs(f.audit / "fresh" / clone,
+                             dict(version=1, fleet_owner_token=bootstrap_test.OWNER, run_id=bootstrap_test.RUN,
+                                  app=bootstrap_test.APP, clone_name=clone, source="fresh-clone",
+                                  source_machine_id=bootstrap_test.MACHINE, machine_id=worker,
+                                  volume_id=volume, disposition="owned"))
+        bootstrap_test.pairs(f.audit / "expected-fresh" / clone,
+                             dict(clone_name=clone, source_machine_id=bootstrap_test.MACHINE))
+        bootstrap_test.write(f.audit / "by-machine-id" / worker, clone + "\n")
+        bootstrap_test.pairs(f.registry / "clones" / clone, dict(name=clone, id=worker, volume_id=volume))
+        f.volumes.write_text(json.dumps([dict(id=volume, state="created")]))
+        stage = (b"allocated inert worker clone; wrapper not launched\n"
+                 b"[t] attempt 1/40: start neutralized worker succeeded\n"
+                 b"[t] attempt 1/40: upload cloudbench-worker.sh\n")
+        (f.out / f"worker-{worker}.stage.log").write_bytes(stage)
+        (f.out / f"worker-{worker}.pending").write_bytes(b"")
+        base = f.out / "worker-runtime-evidence" / worker
+        base.mkdir(parents=True)
+        owner = dict(version=1, machine_id=worker, primary_machine_id=bootstrap_test.MACHINE,
+                     run_token=bootstrap_test.TOKEN, workspace="flt-fixture-0")
+        (base / "owner.json").write_text(json.dumps(owner))
+        receipt = dict(owner, worker_started=False, stage_sha256=hashlib.sha256(stage).hexdigest())
+        (base / "not-launched.json").write_text(json.dumps(receipt, sort_keys=True))
+        return base, stage
+
+    def test_native_builder_archives_sealed_not_launched_worker(self):
+        self.native_builder_fixture()
+        base, stage = self.add_unlaunched_worker()
+        result = self.build_native()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        verified = self.verify_built_native()
+        self.assertEqual(verified["normal_worker_captures"], 2)
+        self.assertEqual(verified["proof_credit"], 0)
+        packet = self.fixture.run / "_forensic"
+        manifest = json.loads((packet / "manifest.json").read_bytes())
+        row = next(row for row in manifest["normal_workers"] if row["machine_id"] == self.UNLAUNCHED)
+        self.assertEqual(row["kind"], "not-launched")
+        self.assertEqual(set(row["files"]), {"owner.json", "not-launched.json", "stage.log"})
+        prefix = f"_normal_workers/{self.UNLAUNCHED}/"
+        with tarfile.open(packet / "originals.tar.gz") as archive:
+            self.assertEqual(archive.extractfile(prefix + "stage.log").read(), stage)
+            self.assertEqual(archive.extractfile(prefix + "not-launched.json").read(),
+                             (base / "not-launched.json").read_bytes())
+
+    def test_not_launched_worker_requires_exact_original_receipt(self):
+        reasons = {
+            "started": "does not bind", "stage-changed": "does not bind",
+            "launch-attempted": "launch-attempted", "ready": "was reported ready",
+            "wrapper-launched": "wrapper launched", "foreign-primary": "does not bind",
+            "partial-capture": "has other evidence",
+            # Without the sealed receipt the worker must have a capture.
+            "missing-receipt": "capture",
+        }
+        self.native_builder_fixture()
+        base, stage = self.add_unlaunched_worker()
+        f = self.fixture
+        stage_path = f.out / f"worker-{self.UNLAUNCHED}.stage.log"
+        original_receipt = (base / "not-launched.json").read_bytes()
+        for fault in reasons:
+            with self.subTest(fault=fault):
+                receipt = json.loads(original_receipt)
+                if fault == "started":
+                    receipt["worker_started"] = True
+                elif fault == "stage-changed":
+                    stage_path.write_bytes(stage + b"later bytes\n")
+                elif fault == "launch-attempted":
+                    (f.out / f"worker-{self.UNLAUNCHED}.launch-attempted").touch()
+                elif fault == "ready":
+                    (f.out / "worker-ready.ids").write_text(self.UNLAUNCHED + "\n")
+                elif fault == "wrapper-launched":
+                    stage_path.write_bytes(stage + b"launch worker wrapper succeeded\n")
+                    receipt["stage_sha256"] = hashlib.sha256(stage_path.read_bytes()).hexdigest()
+                elif fault == "foreign-primary":
+                    receipt["primary_machine_id"] = "c" * 14
+                elif fault == "partial-capture":
+                    (base / "capture").mkdir()
+                if fault == "missing-receipt":
+                    (base / "not-launched.json").unlink()
+                else:
+                    (base / "not-launched.json").write_text(json.dumps(receipt, sort_keys=True))
+                result = self.build_native()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reasons[fault], result.stderr)
+                self.assertFalse((f.run / "_forensic/manifest.json").exists())
+                # Restore the exact original worker state for the next fault.
+                shutil.rmtree(f.run / "_forensic", ignore_errors=True)
+                (base / "not-launched.json").write_bytes(original_receipt)
+                stage_path.write_bytes(stage)
+                (f.out / f"worker-{self.UNLAUNCHED}.launch-attempted").unlink(missing_ok=True)
+                (f.out / "worker-ready.ids").unlink(missing_ok=True)
+                if (base / "capture").is_dir():
+                    (base / "capture").rmdir()
+        # The restored original state still builds and verifies.
+        self.assertEqual(self.build_native().returncode, 0)
+        self.assertEqual(self.verify_built_native()["normal_worker_captures"], 2)
+
+    def test_consumer_rechecks_not_launched_worker_after_build(self):
+        self.native_builder_fixture()
+        self.add_unlaunched_worker()
+        self.assertEqual(self.build_native().returncode, 0)
+        f = self.fixture
+        (f.out / f"worker-{self.UNLAUNCHED}.launch-attempted").touch()
+        with self.assertRaises(AssertionError):
+            self.verify_built_native()
+
+    def reset_fixture(self):
+        """Start each fault from a fresh fixture; earlier faults never leak."""
+        self.doCleanups()
+        self.setUp()
+
     def test_native_consumer_keeps_reviewed_source_policy_mandatory(self):
         self.native_builder_fixture()
         result = self.build_native()
@@ -873,6 +999,33 @@ b.publish_rebuilt_packet(Path({str(stage)!r}),Path({str(packet)!r}),Path({str(re
         self.assertEqual(result["normal_worker_captures"], 1)
         self.assertEqual(result["proof_credit"], 0)
         self.assertFalse(result["native_release_verified"])
+
+    def test_generic_archive_admits_run_record_sealed_within_producer_bound(self):
+        # A real Polar guest sealed a 95-206 MiB run.json; the consumer once
+        # capped it at 64 MiB and raised a bare AssertionError.
+        result = self.generic(published_run_bytes=65 * 1024 * 1024)
+        self.assertEqual(result["proof_credit"], 0)
+        status_server = retirement.runpy.run_path(str(ROOT / "scripts/cloudbench-status-server.py"))
+        self.assertEqual(retirement.RUN_RECORD_MAX_BYTES, status_server["MAX_RECOVERY_RUN_BYTES"])
+        with patch.object(retirement, "RUN_RECORD_MAX_BYTES", 1024):
+            self.reset_fixture()
+            with self.assertRaisesRegex(AssertionError, "exceeds the 1024-byte bound"):
+                self.generic(published_run_bytes=2048)
+
+    def test_generic_archive_bound_scales_with_covered_guests(self):
+        # One primary plus one normal worker: two producer runtime budgets.
+        self.generic()
+        f = self.fixture
+        packet = f.run / "_forensic"
+        size = (packet / "originals.tar.gz").stat().st_size
+        verify = lambda: retirement.verify(f.registry, f.run, packet / "manifest.json",
+                                           packet / "originals.tar.gz", f.machines, f.volumes,
+                                           archive_only=True)
+        with patch.object(retirement, "GUEST_EVIDENCE_MAX_BYTES", size // 2 + 1):
+            self.assertEqual(verify()["proof_credit"], 0)
+        with patch.object(retirement, "GUEST_EVIDENCE_MAX_BYTES", size // 2 - 1):
+            with self.assertRaisesRegex(AssertionError, "bound"):
+                verify()
 
     def test_generic_archive_rejects_missing_original_worker_log(self):
         with self.assertRaises(AssertionError):

@@ -1,0 +1,40 @@
+{
+  "status": "ARCHIVE_VERIFIED_NOT_DELETION_READY",
+  "captured_files": 50143,
+  "captured_original_bytes": 2670119090,
+  "archive_files": 50144,
+  "archive_original_bytes_including_source_manifest": 2703612071,
+  "stored_bytes": 762841035,
+  "frames": 91,
+  "ciphertext_sha256": "5624e0c31bcddf5e1fe0f4ee763753a47d1f5bb8621125c8ea467f66873980c9",
+  "source_manifest_sha256": "ceb5450c11bd245dd96132ba2b417173dd99cd0562bc669d2b62d74b56e9d899",
+  "archive_manifest_sha256": "4fc4c6bb3dbcf5611f9581b1a32f1b5e9d58bc4c8ec7b95b52c69b8cafa34f86",
+  "protected": [
+    {
+      "path": "/home/boxes/.codex/AGENTS.md",
+      "sha256": "e1b83a2abd1216551fabfc00bdd5d712531b3aa11ef8eb81dc4b6f5ca236d9aa",
+      "matches_prior": true
+    },
+    {
+      "path": "/home/boxes/.claude/CLAUDE.md",
+      "sha256": "5d2c9ec335e84757bc590e802b48c20b1659afc290f85c9062860a653a71b385",
+      "matches_prior": true
+    },
+    {
+      "path": "/home/boxes/rose/AGENTS.md",
+      "sha256": "9d8df9926136e588334b7e77ee01ca7cb8675591e7ab576258da67887938c9da",
+      "matches_prior": true
+    },
+    {
+      "path": "/home/boxes/rose/CLAUDE.md",
+      "sha256": "77a24cdc9312475fb28ea112e6b8736641df551dc9de6451fbb7b4ea903c0264",
+      "matches_prior": true
+    }
+  ],
+  "source_stability": "Every file hash and size/mtime checked before and after copy; uploader rechecked staged file stability; original inputs unmodified during freeze.",
+  "remaining": "Parent records-only commit/review/merge and canonical deletion-check still required.",
+  "independent_full_readback": "PASS: separate private_archive.py verify exited0 after upload self-verification",
+  "frozen_head": "9bfefe22414e6e86c470b99bc9299d78aedec9eb",
+  "ref_inventory_count": 605,
+  "uncovered_local_only_refs": 0
+}
