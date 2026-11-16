@@ -404,7 +404,8 @@ ${body}
   writeFileSync(
     join(blackbox, 'wobbly.blackbox.ts'),
     counted(
-      "if (run === 1) { process.stderr.write('Error: first attempt lost the race\\n'); process.exitCode = 1; }"
+      // Attempt 1 names its failed case early, then prints far more than a progress row holds.
+      "if (run === 1) { process.stderr.write('FAIL wobbly race: first attempt lost the race\\n'); process.stdout.write('PASS later case\\n'.repeat(8000)); process.exitCode = 1; }"
     )
   );
   // A native crash prints nothing: the first attempt dies by signal, the rerun passes.
@@ -484,7 +485,17 @@ void (async () => {
   ]);
   assert.equal(wobbly.attempts, 2);
   assert.equal(wobbly.case, 'blackbox-shard-3');
-  assert.match(String(wobbly.detail), /first attempt lost the race/, 'FLAKY detail is attempt 1');
+  assert.match(
+    String(wobbly.detail),
+    /\n\[runner\] 1 failure line\(s\) in this attempt:\nFAIL wobbly race: first attempt lost the race$/,
+    'FLAKY detail keeps attempt 1 FAIL lines past its 2000-code-point tail'
+  );
+  assert.ok(String(wobbly.detail).length <= 2000);
+  assert.match(
+    green.output,
+    /^wobbly: \[runner\] 1 failure line\(s\) in this attempt:\nFAIL wobbly race: first attempt lost the race$/m,
+    'runner log names the flaky attempt FAIL lines'
+  );
   assert.match(green.output, /^TEST_FLAKY unit=wobbly attempts=2 attribution=REQUIRED$/m);
   assert.match(green.output, /^ {2}FLAKY {2}wobbly \(/m);
   assert.match(green.output, /3 passed, 0 failed, 0 not run, 3 total/);
@@ -570,7 +581,7 @@ void (async () => {
   );
   assert.match(
     String(wobbly.detail),
-    /first attempt lost the race\n+\[runner\] domain process exited code=1 signal=none after \d+ms$/
+    /PASS later case\n+\[runner\] domain process exited code=1 signal=none after \d+ms\n\[runner\] 1 failure line/
   );
 }
 

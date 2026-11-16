@@ -11,9 +11,10 @@ Two parts (user decision 2026-10-19, Codex world-state pattern)::
     last such row in the model context, so a     sub-agent counts (max 8). Never stored.
     compaction that drops it re-emits it.
 
-A root's block also lists the user's connected GitHub repos (live inventory,
-fetched per sync by workflows/environment_context.py); connecting or
-disconnecting a repo changes the block, so the next turn re-emits it.
+A root's block also lists the user's projects (``# Available projects``: GitHub
+repos and code imported from the user's computer, live list fetched per sync by
+workflows/environment_context.py) with the id to pass as ``github_repo_ref``;
+adding or removing a project changes the block, so the next turn re-emits it.
 
 Neither part is user-authored: response-schema feedback, verifier "user said"
 logic, DAG plan supersession, planner memory and the FE skip the row by its
@@ -26,10 +27,10 @@ Temporal workflow sandbox. Callers pass ``now``.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
-from helpers.github_repo_inventory import github_repos_section, previous_github_repos_section
+from helpers.github_repo_inventory import previous_projects_section, projects_section
 
 ENVIRONMENT_CONTEXT_KEY = "environmentContext"
 MAX_ENVIRONMENT_AGENTS = 8
@@ -101,13 +102,14 @@ def render_environment_block(
     own_path: Optional[str],
     is_root: bool,
     agents: Sequence[Dict[str, Any]],
-    github_repos: Optional[Sequence[Dict[str, Any]]] = (),
+    projects: Union[Sequence[Dict[str, Any]], Dict[str, Any], None] = (),
     previous_block: Optional[str] = None,
 ) -> str:
     """The persisted ``<environment>`` block (stable between real changes: date, not time).
 
-    A root also lists its user's connected GitHub repos (``github_repos``, the live
-    inventory, see helpers/github_repo_inventory.py): none ever → the section is omitted;
+    A root also lists its user's projects (``projects``: the live GET /api/projects list,
+    or its capped ``{projects, total}`` listing, see helpers/github_repo_inventory.py):
+    none ever → the section is omitted;
     None (fetch failed) → the section of ``previous_block`` is kept; emptied after a shown
     list → an explicit "no longer applies" line.
     """
@@ -126,16 +128,16 @@ def render_environment_block(
         lines.extend(_more_line(len(agents) - len(shown)))
     else:
         lines.append("Running agents you started: none")
-    repos_section = (
-        github_repos_section(
-            None if github_repos is None else list(github_repos),
-            previous_github_repos_section(previous_block),
+    section = (
+        projects_section(
+            projects if projects is None or isinstance(projects, dict) else list(projects),
+            previous_projects_section(previous_block),
         )
         if is_root
         else ""
     )
-    if repos_section:
-        lines.extend(["", repos_section])
+    if section:
+        lines.extend(["", section])
     return "<environment>\n" + "\n".join(lines) + "\n</environment>"
 
 

@@ -53,9 +53,10 @@ export const INTEGRATION_CATALOG = {
       .map(({ name, domain }) => `${name} ${domain}`)
       .join(' ')} meeting notes transcript transcripts summary summaries recording calls`,
   },
-  githubRepos: {
-    title: 'GitHub Repos',
-    aliases: 'github gh git repository repositories repo code projects folders',
+  projects: {
+    title: 'Projects',
+    aliases:
+      'projects github gh git repository repositories repo code import computer local env dotenv secrets folders',
   },
   pebble: {
     title: 'Wearables',

@@ -1,14 +1,18 @@
 /**
  * Resolve the Project a new code session should restore.
  *
- * GitHub clone credentials: the backend GITHUB_TOKEN is injected into the
- * clone URL only when the owner passes the same GithubRepoAccess check that
- * gates `github_repo_url` sessions, so a project's repoUrl cannot be used to
- * read repositories its owner was never granted.
+ * GitHub clone credentials: a token is injected into the clone URL only when
+ * the session's user passes the same GithubRepoAccess check that gates
+ * `github_repo_url` sessions, so a project's repoUrl cannot be used to read
+ * repositories that user was never granted. The token is the user's own
+ * GitHub credential when it can push the repo (githubUserCredentials.ts),
+ * else the backend GITHUB_TOKEN; never another user's.
  */
-import { checkGithubRepoAccess } from '../github';
+import { checkGithubRepoAccess, parseGithubUrl } from '../github';
+import { userGithubSessionToken } from '../githubUserCredentials';
 import { GithubRateLimitedError } from '../githubRateLimit';
 import { createLogger } from '../logger';
+import { prepareSharedProjectWorkspace } from './sharedProjects';
 import { prepareProjectWorkspace, ProjectWorkspaceError } from './store';
 import type { ProjectWorkspace } from './types';
 
@@ -30,7 +34,6 @@ async function resolveCloneUrl(userId: string, repoUrl: string | null): Promise<
     return repoUrl; // scp-style or local path: cloned as-is with the session's own credentials
   }
   if (host !== 'github.com') return repoUrl;
-  const token = process.env.GITHUB_TOKEN;
   const access = await checkGithubRepoAccess(userId, repoUrl);
   // A limit is not a denial: cloning without credentials would fail or, worse,
   // fall back to an empty checkout. Say so, with the reset time.
@@ -39,6 +42,13 @@ async function resolveCloneUrl(userId: string, repoUrl: string | null): Promise<
     log.warn('Project repo not granted to owner; cloning without credentials', { userId });
     return repoUrl;
   }
+  const parsed = parseGithubUrl(access.normalizedUrl);
+  const own =
+    parsed === null ? null : await userGithubSessionToken(userId, parsed.owner, parsed.repo);
+  if (own !== null) {
+    log.info("Project clone uses the user's own GitHub credential", { userId, login: own.login });
+  }
+  const token = own?.token ?? process.env.GITHUB_TOKEN;
   return token ? withGithubToken(access.normalizedUrl, token) : access.normalizedUrl;
 }
 
@@ -52,13 +62,31 @@ export async function prepareSessionProject(
   return { ...workspace, cloneUrl };
 }
 
+/**
+ * A project a team shares with `userId` (sharedProjects.ts): the owner's code
+ * and settings, none of the owner's env files or credentials; the clone URL
+ * carries the teammate's own access. Null when it is not shared with them.
+ */
+export async function prepareSharedSessionProject(
+  userId: string,
+  projectId: string
+): Promise<ProjectWorkspace | null> {
+  const workspace = await prepareSharedProjectWorkspace(userId, projectId);
+  if (workspace === null) return null;
+  log.info('Session restores a project shared with the user', { userId, projectId });
+  return { ...workspace, cloneUrl: await resolveCloneUrl(userId, workspace.project.repoUrl) };
+}
+
 export class ProjectNotFoundForSessionError extends Error {
   constructor() {
     super('Project not found');
   }
 }
 
-/** Session project for an owner (null = none); unknown/foreign ids throw. */
+/**
+ * Session project for its owner, or for a teammate it is shared with (null =
+ * none); unknown/foreign ids throw.
+ */
 export async function resolveSessionProject(
   userId: string | undefined,
   projectId: string | undefined
@@ -68,7 +96,9 @@ export async function resolveSessionProject(
   try {
     return await prepareSessionProject(userId, projectId);
   } catch (err) {
-    if (err instanceof ProjectWorkspaceError) throw new ProjectNotFoundForSessionError();
-    throw err;
+    if (!(err instanceof ProjectWorkspaceError)) throw err;
   }
+  const shared = await prepareSharedSessionProject(userId, projectId);
+  if (shared === null) throw new ProjectNotFoundForSessionError();
+  return shared;
 }

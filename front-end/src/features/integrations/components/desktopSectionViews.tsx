@@ -32,7 +32,6 @@ import { gmailAccounts } from '../hooks/useIntegrationData';
 import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
-import type { useGithubRepos } from '../hooks/useGithubRepos';
 import type { MeetingNotesConnections } from '../types';
 import { MEETING_NOTES_PROVIDERS, meetingNotesProviders } from '../config';
 import BrowserIcon from './BrowserIcon';
@@ -62,6 +61,7 @@ import { AccountTeamShare } from '@/components/teams/TeamSharing';
 import type { AccountShareLookup, AccountShareTarget } from '@/hooks/useTeams';
 import { FileSystemIcon } from './FileSystemSection';
 import { PebbleIndexIcon } from './PebbleIndexSection';
+import type { ProjectsSectionProps } from './ProjectsSection';
 import {
   GmailIcon,
   IMessageIcon,
@@ -95,7 +95,8 @@ export interface DesktopIntegrationsProps {
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
   meetingNotes: MeetingNotesConnections;
-  github: ReturnType<typeof useGithubRepos>;
+  /** Project settings under a project row's ⚙ (ProjectsSection). */
+  projectSettings?: ProjectsSectionProps['projectSettings'];
 }
 
 export interface DesktopSectionView {

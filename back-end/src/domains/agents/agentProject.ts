@@ -9,10 +9,15 @@
  * GitHub repo), precedence in providers/githubRepos/resolve.ts:
  *   explicit github_repo_ref > trusted server repo > explicit project's repo >
  *   parent's ref > inherited project's repo.
+ * An explicit github_repo_ref naming an owned project (`<uuid>` or
+ * `rose-project:<uuid>`) is an explicit placement in that project (a different
+ * project_id is contradictory); so is one a team shares with the caller (only
+ * through the ref); any other id keeps the repo 404.
  * One indexed parent query per create/batch; one lookup per distinct project.
  */
 import {
   GithubRepoRefNotFoundError,
+  projectIdOfRepoRef,
   resolveAgentRepoRef,
   type AgentRepoRefFields,
 } from '../../providers/githubRepos/resolve';
@@ -22,6 +27,7 @@ import {
   findOwnedFolders,
   findParentPlacement,
   findParentRepoRefs,
+  findSharedProjectIds,
 } from './repoAgentProjects';
 
 export class AgentProjectNotFoundError extends Error {
@@ -51,8 +57,8 @@ export function agentProjectNotFoundBody(error: AgentProjectNotFoundError) {
 }
 
 export class AgentPlacementConflictError extends Error {
-  constructor() {
-    super('Folder does not belong to the requested project');
+  constructor(message = 'Folder does not belong to the requested project') {
+    super(message);
     this.name = 'AgentPlacementConflictError';
   }
 }
@@ -88,7 +94,8 @@ function resolvePlacement(
 export async function resolveAgentPlacement(
   body: PlacementRequest,
   userId: string,
-  inherited: Placement = HOME
+  inherited: Placement = HOME,
+  sharedRefs: ReadonlySet<string> = new Set()
 ): Promise<Placement> {
   const [projects, folders] = await Promise.all([
     findOwnedProjectIds(typeof body.project_id === 'string' ? [body.project_id] : [], userId),
@@ -97,7 +104,7 @@ export async function resolveAgentPlacement(
   return resolvePlacement(
     body,
     inherited,
-    new Set(projects),
+    new Set([...projects, ...sharedRefs]),
     new Map(folders.map((f) => [f.id, f.projectId]))
   );
 }
@@ -107,13 +114,47 @@ function hasExplicitPlacement(body: CreateAgentBody): boolean {
   return typeof body.project_id === 'string' || typeof body.folder_id === 'string';
 }
 
+function projectRefOf(body: CreateAgentBody): string | null {
+  return typeof body.github_repo_ref === 'string' ? projectIdOfRepoRef(body.github_repo_ref) : null;
+}
+
+/**
+ * A github_repo_ref naming an owned or shared project becomes the body's
+ * project_id (an explicit placement), so the agent lands in exactly that
+ * project. Two bulk queries; any other id is left to the repo ref check (404).
+ * Returns the shared ids placed (placement accepts them only through the ref).
+ */
+async function applyProjectRefPlacement(
+  bodies: CreateAgentBody[],
+  userId: string
+): Promise<Set<string>> {
+  const ids = [...new Set(bodies.map(projectRefOf).filter((id): id is string => id !== null))];
+  if (ids.length === 0) return new Set();
+  const owned = new Set(await findOwnedProjectIds(ids, userId));
+  const notOwned = ids.filter((id) => !owned.has(id));
+  const shared = new Set(await findSharedProjectIds(notOwned, userId));
+  for (const body of bodies) {
+    const projectId = projectRefOf(body);
+    if (projectId === null || (!owned.has(projectId) && !shared.has(projectId))) continue;
+    if (body.project_id !== undefined && body.project_id !== projectId) {
+      throw new AgentPlacementConflictError(
+        'github_repo_ref names a different project than project_id'
+      );
+    }
+    body.project_id = projectId;
+  }
+  return shared;
+}
+
 export async function resolveCreateAgentPlacement(body: CreateAgentBody, userId: string) {
+  const sharedRefs = await applyProjectRefPlacement([body], userId);
   const explicitProject = hasExplicitPlacement(body);
   const inherited =
     body.parent_agent_id !== undefined
       ? await findParentPlacement(body.parent_agent_id, userId)
       : null;
-  return { ...(await resolveAgentPlacement(body, userId, inherited ?? HOME)), explicitProject };
+  const placement = await resolveAgentPlacement(body, userId, inherited ?? HOME, sharedRefs);
+  return { ...placement, explicitProject };
 }
 
 async function asPlacementError<T>(work: () => Promise<T>): Promise<T> {
@@ -188,6 +229,7 @@ export async function resolveBatchProjectIds(
   userId: string,
   parentById: Map<string, Placement>
 ): Promise<Map<string, AgentRepoRefFields>> {
+  const sharedRefs = await applyProjectRefPlacement(bodies, userId);
   const explicitPlacementIds = new Set(
     bodies.filter(hasExplicitPlacement).map((body) => body.agent_id!)
   );
@@ -201,7 +243,7 @@ export async function resolveBatchProjectIds(
     findOwnedProjectIds(projectIds, userId),
     findOwnedFolders(folderIds, userId),
   ]);
-  const owned = new Set(projects);
+  const owned = new Set([...projects, ...sharedRefs]);
   const folderMap = new Map(folders.map((f) => [f.id, f.projectId]));
   for (const body of bodies) {
     const inherited =

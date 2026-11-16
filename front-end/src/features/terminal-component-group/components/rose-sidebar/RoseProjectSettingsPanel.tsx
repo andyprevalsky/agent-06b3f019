@@ -1,21 +1,19 @@
 /**
  * STATE MACHINE: RoseProjectSettingsPanel (UI ledger rows 19/60)
  *
- *   A project is shown as a Folder (same row and id; lib/api/folders.ts).
- *   Opened from a folder row's ⚙ (or its right-click menu), flush beside the
- *   left bar (LeftPanelShell). Draft/save state lives in useProjectSettingsForm:
+ *   Opened inline under a project row in Integrations › Projects (its ⚙; the
+ *   apps panel passes this panel in as that section's settings slot). Draft/save
+ *   state lives in useProjectSettingsForm:
  *   [PRISTINE] --edit--> [DIRTY] --Save (PUT edited subset)--> [SAVING] --ok--> [PRISTINE]
  *                                                              --fail--> [DIRTY] + error
  *   [DIRTY] + timeout outside 1..3600 --> [INVALID] inline hint, Save disabled
- *   GitHub repo: read-only (GET /api/folders github_repo); "Connect / Switch repo
- *   in Integrations" opens the Integrations panel, where repos are connected
- *   (then onOpenedIntegrations: the mobile menu closes so that panel is visible)
+ *   Repository: read-only (project.repoUrl); a project with no GitHub repo was
+ *   imported from the user's computer and restores from its synced checkout.
  *
  * Team sharing uses independent explicit opt-ins through /api/teams.
  *
- * Sections (Rose light styles): GitHub repo (connected repo, read-only, + link
- * to Integrations; default branch, GitHub "Connected"/"Not connected" — never
- * an error — and Last synced)
+ * Sections (Rose light styles): Repository (read-only; default branch, GitHub
+ * "Connected"/"Not connected" — never an error — and Last synced)
  * · Set up with your coding agent (copyable one-time setup prompt; its own
  * state machine in ProjectAgentSetupSection) · Startup script · Startup timeout
  * · Template sync (ProjectMaintenanceSection: Last snapshot + Snapshot now, sync
@@ -28,16 +26,12 @@
 import { ProjectTeamSharing } from '@/components/teams/TeamSharing';
 
 import { MAX_STARTUP_TIMEOUT_S, MIN_STARTUP_TIMEOUT_S, type Project } from '@/lib/api/projects';
-import { GITHUB_REPOS_SECTION_ID, focusIntegrationsSection } from '@/lib/integrationsSection';
 import { cn } from '@/lib/utils';
 
-import { useRoseApps } from '../rose-apps/roseAppsState';
-import LeftPanelShell from './LeftPanelShell';
 import { ProjectAgentSetupSection } from './ProjectAgentSetupSection';
 import { ProjectMaintenanceSection } from './ProjectMaintenanceSection';
 import { ProjectEnvFilesSection } from './ProjectEnvFilesSection';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
-import { useFolderGithubRepo } from './useProjects';
 import { useProjectSettingsForm, type ProjectDraft } from './useProjectSettingsForm';
 
 const MUTED = 'text-[hsl(240_8%_45%)] dark:text-[#a3a39d]';
@@ -52,66 +46,26 @@ function formatSyncedAt(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
-/**
- * Opens the Integrations panel at its GitHub Repos section with this folder
- * pre-selected for switching; null outside the apps provider.
- */
-function useOpenIntegrations(folderId: string, onOpened?: () => void): (() => void) | null {
-  const apps = useRoseApps();
-  if (apps === null) return null;
-  return () => {
-    if (apps.openApp !== 'integrations') apps.toggleApp('integrations');
-    focusIntegrationsSection(GITHUB_REPOS_SECTION_ID, { folderId });
-    // Mobile: the menu this panel sits in closes, so the opened panel is visible.
-    onOpened?.();
-  };
-}
-
-/**
- * Read-only: the folder's connected GitHub repo (GET /api/folders github_repo).
- * Connecting or changing it happens on the Integrations panel, never here.
- */
+/** Read-only repository (GitHub URL, or the checkout imported from the user's computer). */
 function GithubRepoSection({
   draft,
   setField,
   project,
-  onOpenedIntegrations,
 }: {
   draft: ProjectDraft;
   setField: SetField;
   project: Project;
-  onOpenedIntegrations?: () => void;
 }) {
   const lastSyncedAt = project.sync.lastSyncedAt;
-  const folderRepo = useFolderGithubRepo(project.id);
-  // While (or if) the folders list cannot load, the project row's repo stands in.
-  const repoUrl = folderRepo === undefined ? project.repoUrl : (folderRepo?.repo_url ?? null);
-  const openIntegrations = useOpenIntegrations(project.id, onOpenedIntegrations);
-  const linkLabel = repoUrl === null ? 'Connect in Integrations' : 'Switch repo in Integrations';
   return (
-    <section aria-label="GitHub repo">
-      <h3 className={H3}>GitHub repo</h3>
+    <section aria-label="Repository">
+      <h3 className={H3}>Repository</h3>
       <div className={FIELD_ROW}>
         <span>Repository</span>
-        <span className="flex min-w-0 flex-1 items-center justify-end gap-3">
-          <span data-testid="folder-github-repo" className={cn(MONO, 'min-w-0 break-all')}>
-            {folderRepo?.canonical_ref ?? repoUrl ?? 'No repository'}
-          </span>
-          {openIntegrations !== null ? (
-            <button
-              type="button"
-              onClick={openIntegrations}
-              className="shrink-0 font-semibold"
-              style={{ color: ROSE_ACTIVE_COLOR }}
-            >
-              {linkLabel}
-            </button>
-          ) : null}
+        <span data-testid="project-repository" className={cn(MONO, 'min-w-0 break-all text-right')}>
+          {project.repoUrl ?? 'Imported from your computer'}
         </span>
       </div>
-      {openIntegrations === null && (
-        <p className={MUTED}>Connect or change this folder’s repo on the Integrations panel.</p>
-      )}
       <label className={FIELD_ROW}>
         <span>Default branch</span>
         <input
@@ -212,44 +166,21 @@ function LifecycleSection({ draft, setField }: { draft: ProjectDraft; setField: 
   );
 }
 
-export default function RoseProjectSettingsPanel({
-  project,
-  barExpanded,
-  barExpandedWidth,
-  onClose,
-  embedded = false,
-  onOpenedIntegrations,
-}: {
-  project: Project;
-  barExpanded: boolean;
-  /** The bar's current expanded width, so the panel sits flush against a dragged bar. */
-  barExpandedWidth?: number;
-  onClose: () => void;
-  embedded?: boolean;
-  /** After "Connect / Switch repo in Integrations" opened the panel (mobile closes its menu). */
-  onOpenedIntegrations?: () => void;
-}) {
+export default function RoseProjectSettingsPanel({ project }: { project: Project }) {
   const form = useProjectSettingsForm(project);
-  const content = (
-    <>
-      <h2 className="mb-0.5 text-[17px] font-semibold">{project.name}</h2>
-      <p className={MUTED}>Folder settings</p>
+  return (
+    <div data-testid="project-settings-content">
       <label className={FIELD_ROW}>
-        <span>Folder name</span>
+        <span>Project name</span>
         <input
-          aria-label="Folder name"
+          aria-label="Project name"
           value={form.draft.name}
           onChange={(e) => form.setField('name', e.target.value)}
           className="min-w-0 bg-transparent text-right outline-none"
         />
       </label>
       <ProjectTeamSharing projectId={project.id} />
-      <GithubRepoSection
-        draft={form.draft}
-        setField={form.setField}
-        project={project}
-        onOpenedIntegrations={onOpenedIntegrations}
-      />
+      <GithubRepoSection draft={form.draft} setField={form.setField} project={project} />
       <ProjectAgentSetupSection projectId={project.id} />
       <StartupSection
         draft={form.draft}
@@ -280,19 +211,6 @@ export default function RoseProjectSettingsPanel({
           {form.isSaving ? 'Saving…' : 'Save'}
         </button>
       </div>
-    </>
-  );
-  return embedded ? (
-    <div data-testid="project-settings-content">{content}</div>
-  ) : (
-    <LeftPanelShell
-      label="Folder settings"
-      testId="rose-project-settings"
-      barExpanded={barExpanded}
-      barExpandedWidth={barExpandedWidth}
-      onClose={onClose}
-    >
-      {content}
-    </LeftPanelShell>
+    </div>
   );
 }

@@ -441,6 +441,17 @@ function suggestSetup(root, dirs) {
   return out;
 }
 
+/** The origin's default branch as this checkout last saw it (`origin/HEAD`), or null. */
+export function remoteDefaultBranch(root) {
+  const ref = tryGit(root, [
+    "symbolic-ref",
+    "--short",
+    "-q",
+    "refs/remotes/origin/HEAD",
+  ])?.trim();
+  return ref?.startsWith("origin/") ? ref.slice("origin/".length) : null;
+}
+
 /** Top-level directory of the checkout containing `dir`. */
 export function checkoutRoot(dir) {
   return realpathSync(

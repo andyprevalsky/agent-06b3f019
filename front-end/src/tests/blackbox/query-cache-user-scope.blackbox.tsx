@@ -1,11 +1,12 @@
 /**
  * Blackbox: the app query cache is scoped to the signed-in user (lib/queryClient).
  *
- * Contract (follow-up to PR #1975, whose left-bar folders query carries repo names):
- *   - account A's folders and projects are cached in the shared appQueryClient
+ * Contract (follow-up to PR #1975; project names and repos are account data):
+ *   - account A's projects (Integrations › Projects, useIntegrationProjects) are
+ *     cached in the shared appQueryClient
  *   - A signs out (to the anonymous session) and account B signs in on the same tab
- *   - from the switch on, the left bar's folders/projects queries never return A's
- *     data, even while B's responses are still in flight
+ *   - from the switch on, the projects list never returns A's data, even while
+ *     B's response is still in flight
  *   - a token refresh for the same user keeps the cache (no refetch)
  *   - a root-browser action account A started that completes after B signs in
  *     never writes A's state into B's cache (CodeRabbit review of #2052)
@@ -18,10 +19,7 @@ import { useState, type ReactNode } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 
 import { useAuthActions } from '@/features/auth/hooks/useAuthActions';
-import {
-  useFoldersQuery,
-  useProjectsQuery,
-} from '@/features/terminal-component-group/components/rose-sidebar/useProjects';
+import { useIntegrationProjects } from '@/features/integrations/hooks/useIntegrationProjects';
 import {
   ROOT_BROWSER_KEY,
   useRootBrowserActions,
@@ -75,21 +73,6 @@ const wrapper = ({ children }: { children: ReactNode }) => (
   <QueryClientProvider client={appQueryClient}>{children}</QueryClientProvider>
 );
 
-function folderNamed(user: string) {
-  return {
-    id: `${user}-folder`,
-    name: `${user} folder`,
-    legacy_project_id: `${user}-folder`,
-    subfolders: [],
-    github_repo: {
-      canonical_ref: `gh:${user}/secret`,
-      repo_url: `https://github.com/${user}/secret`,
-    },
-    created_at: '2026-11-14T00:00:00Z',
-    updated_at: '2026-11-14T00:00:00Z',
-  };
-}
-
 describe('query cache user scope', () => {
   beforeEach(() => {
     appQueryClient.clear();
@@ -101,26 +84,26 @@ describe('query cache user scope', () => {
     localStorage.clear();
   });
 
-  it("never returns the previous account's folders or projects after sign-out and another sign-in", async () => {
+  it("never returns the previous account's projects after sign-out and another sign-in", async () => {
     const owner = { current: 'user-a' };
-    const fetches = { folders: 0, projects: 0 };
+    const fetches = { projects: 0 };
     let releaseB: () => void = () => {};
     const bReady = new Promise<void>((resolve) => {
       releaseB = resolve;
     });
     server.use(
-      http.get(`${API_BASE}/folders`, async () => {
-        fetches.folders += 1;
-        const user = owner.current;
-        if (user !== 'user-a') await bReady; // B's response is still in flight
-        return HttpResponse.json({ folders: [folderNamed(user)] });
-      }),
       http.get(`${API_BASE}/projects`, async () => {
         fetches.projects += 1;
         const user = owner.current;
-        if (user !== 'user-a') await bReady;
+        if (user !== 'user-a') await bReady; // B's response is still in flight
         return HttpResponse.json({
-          projects: [makeProject({ id: `${user}-folder`, name: `${user} project` })],
+          projects: [
+            makeProject({
+              id: `${user}-project`,
+              name: `${user} project`,
+              repoUrl: `https://github.com/${user}/secret`,
+            }),
+          ],
         });
       }),
     );
@@ -130,22 +113,17 @@ describe('query cache user scope', () => {
     const { result } = renderHook(
       () => {
         const auth = useStatefulAuthActions();
-        const folders = useFoldersQuery();
-        const projects = useProjectsQuery();
-        observed.push(
-          ...(folders.data ?? []).map((f) => f.name),
-          ...(projects.data ?? []).map((p) => p.name),
-        );
-        return { auth, folders, projects };
+        const projects = useIntegrationProjects(true);
+        observed.push(...projects.projects.map((p) => `${p.name} ${p.repoUrl ?? ''}`));
+        return { auth, projects };
       },
       { wrapper },
     );
 
     await act(() => result.current.auth.applySession('init', sessionOf('user-a')));
-    await waitFor(() => {
-      expect(result.current.folders.data?.map((f) => f.name)).toEqual(['user-a folder']);
-      expect(result.current.projects.data?.map((p) => p.name)).toEqual(['user-a project']);
-    });
+    await waitFor(() =>
+      expect(result.current.projects.projects.map((p) => p.name)).toEqual(['user-a project']),
+    );
 
     // A signs out; B signs in on the same tab while B's lists are still loading.
     observed.length = 0;
@@ -155,20 +133,20 @@ describe('query cache user scope', () => {
       localStorage.setItem('rose-session', JSON.stringify(sessionOf('user-b')));
       await result.current.auth.applySession('login', sessionOf('user-b'));
     });
-    expect(observed.filter((name) => name.startsWith('user-a'))).toEqual([]);
-    expect(result.current.folders.data).toBeUndefined();
+    expect(observed.filter((name) => name.includes('user-a'))).toEqual([]);
+    expect(result.current.projects.projects).toEqual([]);
+    expect(result.current.projects.loading).toBe(true);
 
     releaseB();
-    await waitFor(() => {
-      expect(result.current.folders.data?.map((f) => f.name)).toEqual(['user-b folder']);
-      expect(result.current.projects.data?.map((p) => p.name)).toEqual(['user-b project']);
-    });
-    expect(observed.filter((name) => name.startsWith('user-a'))).toEqual([]);
+    await waitFor(() =>
+      expect(result.current.projects.projects.map((p) => p.name)).toEqual(['user-b project']),
+    );
+    expect(observed.filter((name) => name.includes('user-a'))).toEqual([]);
 
     // A token refresh for the same account keeps the cache: no refetch.
     const before = { ...fetches };
     await act(() => result.current.auth.applySession('refresh', sessionOf('user-b')));
-    expect(result.current.folders.data?.map((f) => f.name)).toEqual(['user-b folder']);
+    expect(result.current.projects.projects.map((p) => p.name)).toEqual(['user-b project']);
     expect(fetches).toEqual(before);
   });
 

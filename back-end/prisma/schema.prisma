@@ -2244,6 +2244,9 @@ model Project {
   userId                    String
   name                      String
   repoUrl                   String?
+  /// Shown as a left-bar folder (organizes agents). false: only a repository
+  /// (connected on GitHub or imported with `rose push`). A row can be both.
+  isFolder                  Boolean                 @default(true)
   defaultBranch             String                  @default("main")
   startupScript             String?
   startupTimeoutS           Int                     @default(120)

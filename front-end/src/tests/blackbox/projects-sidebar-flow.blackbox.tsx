@@ -1,6 +1,11 @@
-/** Original project flow: inline sidebar groups/actions, shared by mobile. */
+/**
+ * Original folder flow: inline sidebar groups/actions, shared by mobile.
+ * Folders only organize agents (Andy, 2026-11-15): no settings ⚙, no
+ * "Folder settings" menu item and no repo avatar in the bar; a repository
+ * connected or imported in Integrations (isFolder: false) is not a folder.
+ */
 import { beforeEach, expect, it, vi } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { RoseMobileAgentList } from '@/features/terminal-component-group/components/rose-sidebar/RoseMobileAgentList';
 import { renderWithProviders } from './test-wrapper';
@@ -45,9 +50,21 @@ function mobileList({ agents = listAgents, isLoading = false } = {}) {
 function renderList() {
   return renderWithProviders(mobileList());
 }
-it('uses the original grouped rows and gear settings instead of a separate Projects dashboard', async () => {
-  mockProjectsApi([makeProject({ id: 'website', name: 'Website' }), makeProject()]);
-  renderList();
+it('uses the original grouped folder rows with no settings, repo avatar or repository rows', async () => {
+  mockProjectsApi([
+    makeProject({ id: 'website', name: 'Website' }),
+    makeProject(),
+    // A repository connected in Integrations: not a folder; its agents stay in Home.
+    makeProject({ id: 'p-repo', name: 'marketing-site', isFolder: false }),
+  ]);
+  renderWithProviders(
+    mobileList({
+      agents: [
+        ...listAgents,
+        makeAgent({ agent_id: 'repo-agent', goal: 'Repo work', project_id: 'p-repo' }),
+      ],
+    }),
+  );
   const project = await screen.findByTestId('rose-project-row-p-rose');
   expect(screen.queryByRole('button', { name: /^Projects$/ })).toBeNull();
   expect(
@@ -57,12 +74,13 @@ it('uses the original grouped rows and gear settings instead of a separate Proje
   expect(within(screen.getByTestId('rose-group-home')).getByText('Home work')).toBeVisible();
   expect(within(screen.getByTestId('rose-group-p-rose')).getByText('Rose work')).toBeVisible();
   expect(within(project).getByRole('button', { name: 'Create Super Agent' })).toBeVisible();
-  fireEvent.click(within(project).getByRole('button', { name: 'Rose folder settings' }));
-  expect(screen.queryByRole('button', { name: 'Download setup helper' })).toBeNull();
-  expect(screen.getByRole('textbox', { name: 'Default branch' })).toHaveValue('main');
-  expect(screen.getByRole('spinbutton', { name: 'Startup timeout (seconds)' })).toHaveValue(120);
-  fireEvent.click(screen.getByRole('button', { name: 'Back to agents' }));
-  expect(screen.getByTestId('rose-project-row-p-rose')).toBeVisible();
+  expect(within(project).queryByRole('button', { name: /settings/i })).toBeNull();
+  expect(project.querySelector('img')).toBeNull();
+  expect(project.querySelector('svg.lucide-folder')).not.toBeNull();
+  expect(screen.queryByTestId('rose-project-row-p-repo')).toBeNull();
+  expect(screen.queryByText('marketing-site')).toBeNull();
+  expect(within(screen.getByTestId('rose-group-home')).getByText('Repo work')).toBeVisible();
+  expect(screen.queryByTestId('project-settings-content')).toBeNull();
 });
 it('creates inline with Enter and cancels with Escape; keeps a failed name for retry', async () => {
   const state = mockProjectsApi([makeProject()]);
@@ -109,32 +127,6 @@ it('keeps the list, inline project input and project menu mounted while agents r
   expect(menu).toBeInTheDocument();
   expect(within(menu).getByRole('menuitem', { name: 'Delete folder' })).toBeVisible();
 });
-it('shows the folder repo read-only in settings; a rename uses /api/folders, the rest PUT', async () => {
-  const state = mockProjectsApi([makeProject()]);
-  renderList();
-  fireEvent.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-  await waitFor(() =>
-    expect(screen.getByTestId('folder-github-repo')).toHaveTextContent('gh:rose-ai-labs/rose'),
-  );
-  // No repo editing here any more: connecting / changing it lives on the Integrations panel.
-  expect(screen.queryByRole('textbox', { name: 'Repository URL' })).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
-  expect(screen.getByRole('button', { name: 'Switch repo in Integrations' })).toBeVisible();
-  fireEvent.change(screen.getByRole('textbox', { name: 'Folder name' }), {
-    target: { value: 'Rose app' },
-  });
-  fireEvent.change(screen.getByRole('textbox', { name: 'Default branch' }), {
-    target: { value: 'develop' },
-  });
-  fireEvent.click(screen.getByRole('button', { name: /^Save$/ }));
-  await waitFor(() =>
-    expect(state.projects[0]).toMatchObject({ name: 'Rose app', defaultBranch: 'develop' }),
-  );
-  expect(state.projects[0].repoUrl).toBe('https://github.com/Rose-Ai-Labs/rose');
-  expect(state.folderWrites).toEqual([
-    { method: 'PATCH', id: 'p-rose', body: { name: 'Rose app' } },
-  ]);
-});
 it('surfaces a project read failure with Retry in the list', async () => {
   let failed = true;
   server.use(
@@ -150,7 +142,7 @@ it('surfaces a project read failure with Retry in the list', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Retry folders' }));
   expect(await screen.findByTestId('rose-project-row-p-rose')).toBeVisible();
 });
-it('keeps Rename / Settings / Delete on the existing project context menu', async () => {
+it('keeps exactly Rename / Delete on the folder context menu (no Folder settings)', async () => {
   const state = mockProjectsApi([makeProject()]);
   renderList();
   await screen.findByTestId('rose-project-row-p-rose');
@@ -158,8 +150,11 @@ it('keeps Rename / Settings / Delete on the existing project context menu', asyn
     screen.getByTestId('rose-project-row-p-rose'),
     'rose-project-menu',
   );
-  expect(within(menu).getByRole('menuitem', { name: 'Rename folder' })).toBeVisible();
-  expect(within(menu).getByRole('menuitem', { name: 'Folder settings' })).toBeVisible();
+  expect(
+    within(menu)
+      .getAllByRole('menuitem')
+      .map((item) => item.textContent),
+  ).toEqual(['Rename folder', 'Delete folder']);
   fireEvent.click(within(menu).getByRole('menuitem', { name: 'Delete folder' }));
   const confirm = screen.getByRole('alertdialog');
   expect(state.projects).toHaveLength(1);

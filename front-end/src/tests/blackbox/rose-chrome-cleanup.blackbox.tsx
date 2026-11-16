@@ -437,7 +437,7 @@ describe('Popular Goals (#15, #24, #55)', () => {
 //
 // Rose Desktop layers that compete at the page root (lowest first):
 //   page content (the z-[4] main row) < composer (+ its attached agents-running
-//   pane) < panels that cover it (project settings, Biz health, Browser,
+//   pane) < panels that cover it (Biz health, Browser,
 //   Integrations) < popovers opened from any of them.
 // jsdom has no layout, so the assertions compare the z of the OUTERMOST
 // z-indexed ancestor of each element: an element inside a lower stacking
@@ -464,17 +464,6 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
   beforeEach(() => {
     setViewport(1280, 800);
     mockProjectsApi([makeProject()]);
-  });
-
-  it('project settings opened from the left bar stacks above the floating query box', async () => {
-    const user = userEvent.setup({ delay: null });
-    await renderTerminal(true);
-    expandBar();
-    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-    const panel = screen.getByTestId('rose-project-settings');
-    const composer = screen.getByTestId('query-input-layer');
-    expect(rootLayerZ(composer)).toBe(100);
-    expect(rootLayerZ(panel)).toBeGreaterThan(rootLayerZ(composer));
   });
 
   it('Settings opened from the account row stacks above the floating query box', async () => {
@@ -543,42 +532,6 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     expect(within(panel).getByTestId('rose-app-panel-benchmarks')).toBeInTheDocument();
     expect(panel.parentElement).toBe(document.body);
     expect(rootLayerZ(panel)).toBeGreaterThan(composer);
-  });
-
-  it('an app opened while project settings is open covers the drawer, not the reverse', async () => {
-    const user = userEvent.setup({ delay: null });
-    await renderTerminal(true);
-    expandBar();
-    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-    const settings = screen.getByTestId('rose-project-settings');
-    // Read before Browser opens: the open Browser docks the composer in its own pane.
-    const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
-    await user.click(screen.getByTestId('rose-app-browser'));
-    const browser = screen
-      .getAllByTestId('browser-app-drawer')
-      .find((drawer) => drawer.dataset.state === 'open');
-    expect(browser).toBeDefined();
-    if (browser === undefined) return;
-    expect(screen.getByTestId('rose-project-settings')).toBe(settings);
-    expect(rootLayerZ(settings)).toBeGreaterThan(composer);
-    expect(rootLayerZ(browser)).toBeGreaterThan(rootLayerZ(settings));
-    // The icon row stays clickable over the covering panel.
-    expect(rootLayerZ(screen.getByTestId('rose-app-icons'))).toBeGreaterThan(rootLayerZ(browser));
-  });
-
-  it('project settings ends left of the top-right app icon row on narrow windows', async () => {
-    const user = userEvent.setup({ delay: null });
-    setViewport(800, 800);
-    await renderTerminal(true);
-    expandBar();
-    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-    const settings = screen.getByTestId('rose-project-settings');
-    // RoseAppsProvider publishes the icon row's width; the drawer subtracts it.
-    expect(document.documentElement.style.getPropertyValue('--rose-app-icons-inset')).toMatch(
-      /px$/,
-    );
-    expect(settings.style.width).toContain('var(--rose-app-icons-inset');
-    expect(settings.style.width).toContain(`100vw - ${settings.style.left}`);
   });
 
   it('the Rose toolset popover stacks above the query box and its agents-running header', async () => {

@@ -3,8 +3,9 @@
  *
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
- *     · Socials · File System · GitHub Repos · CLIs · MCP servers (signed in; the
- *     GitHub Repos card; CLIs and MCP servers are ordinary rows with account chips:
+ *     · Socials · File System · GitHub Repositories (signed in; ProjectsSection:
+ *     projects = repos, import from your computer, connect a GitHub repo, settings
+ *     under ⚙) · CLIs · MCP servers (signed in; ordinary rows with account chips:
  *     DesktopToolSections)
  *     · Meeting note taker (Granola, Fireflies) · Wearables (Pebble Index 01, whose Connect opens its setup modal)
  *     · Other (signed in: "An integration not listed here?" → texts the team; IntegrationRequestSection)
@@ -47,7 +48,7 @@ import {
   useSyncRefresh,
 } from '../hooks/useSyncProgress';
 import DesktopComputeRow from './DesktopComputeRow';
-import GithubReposSection from './GithubReposSection';
+import ProjectsSection from './ProjectsSection';
 import SearchGroup from './IntegrationSearchGroup';
 import { type DesktopIntegrationsProps, desktopSectionViews } from './desktopSectionViews';
 import DesktopIntegrationRow, {
@@ -119,10 +120,8 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
           <Fragment key={title}>
             {catalogKey === 'meetingNotes' && props.isFullySignedIn && (
               <>
-                <SearchGroup catalogKey="githubRepos" search={props.search}>
-                  <div className="my-3">
-                    <GithubReposSection github={props.github} />
-                  </div>
+                <SearchGroup catalogKey="projects" search={props.search}>
+                  <ProjectsSection projectSettings={props.projectSettings} />
                 </SearchGroup>
                 <DesktopToolSections search={props.search} />
               </>

@@ -69,6 +69,15 @@ assert_decision "mac-app source changes must ship" \
 assert_decision "front-end dependency changes must ship" \
   false true shipped-surface 'front-end/package.json'
 
+# The app bundles the `rose` CLI (Resources/rose-cli); a CLI-only change must
+# reach desktop users, who no longer install it from npm.
+require_text "$MAC_PACKAGE" '"from": "../scripts/lib/rose-sync"' \
+  "mac-app must still bundle scripts/lib/rose-sync (the rose CLI shipped-surface premise)"
+assert_decision "rose CLI changes must ship the Mac app" \
+  false true shipped-surface 'scripts/lib/rose-sync/cli.mjs'
+assert_decision "other scripts/lib changes must not ship the Mac app" \
+  false false no-shipped-change 'scripts/lib/port-probe.sh'
+
 assert_decision "the explicit label must still force a release" \
   true true label 'back-end/src/server.ts'
 

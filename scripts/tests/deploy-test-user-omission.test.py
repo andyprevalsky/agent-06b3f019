@@ -3,6 +3,7 @@ import copy
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -11,6 +12,10 @@ from contextlib import ExitStack
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parents[2]
+# The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
+# outer deploy worker (the local executor runs this suite inside a gate) would
+# make admission() demand that outer cycle's custody locator in-process.
+os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(HERE / 'scripts'))
 # Pin the actual admission consumer to this source root. Some existing script
 # imports prepend their own root, which otherwise selects the live source while
@@ -602,6 +607,25 @@ class ProspectiveElection(unittest.TestCase):
                                      patch.object(c, 'retained_owners', return_value=[]):
                                     e.elect(state, request, self.root)
                         self.assertEqual(state, unchanged)
+
+
+class FixtureEnvironment(unittest.TestCase):
+    def test_outer_request_does_not_rebind_disposable_fixture_custody(self):
+        # The local executor runs this suite inside a gate whose DEPLOY_GATE_REQUEST
+        # names the live cycle's attempt folder; fixture admission must ignore it.
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / '.context/deploy-pipeline/attempts/2/initial/deploy-command-structural/request.json'
+            request.parent.mkdir(parents=True)
+            request.write_text('{}')
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
+                'ProspectiveElection.test_real_preallocation_admission_reconstructs_election_after_custody',
+                'ProspectiveElection.test_broad_prohibition_real_native_consumer_preserves_original_election_and_custody'],
+                env=dict(os.environ, DEPLOY_GATE_REQUEST=str(request)),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('Ran 2 tests', result.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

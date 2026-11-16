@@ -30,7 +30,11 @@ import { mkdirSync, readdirSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve, dirname, join } from 'path';
-import { reportGateProgress, reportVisibleGateProgress } from '../helpers/gateProgress';
+import {
+  GATE_PROGRESS_DETAIL_LIMIT,
+  reportGateProgress,
+  reportVisibleGateProgress,
+} from '../helpers/gateProgress';
 
 function readEnv(...names: string[]): string | undefined {
   for (const name of names) {
@@ -292,6 +296,32 @@ interface Result {
   attempts?: number;
 }
 
+// A domain's own failed-case lines (`FAIL <case>: <message>`, `❌ ...`, `✗ ...`).
+const FAILURE_LINE = /^\s*(?:FAIL\b|❌|✗)/u;
+const FAILURE_LINES_SHOWN = 5;
+const FAILURE_LINE_CHARS = 300;
+
+/** The attempt's first FAIL lines, bounded; empty when it printed none. */
+function failureLines(output: string): string {
+  const failed = output.split('\n').filter((line) => FAILURE_LINE.test(line));
+  if (failed.length === 0) return '';
+  const shown = failed
+    .slice(0, FAILURE_LINES_SHOWN)
+    .map((line) => line.slice(0, FAILURE_LINE_CHARS));
+  return `[runner] ${failed.length} failure line(s) in this attempt:\n${shown.join('\n')}`;
+}
+
+/**
+ * Progress detail for a failed attempt: its output tail, then its FAIL lines last, so the row's
+ * last-2000-code-point cut keeps them even when the failing case printed long before the end
+ * (a 72 MB iphone-control log once exceeded the result bundle and lost its only FAIL line).
+ */
+function failureDetail(output: string): string {
+  const lines = failureLines(output);
+  if (lines === '') return output;
+  return `${output.slice(-(GATE_PROGRESS_DETAIL_LIMIT - lines.length - 1))}\n${lines}`;
+}
+
 const runnerStartedAt = Date.now();
 let abortScheduling = false;
 async function runScheduledDomain(
@@ -317,18 +347,21 @@ async function runScheduledDomain(
       // Not a free pass: the row and stdout line ask the deploy for /RCA attribution.
       reportVisibleGateProgress(domain, 'FLAKY', {
         scope: 'domain',
-        detail: first.output,
+        detail: failureDetail(first.output),
         attempts: 2,
       });
+      // The passing rerun prints no FAILURES section, so name the first attempt's failures here.
+      const lines = failureLines(first.output);
+      if (lines !== '') process.stdout.write(`${domain}: ${lines}\n`);
     } else {
-      reportGateProgress(domain, 'FAIL', { scope: 'domain', detail: second.output });
+      reportGateProgress(domain, 'FAIL', { scope: 'domain', detail: failureDetail(second.output) });
     }
   } else {
     // Live deploy-gate progress: one row the moment the domain settles, so a failure is
     // reported while sibling domains and shards are still running (no-op when unset).
     reportGateProgress(domain, result.passed ? 'PASS' : 'FAIL', {
       scope: 'domain',
-      detail: result.passed ? '' : result.output,
+      detail: result.passed ? '' : failureDetail(result.output),
     });
   }
   if (!result.passed && priorityDomainNames.has(domain)) {

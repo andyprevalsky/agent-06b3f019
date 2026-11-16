@@ -34,6 +34,7 @@ import {
   buildTelegramEventBridge,
   buildUnsubscribableEventBridge,
 } from './service-events';
+import { buildRoseCliBridge } from './service-rose-cli';
 
 function buildAuthBridge(ipcRenderer: IpcRenderer): IPC['auth'] {
   return {
@@ -300,6 +301,7 @@ export function buildIpcApi(ipcRenderer: IpcRenderer): IPC {
     gptCode: buildGptCodeBridge(ipcRenderer),
     atlas: buildAtlasBridge(ipcRenderer),
     localCode: buildLocalCodeBridge(ipcRenderer),
+    roseCli: buildRoseCliBridge(ipcRenderer),
     passkeys: buildPasskeysBridge(ipcRenderer),
     whatsapp: buildWhatsAppBridge(ipcRenderer),
     telegram: buildTelegramBridge(ipcRenderer),

@@ -24,6 +24,7 @@ import {
 import { mockSession } from './app-sidebar.fixtures';
 import { server } from './msw/server';
 import { makeItem } from './plaid.fixtures';
+import { makeProject, mockProjectsApi } from './rose-sidebar.fixtures';
 import { accounts, makeTeam, mockTeams, unshareableAccounts } from './teams.fixtures';
 
 const handlers = () =>
@@ -51,17 +52,15 @@ const notes = (email: string, document: string) => ({
   documents: { [document]: 3 },
 });
 
-const repo = (name: string) => ({
-  canonical_ref: `gh:rose-ai-labs/${name}`,
-  repo_name: name,
-  repo_url: `https://github.com/rose-ai-labs/${name}`,
-  owner: 'rose-ai-labs',
-  default_branch: 'main',
-  connected_rose_project_ref: null,
-  integration_id: `int-gh-${name}`,
-  source: 'connect',
-  connected_at: '2026-11-01T00:00:00Z',
-});
+/** A GitHub repository in Integrations › GitHub Repositories (one project per repo). */
+const repo = (name: string) =>
+  makeProject({
+    id: `p-${name}`,
+    name,
+    repoUrl: `https://github.com/rose-ai-labs/${name}`,
+    isFolder: false,
+    isRepository: true,
+  });
 
 const cli = (id: string, name: string) => ({
   id,
@@ -84,8 +83,8 @@ const mcpServer = (id: string, name: string, url: string) => ({
 
 /**
  * Every shareable provider connected. Each multi-account row also has a sibling the
- * backend does not list (second Claude account, docs repo, GitHub CLI, internal MCP server): it
- * gets no caption.
+ * backend does not list (second Claude account, docs repository, GitHub CLI, internal MCP server):
+ * it gets no caption.
  */
 function serveProviders() {
   serveList(() =>
@@ -96,6 +95,7 @@ function serveProviders() {
       one('fireflies', { state: 'synced' }),
     ),
   );
+  mockProjectsApi([repo('rose'), repo('docs')], {});
   const second = { id: 'item-uuid-2', plaidItemId: 'plaid_item_2', institutionId: 'ins_2' };
   server.use(
     http.get(`${API_BASE}/integrations/plaid/items`, () =>
@@ -113,9 +113,6 @@ function serveProviders() {
                 computeAccount('acct-claude-2', 'second@example.test'),
               ],
       }),
-    ),
-    http.get(`${API_BASE}/integrations/github/repos`, () =>
-      HttpResponse.json({ repos: [repo('rose'), repo('docs')] }),
     ),
     http.get(`${API_BASE}/integrations/cli`, () =>
       HttpResponse.json({ integrations: [cli('cli-yc', 'YC CLI'), cli('cli-gh', 'GitHub CLI')] }),
@@ -232,9 +229,9 @@ const CASES: Case[] = [
     label: 'gh:rose-ai-labs/rose',
     selector: 'int-gh-rose',
     effect: "Teammates' code agents can use this repo.",
-    desktop: region('GitHub Repos'),
-    stock: region('GitHub Repos'),
-    sibling: { name: 'rose-ai-labs/docs', caption: null },
+    desktop: region('GitHub Repositories'),
+    stock: region('GitHub Repositories'),
+    sibling: { name: 'docs', caption: null },
   },
   {
     row: 'CLI',

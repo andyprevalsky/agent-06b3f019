@@ -1,5 +1,6 @@
 /** Indexed owner-scoped lookups for agent project/folder placement. */
 import { prisma } from '../../providers/database';
+import { findSharedProjects } from '../../providers/projects/sharedProjects';
 
 export async function findOwnedProjectIds(projectIds: string[], userId: string): Promise<string[]> {
   if (projectIds.length === 0) return [];
@@ -8,6 +9,14 @@ export async function findOwnedProjectIds(projectIds: string[], userId: string):
     select: { id: true },
   });
   return rows.map((row) => row.id);
+}
+
+/** Of `projectIds`, those a team validly shares with `userId` (projects/sharedProjects.ts). */
+export async function findSharedProjectIds(
+  projectIds: string[],
+  userId: string
+): Promise<string[]> {
+  return (await findSharedProjects(userId, projectIds)).map((project) => project.id);
 }
 
 export async function findOwnedFolders(folderIds: string[], userId: string) {
