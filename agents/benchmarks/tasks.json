@@ -4776,12 +4776,6 @@
   },
   {
     "name": "browser-auth-account-locked",
-    "quarantine": {
-      "since": "2026-11-11",
-      "repair": "https://boxes.dev/thread/thr_c71bb796ab6e4c7aa1f6543fae520280",
-      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2.",
-      "evidence": ".context/deploy-session/round23-flaky-account-locked/REPORT.md (Tilion closed CDP 1012/410 shutdown mid-run; rerun PASS)"
-    },
     "title": "Hosted Sign-In: Locked Account",
     "description": "The saved login's account is locked; the browser agent must stop trying and ask the user for sign-in help.",
     "prompt": "Tell me my member number for {auth_test_site_url}",
