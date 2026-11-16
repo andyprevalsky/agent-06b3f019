@@ -79,6 +79,32 @@ function provesAncestor(ancestor: string, descendant: string, remote: boolean): 
     ? 'github compare'
     : null;
 }
+// The commit of the controller this process spawns (its own checkout); null when
+// unknown, which never defers.
+const controllerCommit = (() => {
+  const git = spawnSync('git', ['-C', ancestryRepository, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 30_000,
+  });
+  const sha = git.status === 0 ? git.stdout.trim() : '';
+  return SHA.test(sha) ? sha : null;
+})();
+const newerProofs = new Map<string, boolean>();
+/** Proven: `headSource` is a strictly newer release than this checkout's controller. */
+async function newerThanController(jobId: string, headJobId: string, headSource: string) {
+  if (!controllerCommit || headSource === controllerCommit) return false;
+  // This checkout contains the head (a resume from main, or a FIFO predecessor): run it.
+  if (provesAncestor(headSource, controllerCommit, false)) return false;
+  // Durable proof, no network: our own release was superseded into this head.
+  const { requested, resolved } = await resolveWorkerDeployment(jobId);
+  if (resolved.jobId === headJobId && requested.identity.sourceCommit === controllerCommit)
+    return true;
+  // A proof never expires; remember it so a deferring run asks GitHub once.
+  if (!newerProofs.has(headSource))
+    newerProofs.set(headSource, provesAncestor(controllerCommit, headSource, true) !== null);
+  return newerProofs.get(headSource) === true;
+}
 const MAX_ANCESTRY_CANDIDATES = 16;
 /** Record which queued jobs and live release our checkout proves containment for (best effort). */
 async function recordOwnAncestry(jobId: string): Promise<void> {
@@ -228,6 +254,7 @@ async function runQueue(jobId: string): Promise<void> {
   process.once('SIGTERM', interrupt);
   process.once('SIGINT', interrupt);
   const coalesce = !options.includes('--allow-abort');
+  let deferred = false;
   if (coalesce) await recordOwnAncestry(jobId);
   // A SUPERSEDED job is carried by its descendant: wait for (and help run) that cutover.
   while ((await resolveWorkerDeployment(jobId)).resolved.stage !== 'SUCCEEDED') {
@@ -245,6 +272,8 @@ async function runQueue(jobId: string): Promise<void> {
         `Requested deployment is ABORTED${typeof why === 'string' ? `: ${why}` : ''}`
       );
     }
+    if (deferred) await sleep(5000);
+    deferred = false;
     let lease;
     try {
       lease = await acquireWorkflowDeploymentLease();
@@ -296,6 +325,24 @@ async function runQueue(jobId: string): Promise<void> {
           });
           return;
         }
+      }
+      // The child is this checkout's controller. A head from a strictly newer release
+      // (2026-11-16: run 43791105681 at 224a7c8c20 ran coalesced job c2b6101f of
+      // c678865ab9 with its older controller, so #2147's fix never ran) belongs to a
+      // controller that contains it: that release's own run, which is waiting on this
+      // lease, or a resume/recovery from a newer checkout. Unprovable pairs keep FIFO.
+      if (await newerThanController(jobId, head.jobId, head.identity.sourceCommit)) {
+        emit({
+          waiting: true,
+          requestedJobId: jobId,
+          predecessorJobId: head.jobId,
+          reason: 'NEWER_RELEASE_CONTROLLER',
+          headSourceCommit: head.identity.sourceCommit,
+          controllerSourceCommit: controllerCommit,
+        });
+        if (options.includes('--if-idle')) return;
+        deferred = true;
+        continue;
       }
       emit({
         requestedJobId: jobId,
