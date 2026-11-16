@@ -832,6 +832,25 @@ class PrebackendExitForensicArchive(unittest.TestCase):
         self.assertNotEqual(built.returncode, 0)
         self.assertFalse((self.run / "_forensic/manifest.json").exists())
 
+    def test_failed_build_partial_is_preserved_and_does_not_block_the_retry(self) -> None:
+        self.recovered_owner()
+        native_stop = (self.out / "guest-native-stop.json").read_bytes()
+        (self.out / "guest-native-stop.json").unlink()
+        self.assertNotEqual(self.build().returncode, 0)
+        partial = (self.run / "_forensic/originals.tar.gz").read_bytes()
+        self.assertFalse((self.run / "_forensic/manifest.json").exists())
+        write(self.out / "guest-native-stop.json", native_stop)
+        built = self.build()
+        self.assertEqual(built.returncode, 0, built.stderr)
+        kept = self.run / f"_forensic.partial-{hashlib.sha256(partial).hexdigest()[:16]}"
+        self.assertEqual((kept / "originals.tar.gz").read_bytes(), partial)
+        self.assertEqual(self.verify()["proof_credit"], 0)
+        # A published packet is never moved aside by a plain build.
+        built = self.build()
+        self.assertNotEqual(built.returncode, 0)
+        self.assertIn("use --rebuild-existing", built.stderr)
+        self.assertTrue((self.run / "_forensic/manifest.json").is_file())
+
     def test_pre_backend_phase_cannot_relax_a_row_with_service_files(self) -> None:
         self.recovered_owner()
         self.assertEqual(self.build().returncode, 0)
