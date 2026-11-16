@@ -1,0 +1,29 @@
+{
+  "refs_count": 73,
+  "exact_tips_matched": true,
+  "all_three_archives_reverified": true,
+  "proofs": [
+    {
+      "log": "inherited-refs-verification.log",
+      "result": {
+        "authenticated_original_files": 1,
+        "key": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm"
+      }
+    },
+    {
+      "log": "inherited-stash-verification.log",
+      "result": {
+        "authenticated_original_files": 58535,
+        "key": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm"
+      }
+    },
+    {
+      "log": "inherited-other-ref-verification.log",
+      "result": {
+        "name": "pr1682-a52c-local-refs-20261112",
+        "verified": true,
+        "sha256": "33e3372a68b20dd1938d3b96fe60abc3679d3316288846c896b6ca775313364c"
+      }
+    }
+  ]
+}

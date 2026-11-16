@@ -1,0 +1,42 @@
+{
+  "schema": "PR2406-CLOSEOUT-INVENTORY-DRAFT-V1",
+  "status": "NOT_READY",
+  "snapshot_utc": "2026-11-16T19:41:05.457692+00:00",
+  "pr": 2406,
+  "merged_sha": "3128d97a94d247a5da95028745727caa6138d0aa",
+  "reviewed_head": "52ab8b1c6ee46eff2312d4f133ef80879d76c5fe",
+  "branch": "fix/agentcard-purchase-consumed-lifecycle",
+  "parent_thread": "ph753gc8dcsya1w981xkm6ed9d8jajvr",
+  "root_coordinator_thread": "ph77wz9z4tssgkvkgzehv4kzax8jbkg9",
+  "refs_observed": 603,
+  "local_only_refs": 73,
+  "prior_exact_tip_matches": 73,
+  "prior_remote_archives_reverified": true,
+  "ignored_top_level_entries": 83,
+  "live_processes_at_snapshot": [
+    {
+      "pid": 3877569,
+      "role": "parent production shell"
+    },
+    {
+      "pid": 3878300,
+      "role": "parent child python process"
+    },
+    {
+      "pid": 3952856,
+      "role": "parent descendant python process"
+    }
+  ],
+  "claude_process_scan": "No executable/comm matching Claude observed in /proc scan; no claim that managed idle harness history is preserved. Recheck before any retirement.",
+  "final_archive": "Verified 34297 selected regular files; see final-archive-verification.json",
+  "source_changes": "none; records remain uncommitted",
+  "protected": "Freedom and instructions retained; no deletion, kill, teardown or payment test authorized",
+  "checker_open_items": 2,
+  "checker_processes": [],
+  "archive_verification_record": "inherited-ref-verification.json",
+  "final_archive_sha256": "3b0c3d8eda61bcb61c4072797dc0b5dd19a862f8319d31a61c42bc84f1b768f8",
+  "production": "parent terminal PASS; finish retry PASS; original finish failure retained",
+  "remaining_ignored_without_disposition": [
+    ".devbox/"
+  ]
+}

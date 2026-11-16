@@ -1,0 +1,24 @@
+{
+  "status": "VERIFIED",
+  "verified_utc": "2026-11-16T19:56:26.864503+00:00",
+  "archive_key": "devbox-closeout-private/pr2406/20261116T1953Z-terminal-evidence-v1.tar.gz.aesgcm",
+  "ciphertext_sha256": "3b0c3d8eda61bcb61c4072797dc0b5dd19a862f8319d31a61c42bc84f1b768f8",
+  "full_authenticated_readback": true,
+  "isolated_restore_completed": true,
+  "selected_files": 34297,
+  "archive_files": 34297,
+  "selected_members_exact_match": true,
+  "independent_source_hashes_match_archive": true,
+  "source_metadata_changes_after_hash": [],
+  "isolated_restore_helper_validated_all_member_hashes": true,
+  "symlink_coverage": [
+    {
+      "path": ".context/deploy-cloud/659233082b701e32535352da96c39c81a9afa0368144e531a2dda1086e2f6283/campaigns/deploy-659233082b701e32535352da96c39c81a9afa0368144e531a2dda1086e2f6283/shared-inventory/inventory/current",
+      "literal_target": ".generation-hwl0ch2j",
+      "regular_target_files": 311,
+      "all_target_files_in_archive": true
+    }
+  ],
+  "secret_exclusion": ".context/pr1634-archive-recovery.env retained; existing managed delivery per parent; no key value archived",
+  "scope": "terminal repository evidence only; excludes closeout self-output and broader home/system state"
+}
