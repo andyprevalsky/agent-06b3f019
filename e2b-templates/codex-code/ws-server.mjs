@@ -1554,8 +1554,8 @@ class CodexAppServer {
       if (this.handoffSchema && this.goalStatus === "active") {
         this.handoffTurnId = p.turn.id;
         this.handoffText = null;
-        // A goal continuation belongs to the same task. Keep its last result
-        // until another valid final replaces it or a new task starts.
+        // Keep the prior result through completed commentary-only turns.
+        // Failed/interrupted turns and unusable new finals invalidate it below.
       }
       this.turnStartedAt = new Date().toISOString();
       this.emit({
@@ -1568,6 +1568,9 @@ class CodexAppServer {
       this.endedTurnIds.add(p.turn.id);
       if (this.activeTurnId === p.turn.id) this.activeTurnId = null;
       const outcome = p.turn.status;
+      if (p.turn.id === this.handoffTurnId && outcome !== "completed") {
+        this.handoff.reset?.();
+      }
       if (
         outcome === "failed" &&
         this.recoverFailedTurn?.(p.turn, p.turn.error)
@@ -1598,6 +1601,10 @@ class CodexAppServer {
               error: error.message,
             });
           }
+        } else if (outcome === "completed" && this.handoffText !== null) {
+          // A new final supersedes the old result even when it is unusable.
+          // Do not silently return a previous success after invalid output.
+          this.handoff.reset?.();
         }
       }
       this.emit({
@@ -1668,7 +1675,11 @@ class CodexAppServer {
         partial: !completed,
       };
       if (item.type === "agentMessage" && completed) {
-        if (p.turnId === this.handoffTurnId) this.handoffText = item.text || "";
+        if (
+          p.turnId === this.handoffTurnId &&
+          (item.phase === "final_answer" || item.phase == null)
+        )
+          this.handoffText = item.text || "";
         this.emit({ ...base, type: "agent_message", text: item.text || "" });
       } else if (item.type === "commandExecution")
         this.emit({

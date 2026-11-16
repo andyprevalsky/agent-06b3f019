@@ -791,7 +791,9 @@ def test_native_handoff_preserves_single_command_task():
     assert HANDOFF_END_CONDITION in task
     with tempfile.TemporaryDirectory(prefix="native-handoff-reader-") as directory:
         receipts_path = Path(directory) / "receipts.json"
-        env = {**os.environ, "ROSE_HANDOFF_TEST_TASK": task, "ROSE_HANDOFF_RECEIPTS": str(receipts_path)}
+        failure_receipts_path = Path(directory) / "failure-receipts.json"
+        env = {**os.environ, "ROSE_HANDOFF_TEST_TASK": task, "ROSE_HANDOFF_RECEIPTS": str(receipts_path),
+               "ROSE_HANDOFF_FAILURE_RECEIPTS": str(failure_receipts_path)}
         result = subprocess.run(
             ["node", "--test", "--test-name-pattern=native handoff", "e2b-templates/codex-code/app-server.test.mjs"],
             cwd=Path(__file__).resolve().parents[3],
@@ -811,6 +813,14 @@ def test_native_handoff_preserves_single_command_task():
             parsed, error = _read_handoff(receipt, schema)
             assert error is None and parsed["rose_handoff"]["status"] == status
         assert receipts[-1]["status"] == "missing"
+        failure_receipts = json.loads(failure_receipts_path.read_text())
+        assert len(failure_receipts) == 8
+        for entry in failure_receipts:
+            parsed, error = _read_handoff(entry["receipt"], schema)
+            if entry["expected"] == "retained":
+                assert error is None and parsed["value"] == "verified", entry
+            else:
+                assert parsed is None and error, entry
 
 
 def test_handoff_json_schema_carries_declared_field_descriptions():

@@ -102,8 +102,15 @@ Unsupported schemas and other transports retain their existing file protocol;
 this case does not claim to solve their restricted-action incompatibility.
 
 A new task clears stale previous-task results. Goal continuations retain the
-last valid result even when a subsequent continuation produces only commentary.
-Missing final text cannot become a null result. Goal state follows native
+last result only through successfully completed commentary-only continuations.
+Explicit commentary is excluded even when its text is JSON or schema-shaped.
+A failed/interrupted continuation clears the prior result before recovery; an
+unparseable new final also clears it. A parseable invalid final replaces the
+old value and the unchanged worker JSON Schema validator rejects it, rather
+than silently returning an earlier success. Missing final text cannot become
+a null result. Native strict output constrains final responses upstream; the
+worker validates the persisted handoff downstream. No duplicate validator is
+introduced into the sandbox adapter. Goal state follows native
 notifications; an acknowledgment cannot overwrite a newer completion. Existing
 backend respawn owns schema changes, so speculative steering/schema mutation
 was removed. The smoke waiter combines completion only with the current turn's
@@ -164,6 +171,21 @@ runs were terminated. The initial combined run had BLACKBOX_SMOKE unset and
 therefore did not execute Claude's real smoke; it is not live-Claude evidence.
 The helper is executed by the registered codex-code blackbox root, while native
 and owning Python regressions each map directly to their deploy lanes.
+
+A fresh adversarial review of candidate 1b7611ed found that JSON commentary
+could replace a prior valid result, and that unsuccessful continuations retained
+that result. Its NOT_GROUNDED verdict was honored. A new event/real-reader
+regression reproduced both on that candidate. The repair distinguishes native
+message phases and invalidates results on failed/interrupted or unusable-final
+outcomes. Eight continuation controls flow through the actual worker validator:
+JSON and schema-shaped commentary retain the valid result; failed/interrupted
+and unparseable finals return missing; null, wrong-shape and invalid-enum finals
+are rejected by the worker. Existing completed/blocked/failed/new-task controls
+remain. The complete local native suites pass57 assertions; the full owning
+worker suite passes190 checks, including all eight actual validator receipts.
+The full live Codex domain passed34/34, no skips, in102.365s on the bounded
+retention revision and terminated both owned sandboxes. Renewed grounding and
+deployment-wide verification remain required.
 
 The original paused root has never been resumed or changed. Open PR1636 must
 retain the capability-specific invariant if later merged.

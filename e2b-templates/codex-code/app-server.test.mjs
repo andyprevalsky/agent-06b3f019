@@ -1162,6 +1162,177 @@ test("native handoff survives a commentary-only goal continuation until close", 
   }
 });
 
+test("native handoff bounds result retention to completed commentary continuations", async (t) => {
+  require("tsx/cjs");
+  const {
+    readCodeAgentHandoff,
+  } = require("./src/providers/codeAgentHandoff.ts");
+  const result = {
+    value: "verified",
+    rose_handoff: {
+      status: "complete",
+      summary: "Recorded result",
+      branch: null,
+      commit: null,
+      pr_url: null,
+      merged: null,
+    },
+  };
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      value: { type: "string" },
+      rose_handoff: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          status: { type: "string", enum: ["complete", "blocked", "failed"] },
+          summary: { type: "string" },
+          branch: { type: ["string", "null"] },
+          commit: { type: ["string", "null"] },
+          pr_url: { type: ["string", "null"] },
+          merged: { type: ["boolean", "null"] },
+        },
+        required: Object.keys(result.rose_handoff),
+      },
+    },
+    required: Object.keys(result),
+  };
+  const cases = [
+    {
+      name: "JSON commentary",
+      phase: "commentary",
+      text: '{"note":"checking completion"}',
+      outcome: "completed",
+      expected: "retained",
+    },
+    {
+      name: "schema-shaped commentary",
+      phase: "commentary",
+      text: JSON.stringify({ ...result, value: "commentary" }),
+      outcome: "completed",
+      expected: "retained",
+    },
+    {
+      name: "failed continuation",
+      phase: "commentary",
+      text: "checking",
+      outcome: "failed",
+      expected: "missing",
+    },
+    {
+      name: "interrupted continuation",
+      phase: "commentary",
+      text: "checking",
+      outcome: "interrupted",
+      expected: "missing",
+    },
+    {
+      name: "invalid final JSON",
+      phase: "final_answer",
+      text: "not JSON",
+      outcome: "completed",
+      expected: "missing",
+    },
+    {
+      name: "null final",
+      phase: "final_answer",
+      text: "null",
+      outcome: "completed",
+      expected: "rejected",
+    },
+    {
+      name: "wrong-shape final",
+      phase: "final_answer",
+      text: '{"not_the_result":true}',
+      outcome: "completed",
+      expected: "rejected",
+    },
+    {
+      name: "invalid-enum final",
+      phase: "final_answer",
+      text: JSON.stringify({
+        ...result,
+        rose_handoff: { ...result.rose_handoff, status: "invented" },
+      }),
+      outcome: "completed",
+      expected: "rejected",
+    },
+  ];
+  const receipts = [];
+  for (const c of cases)
+    await t.test(c.name, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "native-result-retention-"));
+      const path = join(dir, "handoff.json");
+      const { native, child } = fixture({
+        handoffSchema: schema,
+        write: (text) => writeFileSync(path, text),
+        reset: () => rmSync(path, { force: true }),
+      });
+      const send = (method, params) =>
+        child.stdout.write(JSON.stringify({ method, params }) + "\n");
+      try {
+        await native.initialize(null, "Task");
+        send("item/completed", {
+          turnId: "turn-1",
+          item: {
+            type: "agentMessage",
+            id: "first",
+            phase: "final_answer",
+            text: JSON.stringify(result),
+          },
+        });
+        send("turn/completed", { turn: { id: "turn-1", status: "completed" } });
+        send("thread/goal/updated", { goal: { status: "active" } });
+        send("turn/started", { turn: { id: "next" } });
+        send("item/completed", {
+          turnId: "next",
+          item: {
+            type: "agentMessage",
+            id: "next-message",
+            phase: c.phase,
+            text: c.text,
+          },
+        });
+        send("turn/completed", { turn: { id: "next", status: c.outcome } });
+        await new Promise((resolve) => setImmediate(resolve));
+        const receipt = await readCodeAgentHandoff(
+          {
+            exists: async (p) => existsSync(p),
+            read: async (p) => readFileSync(p, "utf8"),
+            remove: async (p) => rmSync(p),
+          },
+          path,
+        );
+        receipts.push({ name: c.name, expected: c.expected, receipt });
+        if (c.expected === "retained")
+          assert.deepEqual(JSON.parse(receipt.content), result);
+        else if (c.expected === "missing")
+          assert.equal(
+            receipt.status,
+            "missing",
+            "an unsuccessful continuation must not return its prior success",
+          );
+        else {
+          assert.equal(receipt.status, "present");
+          assert.notDeepEqual(
+            JSON.parse(receipt.content),
+            result,
+            "an invalid new final must not fall back to the old result; the worker rejects it",
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  if (process.env.ROSE_HANDOFF_FAILURE_RECEIPTS)
+    writeFileSync(
+      process.env.ROSE_HANDOFF_FAILURE_RECEIPTS,
+      JSON.stringify(receipts),
+    );
+});
+
 test("native goal acknowledgments and rejected delivery preserve newer state", async () => {
   const task = `Task.\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n${JSON.stringify(HANDOFF_SCHEMA)}`;
   const f = fixture({ handoffSchema: HANDOFF_SCHEMA });
