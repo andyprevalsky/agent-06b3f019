@@ -85,11 +85,12 @@ only observes resources that already reached a terminal state under their
 original delete authority. No supported command yet captures each stopped
 original volume and then destroys the Machine and volume for an archived owner.
 The local `--recover-stale-owner`, original-volume capture and archive builder
-need the owner registry in this host's git common directory. Do not destroy
-these Machines or volumes with app-wide tools such as `cloudbench-reclaim-stopped.py`
-or `stop-all`: that discards the retained guest evidence. Record the stopped
-state, then leave the release to a reviewed archived-owner capture-and-retire
-command. Observed on admission `original600-1794798140032347224` (42 guests,
+need the owner registry in this host's git common directory.
+`cloudbench-reclaim-stopped.py` (user policy 2026-10-18) can destroy stopped task
+Machines and their volumes, but it selects app-wide and does not capture the
+retained guest evidence first. Before using it, the operator must accept that
+evidence loss and protect every unrelated stopped Machine, including other live
+admissions' guests. Observed on admission `original600-1794798140032347224` (42 guests,
 2026-11-16).
 
 ## Forensic current resource reconciliation after a deleted controller
