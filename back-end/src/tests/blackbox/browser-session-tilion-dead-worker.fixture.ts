@@ -147,7 +147,13 @@ async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promi
         json(res, 200, [{ code: 'us', name: 'United States', country: 'us' }]);
       } else if (req.method === 'POST' && path === '/v1/session') {
         const worker = state.plan.shift();
-        assert(worker !== undefined, 'more Tilion creates than the scenario planned');
+        if (worker === undefined) {
+          // Recorded, never thrown: a throw in this handler crashes the process before the
+          // scenarios' own failures are asserted and before cleanup runs.
+          state.unexpected.push('POST /v1/session beyond the scenario plan');
+          json(res, 500, { detail: 'fixture create beyond plan' });
+          return;
+        }
         const key = String(req.headers['idempotency-key'] ?? '');
         state.posts.push({ worker, key });
         if (worker === 'capacity') {
@@ -426,10 +432,11 @@ async function main() {
     await scenario('capacity-after-lost-reply-stays-latched', ['hang', ...rejected], false, 1);
     // Resume replacements have no outer retry: the adapter's own creates must reach a healthy worker.
     await resumeScenario();
-    assert.deepEqual(tilion.unexpected, [], 'Tilion calls outside the fixture contract');
-    assert.deepEqual(failures, [], 'dead Tilion worker must not end browser init');
-    console.log(
-      'PASS Tilion dead worker: second create, fresh worker retry, latched non-retryable creates, capacity retry, keyed replay, resume replacement'
+    // One assertion so a failure always prints both: scenario failures name the boundary.
+    assert.deepEqual(
+      { failures, unexpected: tilion.unexpected },
+      { failures: [], unexpected: [] },
+      'dead Tilion worker must not end browser init, and Tilion calls stay in the fixture contract'
     );
   } finally {
     await prisma.toolSideEffect.deleteMany({
@@ -449,6 +456,11 @@ async function main() {
     }
     globalThis.fetch = originalFetch;
   }
+  // A create that arrived during cleanup (after the assertion above) still fails the run.
+  assert.deepEqual(tilion.unexpected, [], 'Tilion calls outside the fixture contract');
+  console.log(
+    'PASS Tilion dead worker: second create, fresh worker retry, latched non-retryable creates, capacity retry, keyed replay, resume replacement'
+  );
 }
 
 // Exit explicitly: a failure before cleanup must not leave loopback servers holding the process.
