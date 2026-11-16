@@ -1,0 +1,29 @@
+{
+  "deployed_sha": "cc7a39b2846aa385320386bbb1374e74c989e6a4",
+  "format": "DEPLOY-DELETION-CHECK-V2",
+  "live_processes": [
+    {
+      "argv": "git rev-parse --abbrev-ref --symbolic-full-name @{upstream}",
+      "cwd": "/home/boxes/rose",
+      "pid": 3770398
+    }
+  ],
+  "manifest": "docs/handoffs/pr-2290-closeout/manifest.json",
+  "open_items": [
+    "live process 3770398 in this checkout: git rev-parse --abbrev-ref --symbolic-full-name @{upstream}"
+  ],
+  "pr": 2290,
+  "ready": false,
+  "worktrees": [
+    {
+      "branch": "refs/heads/records/pr2290-closeout",
+      "current": true,
+      "locked": false,
+      "needs_integration": false,
+      "path": "/home/boxes/rose",
+      "uncommitted": [],
+      "unpushed_commits": 0
+    }
+  ],
+  "qualification": "Native checker correctly blocked on a live git process; it exited naturally before inspection. No signal, waiver or harness edit. First NOT_READY retained; next scan verifies current quiescence."
+}
