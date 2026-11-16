@@ -55,8 +55,10 @@ recovered job dafd2e with 0 read-only retries.
 ## Solution
 
 `runReadOnlyTransactionWithRetry` restores the 10 s body timeout and 5 s maxWait and
-defaults to 3 attempts: 3 x (5 s + 10 s) + 0.25 + 0.5 s backoff is about 46 s, inside the
-60 s controller timeout. `SET TRANSACTION READ ONLY` and the Prisma-error-only retry
+defaults to 3 attempts: the configured waits, body timeouts and backoff total
+45.75 s (3 x (5 s + 10 s) + 0.25 + 0.5 s). That accounting is below the controller's
+60 s subprocess timeout, but is not a wall-clock guarantee: an in-flight query or
+advisory-lock wait can outlast Prisma's callback timeout. `SET TRANSACTION READ ONLY` and the Prisma-error-only retry
 classifier are unchanged, so the #2285 transient-connection case still retries. The
 regression test also asserts the transaction stays `transaction_read_only = on`.
 Not covered (follow-up): `assert-mutable` runs this assert and then a second

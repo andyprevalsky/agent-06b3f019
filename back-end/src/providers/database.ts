@@ -145,8 +145,11 @@ export async function retryOnTransientTransactionStart<T>(
  * failures, and are never retried. The body keeps runTransactionWithRetry's
  * 10 s budget: a 5 s budget timed out every attempt (P2028) of a healthy
  * ownership check during a slow-DB window (run 43822297504, one query 5987 ms).
- * Defaults keep this helper's worst case (3 x (5 s wait + 10 s body) + 0.75 s
- * backoff, about 46 s) inside the cutover controller's 60 s subprocess timeout.
+ * Default configured waits, body timeouts and backoff total 45.75 s
+ * (3 x (5 s + 10 s) + 0.25 s + 0.5 s). This is budget accounting, not a
+ * wall-clock guarantee: an in-flight query or advisory-lock wait can outlast
+ * Prisma's callback timeout. The cutover controller's 60 s subprocess timeout
+ * also covers other work; assert-mutable runs a second transaction.
  */
 export async function runReadOnlyTransactionWithRetry<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
