@@ -29572,8 +29572,14 @@ cloudbench_manifest_fingerprint() {{ printf '%s\\n' {python}; }}
 warm_deps_preflight || exit $?
 printf 'SELECTED=%s:%s:%s\\n' "$WARM_ID" "$VOL_ID" "$SNAP_ID"
 """
+    # FLY() is faked above; the validation intent only hashes the selected flyctl binary, so a
+    # private stub keeps this fixture independent of whether the host has flyctl on PATH.
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    (stub_bin / "flyctl").write_text("#!/bin/sh\necho 'fixture flyctl must not run' >&2\nexit 99\n")
+    (stub_bin / "flyctl").chmod(0o700)
     # Both empty-listing knobs drive the one provider counter used by the merged admission loop.
-    env = {"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path),
+    env = {"PATH": f"{stub_bin}{os.pathsep}{os.environ['PATH']}", "FIXTURE": str(tmp_path),
            "TRANSIENT_EMPTY": str(max(transient_empty, snapshot_empty_reads)),
            "TRANSIENT_FAIL": str(transient_fail)}
     if private:

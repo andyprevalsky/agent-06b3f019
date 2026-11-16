@@ -198,10 +198,12 @@ class ProviderCapacityRegistryTests(unittest.TestCase):
 
 
 class ProviderCapacityBrowserProviderTests(unittest.TestCase):
-    """The Tilion pilot (20 browsers, one shared account) binds Tilion fleets only."""
+    """The Tilion account (250 browsers, one shared account) binds Tilion fleets only."""
 
-    TILION_LINE = ("  - Tilion browser sessions: 20 concurrent browsers, pilot plan (TILION_API_KEY) → max 16 "
+    TILION_LINE = ("  - Tilion browser sessions: 250 concurrent browsers, pilot_roselabs (TILION_API_KEY) → max 200 "
                    "concurrent benches (peak 1 sessions per bench, assumed, not yet measured on Tilion)")
+    KERNEL_LINE = ("  - Kernel browser sessions: 150 concurrent sessions, Start-up plan (KERNEL_API_KEY) → max 135 "
+                   "concurrent benches (peak 0.884 sessions per bench, measured run600c)")
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="provider-capacity-browser-"))
@@ -225,42 +227,77 @@ class ProviderCapacityBrowserProviderTests(unittest.TestCase):
     def test_tilion_row_is_scoped_to_tilion_fleets(self) -> None:
         rows = {row["id"]: row for row in registry_value()["enforced"]}
         self.assertEqual(rows["tilion-browser-sessions"]["browser_provider"], "tilion")
-        self.assertEqual(rows["tilion-browser-sessions"]["limit"], 20)
+        self.assertEqual(rows["tilion-browser-sessions"]["limit"], 250)
         self.assertNotIn("browser_provider", rows["kernel-browser-sessions"])
-        self.assertEqual(expected_cap(registry_value(), "tilion")[0], 16)
+        # 250 * 0.8 = 200 Tilion benches; the unscoped Parallel row (70) still binds the fleet.
+        cap, caps = expected_cap(registry_value(), "tilion")
+        self.assertEqual((cap, caps["tilion-browser-sessions"]), (70, 200))
         for provider in ("kernel", "steel", "browser-use"):
             with self.subTest(provider):
                 self.assertEqual(helper("cap", "--browser-provider", provider).stdout, "70\n")
                 fits = helper("check", "--benches", "70", "--browser-provider", provider)
                 self.assertEqual(fits.returncode, 0, fits.stderr)
                 self.assertNotIn("Tilion", fits.stderr)
-        self.assertEqual(helper("cap", "--browser-provider", "tilion").stdout, "16\n")
-        self.assertEqual(helper("check", "--benches", "16", "--browser-provider", "tilion").returncode, 0)
-        over = helper("check", "--benches", "17", "--browser-provider", "tilion")
+                # Even above the Tilion cap, a non-Tilion fleet never lists the Tilion row.
+                wide = helper("check", "--benches", "201", "--browser-provider", provider)
+                self.assertEqual(wide.returncode, 78)
+                self.assertNotIn("Tilion", wide.stderr)
+        self.assertEqual(helper("cap", "--browser-provider", "tilion").stdout, "70\n")
+        self.assertEqual(helper("check", "--benches", "70", "--browser-provider", "tilion").returncode, 0)
+        # The Tilion row limits a Tilion fleet exactly above 200 concurrent benches.
+        at_cap = helper("check", "--benches", "200", "--browser-provider", "tilion")
+        self.assertEqual(at_cap.returncode, 78)
+        self.assertEqual([line for line in at_cap.stderr.splitlines() if line.startswith("  - ")],
+                         [PARALLEL_LINE, self.KERNEL_LINE])
+        over = helper("check", "--benches", "201", "--browser-provider", "tilion")
         self.assertEqual(over.returncode, 78)
-        self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")], [self.TILION_LINE])
-        self.assertIn("rerun with a lower concurrency (16 or fewer concurrent benches)", over.stderr)
+        self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")],
+                         [PARALLEL_LINE, self.KERNEL_LINE, self.TILION_LINE])
+        self.assertIn("rerun with a lower concurrency (70 or fewer concurrent benches)", over.stderr)
         table = json.loads(helper("cap", "--json", "--browser-provider", "tilion").stdout)
-        self.assertEqual((table["browser_provider"], table["max_concurrent_benches"]), ("tilion", 16))
+        self.assertEqual((table["browser_provider"], table["max_concurrent_benches"]), ("tilion", 70))
+        tilion_row = {row["id"]: row for row in table["enforced"]}["tilion-browser-sessions"]
+        self.assertEqual((tilion_row["limit"], tilion_row["max_concurrent_benches"]),
+                         ("250 concurrent browsers, pilot_roselabs", 200))
         kernel = json.loads(helper("cap", "--json").stdout)
         self.assertNotIn("tilion-browser-sessions", {row["id"] for row in kernel["enforced"]})
+        # Where Tilion is the only binding row, its 200-bench cap alone admits or refuses.
+        value = registry_value()
+        for row in value["enforced"]:
+            if row["id"] != "tilion-browser-sessions":
+                row["limit"] *= 100
+        wide = self.tmp / "tilion-binding.json"
+        wide.write_text(json.dumps(value))
+        self.assertEqual(helper("cap", "--browser-provider", "tilion", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(wide)).stdout,
+                         "200\n")
+        fits = helper("check", "--benches", "200", "--browser-provider", "tilion", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(wide))
+        self.assertEqual(fits.returncode, 0, fits.stderr)
+        over = helper("check", "--benches", "201", "--browser-provider", "tilion", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(wide))
+        self.assertEqual(over.returncode, 78)
+        self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")], [self.TILION_LINE])
+        self.assertIn("rerun with a lower concurrency (200 or fewer concurrent benches)", over.stderr)
 
     def test_provider_source_order_and_fail_closed_default(self) -> None:
+        def tilion_bound(result: subprocess.CompletedProcess[str]) -> bool:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            table = json.loads(result.stdout)
+            self.assertEqual(table["max_concurrent_benches"], 70)  # the unscoped Parallel row binds every fleet
+            return "tilion-browser-sessions" in {row["id"] for row in table["enforced"]}
+
         cases = [
-            ("env selects tilion", 16, {"CLOUDBENCH_BROWSER_PROVIDER": "tilion"}, 'BROWSER_PROVIDER="kernel"\n'),
-            ("backend env tilion", 16, {}, 'OTHER=1\nBROWSER_PROVIDER="tilion" # default\n'),
-            ("backend env kernel", 70, {}, "BROWSER_PROVIDER=kernel\n"),
-            ("backend env last wins", 16, {}, "BROWSER_PROVIDER=kernel\nBROWSER_PROVIDER='tilion'\n"),
-            ("no provider anywhere binds every row", 16, {}, "OTHER=1\n"),
-            ("unknown provider binds every row", 16, {}, "BROWSER_PROVIDER=browserbase\n"),
+            ("env selects tilion", True, {"CLOUDBENCH_BROWSER_PROVIDER": "tilion"}, 'BROWSER_PROVIDER="kernel"\n'),
+            ("backend env tilion", True, {}, 'OTHER=1\nBROWSER_PROVIDER="tilion" # default\n'),
+            ("backend env kernel", False, {}, "BROWSER_PROVIDER=kernel\n"),
+            ("backend env last wins", True, {}, "BROWSER_PROVIDER=kernel\nBROWSER_PROVIDER='tilion'\n"),
+            ("no provider anywhere binds every row", True, {}, "OTHER=1\n"),
+            ("unknown provider binds every row", True, {}, "BROWSER_PROVIDER=browserbase\n"),
         ]
-        for label, cap, env, backend_env in cases:
+        for label, bound, env, backend_env in cases:
             with self.subTest(label):
-                result = self.copied("cap", backend_env=backend_env, **env)
-                self.assertEqual((result.returncode, result.stdout), (0, f"{cap}\n"), result.stderr)
-        explicit = self.copied("cap", "--browser-provider", "kernel", backend_env="BROWSER_PROVIDER=tilion\n",
+                self.assertEqual(tilion_bound(self.copied("cap", "--json", backend_env=backend_env, **env)), bound)
+        explicit = self.copied("cap", "--json", "--browser-provider", "kernel", backend_env="BROWSER_PROVIDER=tilion\n",
                                CLOUDBENCH_BROWSER_PROVIDER="tilion")
-        self.assertEqual(explicit.stdout, "70\n")
+        self.assertFalse(tilion_bound(explicit))
         self.assertEqual(self.copied("cap", "--browser-provider", "browserbase").returncode, 2)
 
     def test_scoped_row_validation_fails_closed(self) -> None:
@@ -291,10 +328,10 @@ class ProviderCapacityBrowserProviderTests(unittest.TestCase):
         result = subprocess.run(
             ["bash", str(FLEET), "demo-fleet-alpha"], cwd=ROOT,
             env=clean_env(PATH=f"{fakebin}:{os.environ['PATH']}", TMPDIR=str(self.tmp),
-                          CLOUDBENCH_BROWSER_PROVIDER="tilion", CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS="17"),
+                          CLOUDBENCH_BROWSER_PROVIDER="tilion", CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS="201"),
             capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
-        self.assertIn("requested 17 concurrent benches, maximum 16.", result.stderr)
+        self.assertIn("requested 201 concurrent benches, maximum 70.", result.stderr)
         self.assertIn(self.TILION_LINE, result.stderr)
         self.assertFalse(calls.exists())
 

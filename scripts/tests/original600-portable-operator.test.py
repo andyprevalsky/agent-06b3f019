@@ -119,6 +119,10 @@ STOP: do not retry, split, or work around this limit. Halt and ask the user to e
   1. increase these provider rate limits (then record the new limits in scripts/cloudbench-provider-limits.json), or
   2. rerun with a lower concurrency (70 or fewer concurrent benches).
 """
+TILION_PROVIDER_LINE = ('  - Tilion browser sessions: 250 concurrent browsers, pilot_roselabs (TILION_API_KEY) → max 200 '
+                        'concurrent benches (peak 1 sessions per bench, assumed, not yet measured on Tilion)')
+# A Tilion fleet lists its own scoped row after the unscoped rows it shares.
+PROVIDER_REFUSAL_600_TILION = PROVIDER_REFUSAL_600.replace('\nSTOP:', f'\n{TILION_PROVIDER_LINE}\nSTOP:', 1)
 
 
 def wide_provider_limits():
@@ -2304,21 +2308,21 @@ class Portable(unittest.TestCase):
                 self.assertEqual(json.loads(result.stdout), dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=fx.args[3],
                                                                  copies=600, max_concurrent_benches=70, provider_calls=0))
                 self.assertNotIn('CHECKED_NOT_LAUNCHED', result.stdout)
-            # A Tilion backend env binds the 20-browser pilot (16 after the production reserve).
+            # A Tilion backend env also binds the 250-browser Tilion account (200 after the
+            # production reserve); the unscoped Parallel row still caps the fleet at 70.
             (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=tilion\nGITHUB_TOKEN=fixture_github\n')
             tilion = subprocess.run(fx.args, cwd='/', env=fx.env, capture_output=True, text=True, timeout=10)
             self.assertEqual(tilion.returncode, 78, tilion.stderr)
-            self.assertIn('maximum 16.', tilion.stderr)
-            self.assertIn('  - Tilion browser sessions: 20 concurrent browsers, pilot plan', tilion.stderr)
-            self.assertEqual(json.loads(tilion.stdout)['max_concurrent_benches'], 16)
+            self.assertEqual(tilion.stderr, PROVIDER_REFUSAL_600_TILION)
+            self.assertEqual(json.loads(tilion.stdout)['max_concurrent_benches'], 70)
             # No BROWSER_PROVIDER in the selected env binds every row (Tilion is the code
-            # default); an unrelated ambient provider must not drop the Tilion pilot.
+            # default); an unrelated ambient provider must not drop the Tilion row.
             (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nGITHUB_TOKEN=fixture_github\n')
             unset = subprocess.run(fx.args, cwd='/', env={**fx.env, 'CLOUDBENCH_BROWSER_PROVIDER': 'kernel'},
                                    capture_output=True, text=True, timeout=10)
             self.assertEqual(unset.returncode, 78, unset.stderr)
-            self.assertIn('maximum 16.', unset.stderr)
-            self.assertEqual(json.loads(unset.stdout)['max_concurrent_benches'], 16)
+            self.assertEqual(unset.stderr, PROVIDER_REFUSAL_600_TILION)
+            self.assertEqual(json.loads(unset.stdout)['max_concurrent_benches'], 70)
             (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=kernel\nGITHUB_TOKEN=fixture_github\n')
             # No Fly API read, no flyctl invocation (not even version), no GitHub read, no state.
             self.assertEqual(requests, [])
@@ -3720,7 +3724,7 @@ class RunBenchShardedRouting(unittest.TestCase):
             git_env = hermetic_git_env()
             (root/'back-end').mkdir()
             for env_file in ('agents/.env', 'back-end/.env'):  # untracked, as in a real checkout
-                # A Kernel fleet: an unset BROWSER_PROVIDER means the Tilion default and its 20-browser pilot cap.
+                # A Kernel fleet: an unset BROWSER_PROVIDER means the Tilion default and its 250-browser cap.
                 private(root/env_file, 'FIXTURE=1\nBROWSER_PROVIDER=kernel\n')
             (root/'.gitignore').write_text('.env\n.context/\n__pycache__/\n')
             subprocess.run(git[:3] + ['init', '-q'], check=True, env=git_env)
@@ -3874,6 +3878,37 @@ class RunBenchShardedRouting(unittest.TestCase):
             result, ops, fleets = fx.run(*names, '--check')
             self.assertEqual((result.returncode, ops, fleets), (2, [], []))
             self.assertIn('fit one controller', result.stderr)
+
+    def test_sharded_and_rolling_campaign_routes_discover_the_user_fly_cli(self):
+        # boxes.dev installs flyctl only at ~/.fly/bin. The rolling campaign's shared relay resolves it
+        # with shutil.which('flyctl'); without the wrapper's discovery it refused "selected Fly client
+        # missing", so app metadata was unavailable and every job was cancelled before allocation.
+        with self.checkout() as fx:
+            home = fx.root.parent/'home'
+            (home/'.fly/bin').mkdir(parents=True)
+            fly = home/'.fly/bin/flyctl'
+            fly.write_text('#!/bin/sh\nexit 99\n')
+            fly.chmod(0o700)
+            path = os.pathsep.join(entry for entry in fx.env.get('PATH', os.defpath).split(os.pathsep)
+                                   if entry and not os.access(os.path.join(entry, 'flyctl'), os.X_OK))
+            self.assertIsNone(shutil.which('flyctl', path=path))
+            seen = fx.root.parent/'flyctl-seen.jsonl'
+            fx.env.update(HOME=str(home), PATH=path, FLYCTL_SEEN=str(seen))
+
+            def recorder(route):
+                return ('import json,os,shutil,sys\nopen(os.environ["FLYCTL_SEEN"],"a").write('
+                        f'json.dumps([{route!r}, shutil.which("flyctl")])+"\\n")\n')
+            operator = Path(fx.env['RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST'])
+            operator.write_text(operator.read_text().replace('import json,os,sys\n', recorder('sharded'), 1))
+            result, ops, fleets = fx.run(*polar_names(40), '--check')
+            self.assertEqual((result.returncode, len(ops), fleets), (0, 1, []), result.stderr)
+            # The campaign route needs no clean checkout; its controller is replaced by a recorder.
+            (fx.root/'scripts/run-bench-campaign.py').write_text(recorder('campaign') + 'print("campaign recorded")\n')
+            result, ops, fleets = fx.run(*polar_names(2), '--concurrency', '2', '--timeout', '480')
+            self.assertEqual((result.returncode, ops, fleets), (0, [], []), result.stderr)
+            self.assertIn('campaign recorded', result.stdout)
+            observed = [json.loads(line) for line in seen.read_text().splitlines()]
+            self.assertEqual(observed, [['sharded', str(fly)], ['campaign', str(fly)]])
 
     def test_concurrency_below_the_copies_runs_one_batch_of_bounded_waves(self):
         # descend I3: 40 tasks x K3 at --concurrency 70 is one batch of task-aligned sharded
