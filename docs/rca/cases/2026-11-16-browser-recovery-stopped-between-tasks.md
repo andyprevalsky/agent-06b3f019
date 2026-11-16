@@ -111,7 +111,13 @@ preview's first invocation had a wrong inferred backend port and was interrupted
 it is not counted as repair proof. The corrected preview uses same-origin API
 proxying. The independent RCA reviewer accepted the causal fit and regression controls;
 a separate final semantic review found no blocking flaw and explicitly required
-five unchanged Playwright runs before stability credit. Full semantic and
+five unchanged Playwright runs before stability credit. All five recorded
+browser rounds then passed both the original case and transport-loss case with
+no retry. The native quarantine report showed `8/5`, ready to release (the
+explicit five-run proof is retained separately); the assigned marker is removed.
+Five further unchanged browser rounds with the marker absent passed both cases
+without retries. The fixed-source command has passed all 69 UI tests; its
+latency lane and immutable-source deployment gates are still running. Full semantic and
 deployment qualification remain pending.
 
 ## Human feedback
@@ -124,3 +130,18 @@ No questions or human-dependent implementation choices.
 
 A zero-active snapshot settles known tasks, but cannot establish completeness
 for a still-valid recovery window when successor notifications can be lost.
+
+
+### Qualification follow-up: browser ownership assertion
+
+The initial immutable Blacksmith frontend coverage run on `8a0a28cbef` failed
+`hooks-lib-browser-backfill.blackbox.ts`'s overlapping-start ownership case:
+expected 7 reads, received 12. The same file failed locally with that exact
+assertion (exit 1, other three cases passed). This is INTRODUCED by the repair's
+intentional retention of the valid browser lease: the old test asserted immediate
+stop after terminal recovery. The amendment preserves both recovered-terminal
+and single-reader assertions, explicitly asserts continued recovery within the
+lease, then checks that reads stop after the unchanged lease expires. The same
+four-case command passes (exit 0). No application code, semantic assertion or
+budget changed in this follow-up. Final load stability, full frontend coverage
+and immutable-source final gates remain required.

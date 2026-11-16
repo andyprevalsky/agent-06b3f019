@@ -31,7 +31,6 @@ import {
   injectSemanticSession,
   trackPageProbe,
 } from './helpers';
-import { quarantine } from '../src/tests/gate-progress/quarantine';
 
 const LIVE_VIEW_URL = 'https://example.com/semantic-browser-live-view';
 /** Per-wait budget for every chip-count step and the post-reload hydration gate. */
@@ -79,19 +78,6 @@ async function expectChipCount(page: Page, expected: number, step: string): Prom
 type ChipCountTest = (fixtures: { page: Page }) => Promise<void>;
 
 const chipCountTest = 'visible browser chips always equal active browser agents';
-/** FLAKY occurrence 764c43fc (PR #2259, NOT_INTRODUCED): still runs and reports, never blocks. */
-const quarantinedChipCount = (run: ChipCountTest): ChipCountTest =>
-  quarantine(
-    {
-      since: '2026-11-16',
-      repair: 'pending-handoff:764c43fceeb84b16abc375a8b14cc00f',
-      error: 'Error: page answered 32 probe(s); slowest 39ms',
-      evidence: '.context/deploy-pipeline/rca/764c43fceeb84b16abc375a8b14cc00f.json',
-    },
-    run,
-    { unit: `tests-e2e/browser-chip-count.spec.ts > browser-chip-count > ${chipCountTest}` },
-  );
-
 const chipCountRun: ChipCountTest = async ({ page }) => {
   const rec = attachRecorder(page);
   const agentId = await createAgent('Semantic test: browser chip count invariant (no real work).');
@@ -210,7 +196,7 @@ const chipCountRun: ChipCountTest = async ({ page }) => {
 
 test.describe('browser-chip-count', () => {
   // Playwright resolves fixtures from a destructured first parameter.
-  test(chipCountTest, async ({ page }) => quarantinedChipCount(chipCountRun)({ page }));
+  test(chipCountTest, async ({ page }) => chipCountRun({ page }));
 
   test('recovers a successor browser start whose realtime INSERT is lost', async ({ page }) => {
     let dropped = 0;
