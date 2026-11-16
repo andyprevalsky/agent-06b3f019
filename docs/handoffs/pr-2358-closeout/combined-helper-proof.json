@@ -1,0 +1,6 @@
+{
+  "feature_head": "3683b914ad93dbbad9e4cf1905131c85594d85c8",
+  "combined_readonly_helper_identical": true,
+  "compiled_helper_sha256": "d4244982bafa0317aeea5b3bf0328294d2a88aa77785a6a194319c25e6cff112",
+  "scope": "Compatibility evidence only; native gate receipts remain bound to their original source"
+}

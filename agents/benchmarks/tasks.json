@@ -952,7 +952,7 @@
     "name": "background-agent-message-smoke",
     "quarantine": {
       "since": "2026-11-16",
-      "repair": "pending-handoff:df8b8c8fdef1423187eec31d764ebd9e",
+      "repair": "https://boxes.dev/thread/ph726rz537t23hzq6ec6e0ye018jbmh6",
       "error": "Timeout after 183s (task timeout=180s) | Agent status: ACTIVE (expected COMPLETED)",
       "evidence": "PR #2358 deploy smoke agent 4bdfc1f6-0c74-4042-9931-d5010b657d48: 18 live rose-1-ultra LLM spans totalled 191 s (execute_loop iteration 8 call cancelled at 45 s by the task deadline); 0 Prisma errors; the PR's only changed path (runReadOnlyTransactionWithRetry) never executed. Rerun on the same source passed."
     },

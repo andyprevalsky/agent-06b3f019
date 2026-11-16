@@ -1,0 +1,39 @@
+{
+  "native_thread": "01a1e561-e9e8-7972-94ce-df42a96dc65d",
+  "observed_at": "2026-11-16T18:43:18.344308+00:00",
+  "latest_execution_context": {
+    "at": "2026-11-16T18:32:34.198Z",
+    "model": "gpt-6.1-sol",
+    "effort": "high"
+  },
+  "service_tier": "UNVERIFIED: absent from native context",
+  "native_token_observations": {
+    "first": {
+      "at": "2026-11-16T17:22:57.868Z",
+      "total_token_usage": {
+        "input_tokens": 19080,
+        "cached_input_tokens": 12288,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 258,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 19338
+      }
+    },
+    "latest": {
+      "at": "2026-11-16T18:42:32.434Z",
+      "total_token_usage": {
+        "input_tokens": 44621548,
+        "cached_input_tokens": 43797632,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 150469,
+        "reasoning_output_tokens": 77377,
+        "total_tokens": 44772017
+      }
+    },
+    "count": 179
+  },
+  "coverage": "Timestamped whole-successor native session counters; not combined with prior Claude owner, helper agents or billing. No 15-minute rate without a persisted comparable baseline.",
+  "cost": "UNMETERED: no billing receipt",
+  "original_owner_usage": "UNMETERED: not reconstructed",
+  "raw_transcript": "Private native file retained by managed provider; no transcript content published"
+}

@@ -1,0 +1,15 @@
+{
+  "composite_smoke_files": 2156,
+  "helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+  "independent_restore_hash_size_mode": true,
+  "late_outputs": "These public receipts and final guard are NOT claimed inside their own carriers; parent must preserve in records-only PR. Generated logs/staging/restores are derivable; no runtime private data created after final guard may be assumed covered.",
+  "moved_refs_requiring_parent_disposition": 4,
+  "native_full_readback": true,
+  "primary_data_files": 51047,
+  "process_checks_passed": true,
+  "qualified_inherited_refs": 19528,
+  "regular_files": 68414,
+  "scope": "bounded private preservation only; parent owns final checker/records PR and directory-level .context/.git disposition; private per-file mappings stay encrypted",
+  "separate_full_verify": true,
+  "source_before_after_equal": true
+}

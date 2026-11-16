@@ -1,0 +1,25 @@
+{
+  "failures": [
+    {
+      "id": "df8b8c8fdef1423187eec31d764ebd9e",
+      "description": "smoke/background-agent-message-smoke \u2014 original 183s/180s latency timeout; same-source automatic rerun passed",
+      "evidence": "/RCA (PR #2358, source 904f191ea6): the PR changes only runReadOnlyTransactionWithRetry (backend deployment-queue helper); the failing guest's backend.log/worker.log contain 0 occurrences of PrismaReadOnlyTx / SET TRANSACTION READ ONLY / assertWorkerDeploymentOwned and 0 Prisma P20xx errors, so the changed path never executed. First failing boundary: agent 4bdfc1f6-0c74-4042-9931-d5010b657d48 spent the 180 s task budget on 18 live rose-1-ultra LLM spans (191 s total, foundry route; e.g. verifier_execute 36.9 s, execute_loop 19.9/27.9 s); execute_loop iteration 8 call_llm_activity was cancelled at 45 s by the task deadline (asyncio.CancelledError). Rerun on the same source passed. Logs: .context/deploy-cloud/4f501199065c34cbf69fb9860eb384a19fd257ec591f3389dbfb0d07382f700f/runs/20261116-083517-824414/background-agent-message-smoke/remote-logs/runtime-evidence/logs/ Durable full original-cohort archive: private-preservation/pr2358/original-smoke-20261116T1729Z.tar.gz.gcm",
+      "native_result": "FLAKY",
+      "attribution": "NOT_INTRODUCED",
+      "repair_agent": "https://boxes.dev/thread/ph726rz537t23hzq6ec6e0ye018jbmh6",
+      "disposition": "delegated / waived"
+    },
+    {
+      "id": "coderabbit-final-prose-3683-usage-cap",
+      "description": "Code review of final prose increment was skipped; merged unreviewed",
+      "evidence": "Native usage-cap receipt: issue6911237698 updated2026-11-16T17:45:42Z names3683; check133490626880 neutral Review rate limited; organization spending cap; prior2074 runtime review findings dispositioned.",
+      "native_result": "SKIPPED usage-cap; neutral rate-limit check, not substantive review",
+      "attribution": "NOT_INTRODUCED",
+      "external_provider": {
+        "name": "CodeRabbit",
+        "reason": "credits exhausted"
+      },
+      "disposition": "external / waived"
+    }
+  ]
+}
