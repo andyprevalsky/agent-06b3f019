@@ -22,6 +22,19 @@ ATTEMPTS=3
 # times under the existing deadline; an attachment to any other Machine fails
 # closed at once, and a null that persists still fails without a receipt.
 SETTLE_READS=4
+# Fly restores a snapshot-forked Volume in the background: after the fleet's
+# storage gate saw it `created`, the exact GET here returned `restoring`
+# (attached_machine_id null) in descend batch 1 (campaign-20261106-095011-2029870
+# r001-j0020/r002-j0024), and two live 40 GB restores of vs_pRyp2eZ65NwhqMYJLogB
+# stayed `restoring` for 6.8 and 8.4 minutes before returning to `created`. Only
+# an explicit snapshot restore waits for that transition, bounded; `restoring`
+# on a fresh Volume and every other state still fail closed at once, and the
+# exact Volume identity is checked on every read.
+RESTORE_WAIT_SECONDS=900
+RESTORE_POLL_SECONDS=15
+
+def pause_restoring():
+    time.sleep(RESTORE_POLL_SECONDS)
 
 def pause(attempt):
     # Exponential backoff with jitter keeps a burst's retries from realigning.
@@ -72,7 +85,7 @@ def save(path,value):
 
 def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run,snapshot_restored=False):
     registry=Path(registry).absolute()
-    with bounded(60):
+    with bounded(60+(RESTORE_WAIT_SECONDS if snapshot_restored else 0)):
         need(registry.resolve(strict=True)==registry and registry.name==owner,'wrong registry')
         need(re.fullmatch('[0-9a-f]{32}',owner) and re.fullmatch('cloudbench-[A-Za-z0-9._-]+',name),'wrong owner/name')
         need(re.fullmatch('[0-9a-f]{8,32}',mid) and re.fullmatch('vol_[A-Za-z0-9_-]+',vid),'wrong resource ID')
@@ -94,12 +107,18 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run,snap
         if not directory.exists():directory.mkdir(mode=0o700)
         need(directory.resolve(strict=True)==directory and directory.is_dir(),'linked evidence directory')
         def inspect():
-            for settle in range(SETTLE_READS+1):
+            settle=restoring=0
+            while True:
                 config=retried(lambda:command(['machine','status',mid,'-a',app,'-d']))
                 mounts=config.get('mounts',[])
                 need(len(mounts)==1 and mounts[0].get('volume')==vid,'native mount changed')
                 value=retried(lambda:command(['volumes','show',vid,'-a',app,'--json']))
-                need(value.get('id')==vid and value.get('state')=='created','Volume identity/state changed')
+                need(value.get('id')==vid,'Volume identity/state changed')
+                if snapshot_restored and value.get('state')=='restoring':
+                    need(restoring<RESTORE_WAIT_SECONDS//RESTORE_POLL_SECONDS,
+                         'snapshot-restored Volume still restoring after '+str(RESTORE_WAIT_SECONDS)+'s')
+                    restoring+=1;pause_restoring();continue
+                need(value.get('state')=='created','Volume identity/state changed')
                 need(type(value.get('auto_backup_enabled')) is bool,'backup setting missing')
                 attached=value.get('attached_machine_id')
                 need(attached in (None,mid),'Volume attached to a different Machine')
@@ -108,8 +127,8 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run,snap
                 # attached_machine_id=null while the owned Machine runs with exactly
                 # this mount (checked above). Accept that only for an explicit restore.
                 if attached==mid or (snapshot_restored and attached is None):return value
-                if settle<SETTLE_READS:pause(min(settle,2))
-            raise ValueError('Volume not attached to the exact owned Machine')
+                if settle>=SETTLE_READS:raise ValueError('Volume not attached to the exact owned Machine')
+                pause(min(settle,2));settle+=1
         before=inspect()
         if before['auto_backup_enabled'] is False:
             if not (directory/'verified.json').exists():save(directory/'verified.json',dict(owner=owner,app=app,run_id=run,machine=mid,volume=vid,auto_backup_enabled=False,native=before))
@@ -143,7 +162,7 @@ def main():
     parser.add_argument('--protected',action='append',default=[])
     parser.add_argument('--snapshot-restored',action='store_true')
     args=parser.parse_args()
-    with bounded(60):
+    with bounded(60+(RESTORE_WAIT_SECONDS if args.snapshot_restored else 0)):
         helper=runpy.run_path(str(Path(__file__).resolve().with_name('cloudbench-original-volume-capture.py')))
         def command(argv):
             # Native config JSON can contain secrets: retain lossless diagnostics

@@ -8,6 +8,7 @@ import { isModelMedia, privacyState, rememberPrivate, resumedPrivacy } from './p
 export async function claimPrivacy(
   tx: Transaction,
   device: IPhoneDevice,
+  leaseId: string,
   input: PhoneCommand,
   actor: PhoneActor,
   observation: boolean,
@@ -21,7 +22,7 @@ export async function claimPrivacy(
   )
     return new IPhoneError(409, 'Phone private input is active');
   if (actor === 'user' && input.operation === 'input.text') {
-    const encrypted = rememberPrivate(device.privateInputEncrypted, input.args.s);
+    const encrypted = rememberPrivate(device.privateInputEncrypted, input.args.s, leaseId);
     await tx.iPhoneDevice.update({
       where: { id: device.id },
       data: { privateInputEncrypted: encrypted },

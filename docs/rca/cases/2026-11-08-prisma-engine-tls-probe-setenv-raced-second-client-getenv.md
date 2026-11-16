@@ -23,6 +23,8 @@ tags:
 sources:
   - PR #1783 deploy gate seed-memory-ratchet at ef32d1e0a8 (Blacksmith blacksmith-4vcpu-ubuntu-2404), run 2 of 5 rc 139
   - memory:seed-local-intermittent-segfault (2026-10-09 devbox ratchet run 5; 2026-11-07 cloud guest --compute-tokens-only during the PR #1757 deploy)
+  - PR #2005
+  - commit 00bdc7bd13e3c2989beac90a1dc789a6d64586d1 (PR #2005 merge, shipped)
 repro: bash back-end/scripts/run-blackbox-tests.sh seed-local-user (testLocalClientOpensAfterEngineTlsProbe; fails on the pre-fix seed-local.ts); native repro: 4x250 `/usr/bin/time -v npx tsx scripts/seed-local.ts --compute-tokens-only` with ulimit -c unlimited produced a core at run 68 of lane 2
 status: fixed
 ---

@@ -1,6 +1,8 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
+import { renderWithProviders } from './test-wrapper';
+
 import ComputeSection from '@/features/integrations/components/ComputeSection';
 import { ComputeConnectModal } from '@/features/integrations/components/ComputeAccountsSection';
 import type { useComputeAccounts as UseComputeAccounts } from '@/features/integrations/hooks/useComputeAccounts';
@@ -36,7 +38,8 @@ vi.mock('@/features/integrations/hooks/useComputeAccounts', () => ({
 
 describe('compute connection UI', () => {
   it('wraps ChatGPT account chips onto their own lane', () => {
-    render(
+    // Account chips read the shared team-sharing cache, so the row needs the app's providers.
+    renderWithProviders(
       <ComputeSection
         expanded={true}
         onToggle={() => {}}

@@ -163,12 +163,18 @@ export function createAuthAssistanceRouter(
       try {
         const userId = requireUserId(req, res);
         if (userId === null) return;
+        const action: unknown = req.body?.action;
+        if (action !== undefined && action !== 'resend_code') {
+          res.status(400).json({ error: 'Unsupported auth assistance action' });
+          return;
+        }
         res.json(
           await completeAuthAssistanceRequest(
             req.params.id,
             userId,
             req.body?.userMessage ?? req.body?.user_message,
-            options.completionDependencies
+            options.completionDependencies,
+            action
           )
         );
       } catch (error) {

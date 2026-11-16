@@ -141,6 +141,15 @@ class LostEvidenceRelease(unittest.TestCase):
         receipt, _ = self.release({})
         self.assertEqual({"absent"}, {r["state"] for r in receipt["observations"]})
 
+    def test_detach_observed_companion_names_the_same_volume(self):
+        # PR #1865 (2026-11-14): a disposable volume delete also writes
+        # disposable-delete-volume-<vol>.detach-observed.json; it must not be parsed as a second id.
+        (self.registry / f"disposable-delete-volume-{VOLUME}.json").write_text("{}")
+        (self.registry / f"disposable-delete-volume-{VOLUME}.detach-observed.json").write_text("{}")
+        receipt, client = self.release({MACHINE: {"state": "destroyed"}, VOLUME: {"state": "destroyed"}})
+        self.assertEqual("LOST", receipt["runtime_evidence"])
+        self.assertEqual([("GET", f"/volumes/{VOLUME}")], [c for c in client.calls if c[1].startswith("/volumes/")])
+
     def test_live_or_attached_resources_refuse(self):
         self.refused({MACHINE: {"state": "stopped"}, VOLUME: {"state": "pending_destroy"}}, "not destroyed")
         self.refused({MACHINE: {"state": "started"}, VOLUME: {"state": "destroyed"}}, "not destroyed")

@@ -568,6 +568,7 @@ else
 fi
 
 export TEST_BASE_URL="http://localhost:$PORT"
+export_blackbox_phone_upstream_env "$PORT"
 BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT_DIR/backend.log}}"
 
 # Deterministic SMS smoke fixtures for the isolated backend. These are only

@@ -18,6 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 
+# Deliberate truncated-body transport fixture: outlive urllib's six-second read
+# budget without changing that production deadline or using a delay as synchronization.
+STALLED_BODY_TRANSFER_SECONDS = 6.5
+
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "scripts/run-bench-cloud").read_text()
 MATCH = re.search(r"(?ms)^cloudbench_collect_runtime_evidence\(\).*?^}\n", SOURCE)
@@ -41,6 +45,8 @@ def exercise(
     socket_fault: str | None = None,
     wmh_log: bool = False,
     guest_diagnostics: bool = False,
+    file_fault: str | None = None,
+    manifest_fault: str | None = None,
     transfer_fault: str | None = None,
     driver_log_stall: bool = False,
 ):
@@ -58,6 +64,11 @@ def exercise(
         files["wmh-serve-log.txt"] = b"wmh_step_committed prediction_ms=10000\n"
     if guest_diagnostics:
         files["guest-diagnostics.jsonl"] = b'{"backend_pool_limit": 30, "pg": {"by_state": {"active": 30}}}\n'
+    if file_fault:
+        # A multi-chunk sealed run record, so a fault lands mid-stream after
+        # the collector has already written and hashed earlier 64 KiB reads.
+        files["run.json"] = b'{"run_id":"test-run-1","pad":"' + b"x" * 300_000 + b'"}\n'
+    file_calls: dict[str, int] = {}
     manifest = {
         "version": 1,
         "run_token": token,
@@ -169,10 +180,49 @@ def exercise(
                     self.send_error(409, "exact runtime is not sealed")
                     return
                 data = json.dumps(manifest).encode()
+                if manifest_fault == "truncate" and manifest_calls == seal_after + 1:
+                    # The first sealed manifest closes before Content-Length (a relay tunnel
+                    # dropping mid-body); read(amt) returns the short body without IncompleteRead.
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data[: len(data) // 2])
+                    self.wfile.flush()
+                    self.close_connection = True
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    return
             else:
                 name = parse_qs(parts.query)["file"][0]
                 data = files[name]
+                file_calls[name] = file_calls.get(name, 0) + 1
                 time.sleep(file_delay)
+                if file_fault and name == "run.json":
+                    if file_fault == "corrupt":
+                        # Same length, different bytes: only the sealed hash
+                        # can reject it.
+                        data = data[:-4] + b'y"}\n'
+                        assert len(data) == len(files[name]) and data != files[name]
+                    elif file_fault == "stall" and file_calls[name] == 1 or file_fault == "truncate":
+                        # Send the exact headers and a prefix, then stop: the
+                        # stall outlives urllib's 6 s per-read budget (the
+                        # 18:45:22-29 relay tunnel freeze); truncation closes
+                        # the stream before Content-Length is satisfied.
+                        self.send_response(200)
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data[:100_000])
+                        self.wfile.flush()
+                        if file_fault == "stall":
+                            time.sleep(STALLED_BODY_TRANSFER_SECONDS)
+                        self.close_connection = True
+                        try:
+                            self.connection.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                        return
                 if transfer_fault and name == "logs/backend.log":
                     transfer_calls += 1
                     if transfer_fault == "corrupt":
@@ -266,6 +316,19 @@ assert raised, "transport fault was never exercised"
             )
             elapsed = time.monotonic() - started
             release_stall.set()
+            if file_fault in ("corrupt", "truncate"):
+                # Integrity failures are never retried; transport truncation is
+                # retried only up to the bounded per-file attempt count.
+                assert result.returncode != 0, result.stderr[-600:]
+                if file_fault == "corrupt":
+                    assert "runtime evidence hash mismatch" in result.stderr, result.stderr[-600:]
+                    assert file_calls["run.json"] == 1, file_calls
+                else:
+                    assert "runtime evidence response ended early" in result.stderr, result.stderr[-600:]
+                    assert file_calls["run.json"] == 3, file_calls
+                assert not (destination / "runtime-evidence").exists()
+                assert (output / "runtime-evidence.pending").exists()
+                return
             if forbidden_manifest:
                 assert result.returncode != 0 and "HTTP Error 403" in result.stderr
                 assert manifest_calls == 1
@@ -306,6 +369,12 @@ assert raised, "transport fault was never exercised"
                 for name, data in files.items():
                     assert (capture / name).read_bytes() == data
                 assert manifest_calls >= seal_after + 2
+                if file_fault == "stall":
+                    # One stalled read restarts that exact file from byte 0 on
+                    # a new request; the published copy is the verified retry.
+                    assert file_calls["run.json"] == 2, file_calls
+                    assert "sealed runtime evidence read run.json attempt 1/3" in result.stderr, result.stderr[-600:]
+                    assert not list(destination.glob(".runtime-evidence-*")), list(destination.iterdir())
                 if driver_log_stall:
                     assert log_stalls == 1
                     assert (destination / "cloudbench-driver.log").read_bytes() == driver_log
@@ -614,6 +683,28 @@ def exercise_read_transition(case: str):
                 recovery=recovery,
                 socket_fault=case.removeprefix("socket-"),
             )
+    elif case == "manifest-truncate":
+        # CodeRabbit PR #1865: a short final-manifest body is a retried TruncatedTransfer in both collectors.
+        for recovery in (False, True):
+            exercise(seal_after=0, deadline=30, file_delay=0, recovery=recovery, manifest_fault="truncate")
+    elif case in ("file-stall", "file-truncate", "file-corrupt"):
+        # Run the inline controller collector and the recovery helper together:
+        # the stall case waits out a real 6 s socket read budget in each.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for future in [
+                pool.submit(
+                    exercise,
+                    seal_after=0,
+                    deadline=30,
+                    file_delay=0,
+                    recovery=recovery,
+                    file_fault=case.removeprefix("file-"),
+                )
+                for recovery in (False, True)
+            ]:
+                future.result()
     elif case in ("transfer-stall", "transfer-persistent-reset", "transfer-corrupt"):
         # A sealed file read that stalls past the socket timeout is retried
         # from byte zero; a persistent transport failure stays bounded and a
@@ -679,6 +770,10 @@ READ_TRANSITIONS = (
     "manifest-timeout",
     "socket-reset",
     "socket-disconnect",
+    "file-stall",
+    "file-truncate",
+    "manifest-truncate",
+    "file-corrupt",
     "shutdown-url",
     "driver-timeout",
     "ack-url",

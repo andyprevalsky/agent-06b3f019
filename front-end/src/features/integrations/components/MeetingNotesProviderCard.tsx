@@ -6,12 +6,17 @@
  *   [CONNECTED] --sync--> [SYNCING] --done--> [CONNECTED]
  *   [EXPIRED] --"Reconnect"--> [SIGNING_IN]
  *   [CONNECTED] --chip remove--> [DISCONNECTING] --done--> [DISCONNECTED]
+ *   [CONNECTED] chip + its team-sharing caption (AccountTeamShare) when the backend lists
+ *     this signed-in account (pinned by its email) as shareable
  *
  * Provider meetings (notes, summaries, transcripts) sync server-side into the
  * grep document store; this card only starts sign-in and shows sync status.
  */
 
 import { Loader2, Plus, RefreshCw } from 'lucide-react';
+
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 
 import { meetingNotesDetail } from '../hooks/meetingNotesView';
 import ConnectedAccountChip from './ConnectedAccountChip';
@@ -49,6 +54,7 @@ export default function MeetingNotesProviderCard({
   const connected = status?.connected === true;
   const expired = status?.status === 'EXPIRED';
   const syncing = status?.status === 'SYNCING' || connection.busy === 'sync';
+  const target = useAccountShares().shareTarget(provider, status?.accountEmail);
   return (
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between gap-3">
@@ -63,7 +69,7 @@ export default function MeetingNotesProviderCard({
               {meetingNotesDetail(connection, provider)}
             </span>
             {connected && (
-              <div className="mt-1 flex flex-wrap items-center gap-1">
+              <div className="mt-1 flex flex-wrap items-center gap-2.5">
                 <ConnectedAccountChip
                   label={status.accountEmail ?? name}
                   tone={expired ? 'warning' : syncing ? 'syncing' : 'synced'}
@@ -73,6 +79,7 @@ export default function MeetingNotesProviderCard({
                   removeLabel={`Disconnect ${name} and delete its synced notes`}
                   title={`Disconnect ${name}`}
                 />
+                {target && <AccountTeamShare {...target} />}
               </div>
             )}
             {connection.error !== null && (

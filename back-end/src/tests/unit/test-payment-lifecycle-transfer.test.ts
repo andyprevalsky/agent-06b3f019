@@ -9,6 +9,8 @@ import { PurchaseSpendStatus } from '@prisma/client';
 import { TestPaymentError } from '../../domains/test-payment/errors';
 import { getTestPaymentLifecycle } from '../../domains/test-payment/lifecycle';
 import { mapOrgTransfer } from '../../domains/test-payment/lifecycleOrgTransfer';
+import { v2TransferredCents } from '../../domains/test-payment/lifecycleV2';
+import { withKnownStripeIntent } from '../../domains/test-payment/lifecycleProviderRecords';
 
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
   process.stdout.write(`  ${name}: `);
@@ -95,6 +97,43 @@ async function main(): Promise<void> {
     assert.equal(lifecycle.orgTransfer?.amountCents, 4396);
     assert.equal(lifecycle.orgTransfer?.transferredCents, 4396);
     assert.equal(lifecycle.orgTransfer?.releasedCents, 0);
+  });
+
+  await test('v2 transfer mapping matches the org contract for live reclaims (owner probe 2026-11-15)', async () => {
+    const live = {
+      status: 'reclaimed',
+      amount_cents: 100,
+      transferred_cents: 100,
+      released_cents: 100,
+    };
+    assert.equal(v2TransferredCents({ ...live, livemode: true }), 0);
+    assert.equal(
+      v2TransferredCents({ ...live, livemode: false }),
+      100,
+      'sandbox keeps the provider counter'
+    );
+    assert.equal(v2TransferredCents({ ...live, status: 'consumed', livemode: true }), 100);
+  });
+
+  await test('provider intent count includes a fresh hold Stripe Search has not indexed yet', async () => {
+    const hold = { id: 'pi_fresh' };
+    const ids = (r: { data: Array<{ id: string }> }) => new Set(r.data.map((x) => x.id)).size;
+    assert.equal(
+      ids(withKnownStripeIntent({ data: [] }, hold)),
+      1,
+      'search lag must not hide the hold'
+    );
+    assert.equal(
+      ids(withKnownStripeIntent({ data: [hold] }, hold)),
+      1,
+      'no double count once indexed'
+    );
+    assert.equal(
+      ids(withKnownStripeIntent({ data: [{ id: 'pi_extra' }] }, hold)),
+      2,
+      'extra intents stay visible'
+    );
+    assert.equal(ids(withKnownStripeIntent({ data: [] }, null)), 0);
   });
 
   await test('mapOrgTransfer zeroes transferredCents for live reclaimed transfers', async () => {

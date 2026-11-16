@@ -179,8 +179,10 @@ const LATE_RELOAD_WINDOW_MS = 5_000;
  * involved: one requested beyond the operation's own `ownNavigations` during the call or
  * within LATE_RELOAD_WINDOW_MS of the failure (wait for it to load; a cancelled goto rejects
  * before Playwright reports the reload that cancelled it, prod semantic run 43686929632), or
- * one whose request started just before the call and that loads within that window. At most
- * APP_RELOAD_RETRIES retries; any other error still fails the test.
+ * one whose request started just before the call and that loads within that window. A step
+ * that succeeded on a document replaced by such a reload is repeated too: the next step would
+ * otherwise start on the new document (project-folder-controls.spec.ts:188, run 43682337505).
+ * At most APP_RELOAD_RETRIES retries; any other error still fails the test.
  */
 export async function acrossAppReload<T>(
   page: Page,
@@ -192,7 +194,12 @@ export async function acrossAppReload<T>(
     let loads = 0;
     let awaitingDocument = false;
     const onRequest = (request: Request) => {
-      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      // A redirect hop belongs to the document request it continues.
+      if (
+        request.isNavigationRequest() &&
+        request.frame() === page.mainFrame() &&
+        !request.redirectedFrom()
+      ) {
         documents++;
         awaitingDocument = true;
       }
@@ -204,9 +211,15 @@ export async function acrossAppReload<T>(
     page.on('request', onRequest);
     page.on('domcontentloaded', onLoaded);
     try {
-      return await operation();
-    } catch (error) {
-      if (retry >= APP_RELOAD_RETRIES) throw error;
+      let failure: unknown;
+      try {
+        const result = await operation();
+        if (documents <= ownNavigations) return result;
+        failure = new Error('the app replaced the document this step ran on');
+      } catch (error) {
+        failure = error;
+      }
+      if (retry >= APP_RELOAD_RETRIES) throw failure;
       // A reload requested just before the call is visible only once its document loads, and
       // one that cancelled the operation's own navigation may be reported just after it. (A
       // failed navigation of its own can still load: Chrome commits an error page.)
@@ -219,12 +232,31 @@ export async function acrossAppReload<T>(
         await expect
           .poll(() => awaitingDocument, { message: 'reloaded document never loaded' })
           .toBe(false);
-      } else if (loads <= ownNavigations) throw error;
+      } else if (loads <= ownNavigations) throw failure;
     } finally {
       page.off('request', onRequest);
       page.off('domcontentloaded', onLoaded);
     }
   }
+}
+
+/**
+ * Waits for this document's app-version check (src/lib/appVersion.ts, published on
+ * <html data-version-check> as the load event runs) and fails while the app reloads itself onto
+ * a newer build, so a step ending with it inside acrossAppReload is repeated on the new
+ * document. Returns false for a bundle that predates the attribute (a rollback, or a run
+ * against an older deployment): it cannot report a settled check. Production builds only: the
+ * dev server has no build id and never checks.
+ */
+export async function expectAppVersionSettled(page: Page): Promise<boolean> {
+  await page.waitForLoadState('load');
+  const root = page.locator('html');
+  if ((await root.getAttribute('data-version-check')) === null) return false;
+  await expect(root).toHaveAttribute('data-version-check', /^(idle|pending|reloading)$/);
+  if ((await root.getAttribute('data-version-check')) === 'reloading') {
+    throw new Error('the app is reloading onto a newer build');
+  }
+  return true;
 }
 
 export async function expectInjectedSessionRecognized(page: Page): Promise<void> {

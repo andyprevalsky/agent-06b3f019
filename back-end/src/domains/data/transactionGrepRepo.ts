@@ -6,9 +6,32 @@ import { Prisma } from '@prisma/client';
 import { parseAccountLabel } from './path';
 import { prisma } from '../../providers/database';
 import { pageSize, regexPredicate } from './sharedGrepRepo';
+import { transactionAccessPredicate, type TableAccess } from './tableAccessRepo';
+
+/** Every searchable transaction field, one per line. */
+const TRANSACTION_TEXT = Prisma.sql`concat_ws(E'\n',
+  t.name,
+  COALESCE(t."merchantName", ''),
+  COALESCE(t."originalDescription", ''),
+  COALESCE(array_to_string(t.category, ' > '), ''),
+  COALESCE(t."personalFinanceCategory", ''),
+  COALESCE(t."personalFinanceDetailed", ''),
+  COALESCE(t."paymentChannel", ''),
+  COALESCE(t."locationSummary", ''),
+  COALESCE(a.name, ''),
+  COALESCE(a.mask, ''),
+  COALESCE(i."institutionName", '')
+)`;
+
+/** Own rows plus live Plaid item shares; nothing when the scope reads no transactions. */
+function transactionScope(access: TableAccess): Prisma.Sql {
+  return transactionAccessPredicate(access) ?? Prisma.sql`FALSE`;
+}
 
 export interface TransactionGrepRow {
   id: string;
+  userId: string;
+  plaidItemId: string;
   plaidTransactionId: string;
   plaidAccountId: string;
   plaidAccountExternalId: string;
@@ -34,6 +57,7 @@ export interface TransactionGrepRow {
 }
 
 export interface TransactionAggregateRow {
+  userId: string;
   currency: string;
   outflow: Prisma.Decimal | null;
   inflow: Prisma.Decimal | null;
@@ -114,7 +138,7 @@ function transactionFilters(params: {
 }
 
 export async function countTransactionGrepRows(params: {
-  userId: string;
+  access: TableAccess;
   pattern: string;
   caseInsensitive: boolean;
   since?: Date;
@@ -127,27 +151,14 @@ export async function countTransactionGrepRows(params: {
   pathAccount?: string;
   pathTransactionId?: string;
 }): Promise<number> {
-  const expression = Prisma.sql`concat_ws(E'\n',
-    t.name,
-    COALESCE(t."merchantName", ''),
-    COALESCE(t."originalDescription", ''),
-    COALESCE(array_to_string(t.category, ' > '), ''),
-    COALESCE(t."personalFinanceCategory", ''),
-    COALESCE(t."personalFinanceDetailed", ''),
-    COALESCE(t."paymentChannel", ''),
-    COALESCE(t."locationSummary", ''),
-    COALESCE(a.name, ''),
-    COALESCE(a.mask, ''),
-    COALESCE(i."institutionName", '')
-  )`;
-  const predicate = regexPredicate(expression, params.pattern, params.caseInsensitive);
+  const predicate = regexPredicate(TRANSACTION_TEXT, params.pattern, params.caseInsensitive);
   const filters = transactionFilters(params);
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*)::bigint AS count
     FROM "PlaidTransaction" t
     INNER JOIN "PlaidAccount" a ON a.id = t."plaidAccountId"
     INNER JOIN "PlaidItem" i ON i.id = t."plaidItemId"
-    WHERE t."userId" = ${params.userId}
+    WHERE ${transactionScope(params.access)}
       AND ${predicate}
       ${filters}
   `;
@@ -155,7 +166,7 @@ export async function countTransactionGrepRows(params: {
 }
 
 export async function searchTransactionGrepRows(params: {
-  userId: string;
+  access: TableAccess;
   pattern: string;
   caseInsensitive: boolean;
   limit: number;
@@ -170,24 +181,13 @@ export async function searchTransactionGrepRows(params: {
   pathAccount?: string;
   pathTransactionId?: string;
 }): Promise<TransactionGrepRow[]> {
-  const expression = Prisma.sql`concat_ws(E'\n',
-    t.name,
-    COALESCE(t."merchantName", ''),
-    COALESCE(t."originalDescription", ''),
-    COALESCE(array_to_string(t.category, ' > '), ''),
-    COALESCE(t."personalFinanceCategory", ''),
-    COALESCE(t."personalFinanceDetailed", ''),
-    COALESCE(t."paymentChannel", ''),
-    COALESCE(t."locationSummary", ''),
-    COALESCE(a.name, ''),
-    COALESCE(a.mask, ''),
-    COALESCE(i."institutionName", '')
-  )`;
-  const predicate = regexPredicate(expression, params.pattern, params.caseInsensitive);
+  const predicate = regexPredicate(TRANSACTION_TEXT, params.pattern, params.caseInsensitive);
   const filters = transactionFilters(params);
   return prisma.$queryRaw<TransactionGrepRow[]>`
     SELECT
       t.id,
+      t."userId",
+      t."plaidItemId",
       t."plaidTransactionId",
       t."plaidAccountId",
       t."plaidAccountExternalId",
@@ -213,7 +213,7 @@ export async function searchTransactionGrepRows(params: {
     FROM "PlaidTransaction" t
     INNER JOIN "PlaidAccount" a ON a.id = t."plaidAccountId"
     INNER JOIN "PlaidItem" i ON i.id = t."plaidItemId"
-    WHERE t."userId" = ${params.userId}
+    WHERE ${transactionScope(params.access)}
       AND ${predicate}
       ${filters}
     ORDER BY t.date DESC, t.id DESC
@@ -222,7 +222,7 @@ export async function searchTransactionGrepRows(params: {
 }
 
 export async function aggregateTransactionGrepRows(params: {
-  userId: string;
+  access: TableAccess;
   pattern: string;
   caseInsensitive: boolean;
   since?: Date;
@@ -236,23 +236,11 @@ export async function aggregateTransactionGrepRows(params: {
   pathTransactionId?: string;
   includePendingInTotals?: boolean;
 }): Promise<TransactionAggregateRow[]> {
-  const expression = Prisma.sql`concat_ws(E'\n',
-    t.name,
-    COALESCE(t."merchantName", ''),
-    COALESCE(t."originalDescription", ''),
-    COALESCE(array_to_string(t.category, ' > '), ''),
-    COALESCE(t."personalFinanceCategory", ''),
-    COALESCE(t."personalFinanceDetailed", ''),
-    COALESCE(t."paymentChannel", ''),
-    COALESCE(t."locationSummary", ''),
-    COALESCE(a.name, ''),
-    COALESCE(a.mask, ''),
-    COALESCE(i."institutionName", '')
-  )`;
-  const predicate = regexPredicate(expression, params.pattern, params.caseInsensitive);
+  const predicate = regexPredicate(TRANSACTION_TEXT, params.pattern, params.caseInsensitive);
   const filters = transactionFilters({ ...params, forTotals: true });
   return prisma.$queryRaw<TransactionAggregateRow[]>`
     SELECT
+      t."userId",
       COALESCE(t."isoCurrencyCode", t."unofficialCurrencyCode", 'UNKNOWN') AS currency,
       SUM(CASE WHEN t.direction = 'OUTFLOW' THEN t."absoluteAmount" ELSE 0 END) AS outflow,
       SUM(CASE WHEN t.direction = 'INFLOW' THEN t."absoluteAmount" ELSE 0 END) AS inflow,
@@ -261,11 +249,11 @@ export async function aggregateTransactionGrepRows(params: {
     FROM "PlaidTransaction" t
     INNER JOIN "PlaidAccount" a ON a.id = t."plaidAccountId"
     INNER JOIN "PlaidItem" i ON i.id = t."plaidItemId"
-    WHERE t."userId" = ${params.userId}
+    WHERE ${transactionScope(params.access)}
       AND ${predicate}
       ${filters}
-    GROUP BY currency
-    ORDER BY currency ASC
+    GROUP BY t."userId", currency
+    ORDER BY t."userId" ASC, currency ASC
   `;
 }
 

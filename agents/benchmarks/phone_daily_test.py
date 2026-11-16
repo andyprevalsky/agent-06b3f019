@@ -139,6 +139,9 @@ def _assert_existing_catalog_rows_unchanged(old, current):
             validate_task_quarantine(row, row['name'])
             row.pop('quarantine', None)
     # Only this exact user-directed deploy metadata differs from the golden rows.
+    for row in old:
+        if row['name'] == 'test-mass-agent-run-0' and 'deploy_quarantine' in row:
+            assert row.pop('deploy_quarantine') == _MASS_DEPLOY_QUARANTINE_REASON
     for row in current:
         if row['name'] == 'test-mass-agent-run-0':
             assert row.pop('deploy_quarantine', None) == _MASS_DEPLOY_QUARANTINE_REASON
@@ -173,7 +176,7 @@ def test_existing_catalog_rows_unchanged():
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
     # Reviewed snapshot: main's rows plus explicit deploy_category none opt-outs.
-    old = json.loads(subprocess.check_output(['git', 'show', '5f9a8d94a9f584a8b16ead9be263827f84feac48:agents/benchmarks/tasks.json'], cwd=root, text=True))
+    old = json.loads(subprocess.check_output(['git', 'show', 'bc969010381d3fefe99c163555dcfdd6098aaf89:agents/benchmarks/tasks.json'], cwd=root, text=True))
     current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
     _assert_existing_catalog_rows_unchanged(old, current)
 

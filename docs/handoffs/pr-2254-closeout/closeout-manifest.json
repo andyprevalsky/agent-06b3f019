@@ -1,0 +1,709 @@
+{
+ ".cloud-env": "managed-env (boxes.dev project environment; secrets never archived)",
+ ".context/": {
+  "archive": "devbox-closeout-private/pr2254/20261115T232501Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2254-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2254-closeout/private-archive-receipt.json --destination <empty dir>",
+  "scope": "every regular file under .context after PR #2254 (AgentCard probe purge-on-reuse + Rose Desktop CLI share caption; merged 3c069ddef8): gate round 1 (3737dfe5, set aside) and round 2 READY at 3d5792522a, production lanes, deploy run 20261115-220137-626344; plus /home/boxes/pr2254-evidence (deploy wrapper + gate/prod logs, RCA 2be611d7 repro logs; node_modules excluded as reproducible)",
+  "sha256": "4119294fdca2aaedf86fcb2d364e89ab39758aa9f4db84135788581fd54b8c23"
+ },
+ ".devbox/": "managed (boxes.dev runtime state)",
+ ".env.npm": "managed-env (boxes.dev project environment; secrets never archived)",
+ "agents/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "agents/.env.benchmark-temporal": "managed-env (generated benchmark Temporal override; secrets never archived)",
+ "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "agents/navi-worker-log.txt": {
+  "archive": "devbox-closeout-private/pr2192/20261115T064209Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2192-closeout/private-archive-receipt.json --destination <empty dir>",
+  "scope": "template-inherited local log, archived in the same private archive",
+  "sha256": "18ef9901ff01f928f6c8174149207751b0c38063a5ffe8a84083040c8d67ef99"
+ },
+ "agents/providers/fast_cache/": "reproducible (runtime cache)",
+ "back-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "back-end/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "back-end/backend-logs.log": {
+  "archive": "devbox-closeout-private/pr2192/20261115T064209Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2192-closeout/private-archive-receipt.json --destination <empty dir>",
+  "scope": "template-inherited local log, archived in the same private archive",
+  "sha256": "18ef9901ff01f928f6c8174149207751b0c38063a5ffe8a84083040c8d67ef99"
+ },
+ "branch:andyprevalsky/P3-message-person-hillclimb": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "8ceed7c85ec976cac5de494d8cef0690b735b519"
+ },
+ "branch:andyprevalsky/archive-domain-render-hotfix-2": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "ccf1649bdc2ba7358e60c2218df763d09a44b280"
+ },
+ "branch:andyprevalsky/audit-prod-temporal-queue": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "ad17576efa0ad6aa3246731c7eee397adbcee038"
+ },
+ "branch:andyprevalsky/browser-js-state": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "1b6523ea03e65d4b83bf14184d63b64c8e4a0739"
+ },
+ "branch:andyprevalsky/check-mac-app": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "1e0cbf8bbaf9251eefbf94295721f45b24ac3b7f"
+ },
+ "branch:andyprevalsky/descend-antibot-harness-infra": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "f1437ef67d7104c7d173dc9778dd8ebc4f8b3ab5"
+ },
+ "branch:andyprevalsky/descend-daily-h01": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "8e0137b10f3100cbb37f1afdf62b704ce70d68a4"
+ },
+ "branch:andyprevalsky/descend-daily-h04": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "c527a08f4cb5ad7c60af793f23a3f482fba0bc73"
+ },
+ "branch:andyprevalsky/descend-daily-h06-h08": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "d341bf41ffbbb9e7a4719b1fa2f2d8660df6e884"
+ },
+ "branch:andyprevalsky/descend-daily-h08-proposed": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "ab6ee04fc10d9c5b7e0fb081f291ec232ccc7be6"
+ },
+ "branch:andyprevalsky/descend-i05-google-evaluator": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "380ae8c739a2db3e72f03511401732acd9b6d3de"
+ },
+ "branch:andyprevalsky/descend-i08-cleanup-ownership": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "178c3fdaa49acc0e78f4c50e078a238d5d4d7fe7"
+ },
+ "branch:andyprevalsky/fe-refactor-5": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "f97916e57fd3b691d7238750a491d42864afd0a1"
+ },
+ "branch:andyprevalsky/fe-refactor-6": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "881293717ae878467f94f8fe5cf41e965f234ae4"
+ },
+ "branch:andyprevalsky/fe-refactor-u01-v2": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "6d67c280e0ea218454665a565c312f005246ccbb"
+ },
+ "branch:andyprevalsky/fe-refactor-u02-v2": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "4942e59f0d4bf651348dee70f08ef26cdf6e8715"
+ },
+ "branch:andyprevalsky/fe-refactor-u04": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "e21616b55abca8a6804d0e574f7df61b3f9dab68"
+ },
+ "branch:andyprevalsky/fe-refactor-u09": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "a1509a4845eefae5b3d9d824611d5c5e8a8152d3"
+ },
+ "branch:andyprevalsky/fe-refactor-u10": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "c2ead6872515fcbe0b0815e5bf4fa7cef29d54d7"
+ },
+ "branch:andyprevalsky/fe-refactor-u12-v2": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "f1364fde9556a7b5880aff2fa5a42d0ef1b0013a"
+ },
+ "branch:andyprevalsky/fe-refactor-u14-v2": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "b90ab25fd96fbc1eaa8c661f36afff3e76be2e66"
+ },
+ "branch:andyprevalsky/fix-mac-app-updates": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "46bb4a7c0dfae1748ec9a577c5245b17a8904f2b"
+ },
+ "branch:andyprevalsky/fix-mac-release-node-gyp": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "305de8e3576c77cbfa333ac236742eccb1faf9db"
+ },
+ "branch:andyprevalsky/fmt-auth": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "c2c06057f815c6776da2213d34a8bbaeeeb8db6c"
+ },
+ "branch:andyprevalsky/fmt-browser-state-sync": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "f3c731ef355594350d25038cc37fbac39e07af23"
+ },
+ "branch:andyprevalsky/fmt-claude-credential-sync": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "3227404d27544492baa8b9d5c7261940283f746a"
+ },
+ "branch:andyprevalsky/fmt-cookie-reader": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "8185e57280986c9266fa5b3815dbe7637c066ebd"
+ },
+ "branch:andyprevalsky/fmt-electron-app": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "5af42e96d63a703e8419aa066788c7cb4b423f0a"
+ },
+ "branch:andyprevalsky/fmt-electron-main": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "4acff228dda884564a4b62ffd8250d860be52c16"
+ },
+ "branch:andyprevalsky/fmt-i-message-queue-service": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "17a90b9e4125c785ca06ed7f89f22945e594edfd"
+ },
+ "branch:andyprevalsky/fmt-i-message-reader": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "fc0c5bd08faf11051c476cf8f52109d39b9b4581"
+ },
+ "branch:andyprevalsky/fmt-i-message-sync": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "f94b4ab05f72dc48f5c20c6ce03f2ee5427999eb"
+ },
+ "branch:andyprevalsky/fmt-ipc-registry": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "f590b6aa6d849200340f1bcb2902aa023b39b950"
+ },
+ "branch:andyprevalsky/fmt-messaging-core": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "2335ae2ea0683811fd3e65d158ab4e960d54e088"
+ },
+ "branch:andyprevalsky/fmt-messaging-imessage": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "1ed0f0a94deafa0e58a0a284c0dbc6ce5abd0498"
+ },
+ "branch:andyprevalsky/fmt-messaging-telegram": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "2831b9ebf8f3da0a66f300bd5966bffcc7eae6a5"
+ },
+ "branch:andyprevalsky/fmt-messaging-whatsapp": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "24d4afde4395f369aa55fc69a5b660ac1e8f5340"
+ },
+ "branch:andyprevalsky/fmt-onboarding": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "d57004e70998ec158bac31d414791c479f4328eb"
+ },
+ "branch:andyprevalsky/fmt-renderer-main": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "0d0be429a64c75ea236ee825627b4753cc776629"
+ },
+ "branch:andyprevalsky/fmt-sync-manager": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "94c1a10bd3e6b832a5ef5763c5b4e0fad228d260"
+ },
+ "branch:andyprevalsky/fmt-uploader": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "4af3fb32d9b1dfc7ecd1355e4c2205399a6b24b2"
+ },
+ "branch:andyprevalsky/map-mac-app": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "5da916a3429643043b3c73817b078ae4d302f11d"
+ },
+ "branch:andyprevalsky/nightly-temporal-migration": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "666372c23723918cbda773617809e7dd3f34f83c"
+ },
+ "branch:andyprevalsky/purchase-auth-hold-capture-2": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "f82698d34a77587006e7062aff8aab0b4c3d9ad8"
+ },
+ "branch:andyprevalsky/rca-agentcard-prod-transfer-id": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "ddaeddb9b04839cf02c334dfb8f83020cc9d2b5c"
+ },
+ "branch:andyprevalsky/rca-deploy-dependency-capacity": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "c5aff97614ce383f33c4c634c0e4d3df1ddaaffd"
+ },
+ "branch:andyprevalsky/rca-ecommerce-fixtures": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "ca89da4afe200a86beeee46c6eca607a286a4b16"
+ },
+ "branch:andyprevalsky/rca-ecommerce-payment": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "db26acaa6cb42d41786e6079529f52fd971c4c3f"
+ },
+ "branch:andyprevalsky/rca-ecommerce-terminal": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "b9bc862cdb0fdc222679ff40d12be5f36f95582d"
+ },
+ "branch:andyprevalsky/rca-i16-integration": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "e334fae9250f5bc3566a0d8985db0372cfd3bace"
+ },
+ "branch:andyprevalsky/rca-workspace-env-hermetic": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "b40004a9685f8ed41fefbe80e3e0ec4b4bc1e3d0"
+ },
+ "branch:andyprevalsky/refactor-benchmark-production": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "4989ce75b2cbd518de53d4dc00ed0e62eba0d96b"
+ },
+ "branch:andyprevalsky/refactor-benchmark-runner": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "524d5faa28fa6378c375fb1c05e61870193d1ca0"
+ },
+ "branch:andyprevalsky/research-benchmark-production-unit-tests": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "6940efa3ea072ff62f402a4d00c1a496e494e85b"
+ },
+ "branch:andyprevalsky/revert-plateau": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "bb6e1c2a8472b10fbb3b651b1cf344eb7e1c5fd9"
+ },
+ "branch:andyprevalsky/semantic-gate-temporal-poll-robustness": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "841ba2951a426ca5cb6c39ee349dd1be070d9f22"
+ },
+ "branch:andyprevalsky/sms-agent-fail-debug-2": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "b51b3a433f12136393c2ba9fd859b5329ce4ef71"
+ },
+ "branch:andyprevalsky/sync-agent-data": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "da2b22bf5e2cca56c564c026bc434747eb7f3ee1"
+ },
+ "branch:andyprevalsky/whatsapp-sync": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "37a8c15b383524ff4c64b05dc675ea4f2a823ec3"
+ },
+ "branch:andyprevalsky/zero-downtime-agent-cutover": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "16dc5da2fd984b629ac523822f2866087495fa8e"
+ },
+ "branch:backup-pre-rebase-H01": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "e55f4a0d7c4b856838dc33da4c370e7cbf33726e"
+ },
+ "branch:backup/cerebras-chat-quota-prepush-20261002": {
+  "archive": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy); identical tip already preserved by the PR #1932 private archive; left in place",
+  "sha256": "d7d80541e820a33628e3a1f83a6a971d2b7d5a36f9a85393ad553f4fb947e9f6",
+  "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+ },
+ "branch:research-completions-finish": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "7a7d5214491df3764a19f4d14dcc8512a08e10c1"
+ },
+ "branch:worktree-agent-a2ce06f7": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "e792bfdeb900f6fcddc430b554b9e02e47659358"
+ },
+ "branch:worktree-agent-a4865381": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "b4fe88159ed6233314f873e2ee5131134102ecb3"
+ },
+ "branch:worktree-agent-a53b33a4": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "05e02bc0336085d5c1c0ca5d6964a300ad3106ed"
+ },
+ "branch:worktree-agent-a8ac3824": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "04695221a7baeaa23374f0fc37dea9006d8dfa45"
+ },
+ "branch:worktree-agent-a9fd05de": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "ad093449a68941a88faa66f9a7889af7ed48fa15"
+ },
+ "branch:worktree-agent-aa597117": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "fc7091854d0d7607e0d8b852da9bf1371d74fc1d"
+ },
+ "branch:worktree-agent-ab7ea04b": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "3edfa759b1245b1b8f75ae54f2b7f5b83be42bca"
+ },
+ "branch:worktree-agent-ad6481e8": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "c5cf915e58fa07e70894d06b2a168bf7605da479"
+ },
+ "branch:worktree-agent-aebec228": {
+  "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy's work); preserved in a git bundle (prerequisite origin/main)",
+  "recovery_receipt": "docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch origin main && git fetch <dir>/pr1989-refs-archive/pr1989-local-only-refs.bundle 'refs/heads/*:refs/heads/*'",
+  "sha256": "f4b744cbe8b4af1c3d068bea70f74f3f8cb28d6e528bfcd1cc1bcfa22f1e230a",
+  "tip": "67dbf20bb48a641994f3b8e7727dec26dd8f18a2"
+ },
+ "docs/rca/INDEX.md": "reproducible (generated by python3 scripts/rca_archive.py reindex)",
+ "front-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "front-end/frontend-logs.log": {
+  "archive": "devbox-closeout-private/pr2192/20261115T064209Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2192-closeout/private-archive-receipt.json --destination <empty dir>",
+  "scope": "template-inherited local log, archived in the same private archive",
+  "sha256": "18ef9901ff01f928f6c8174149207751b0c38063a5ffe8a84083040c8d67ef99"
+ },
+ "hub-poller-logs.log": {
+  "archive": "devbox-closeout-private/pr2192/20261115T064209Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2192-closeout/private-archive-receipt.json --destination <empty dir>",
+  "scope": "template-inherited local log, archived in the same private archive",
+  "sha256": "18ef9901ff01f928f6c8174149207751b0c38063a5ffe8a84083040c8d67ef99"
+ },
+ "mac-app/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "package-lock.json": "reproducible (ignored root install lock)",
+ "research/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+  "archive": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited stash (not this deploy); identical object preserved by the PR #1932 private archive",
+  "sha256": "d7d80541e820a33628e3a1f83a6a971d2b7d5a36f9a85393ad553f4fb947e9f6",
+  "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+ }
+}

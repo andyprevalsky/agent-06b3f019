@@ -10,7 +10,10 @@ import {
   type ClaudeCodeSessionOptions,
 } from '../../providers/e2b';
 import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
-import { resolveCodeSessionWorkspace } from '../../providers/githubRepos/resolve';
+import {
+  repoAccessUserFor,
+  resolveCodeSessionWorkspace,
+} from '../../providers/githubRepos/resolve';
 import { GithubRateLimitedError } from '../../providers/githubRateLimit';
 import { createLogger } from '../../providers/logger';
 import {
@@ -159,7 +162,8 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // repo-less agents can still consume their user's stored OAuth credential.
   const resolved = await resolveAgentContext(agent_id, effectiveUserId);
   effectiveUserId = resolved.userId;
-  const { projectWorkspace, repoOverrideUrl } = await sessionWorkspace(params, resolved);
+  const workspace = await sessionWorkspace(params, resolved);
+  const { projectWorkspace, repoOverrideUrl } = workspace;
   if (repoOverrideUrl !== undefined) effectiveGithubRepoUrl = resolved.repoUrl = repoOverrideUrl;
   if (projectWorkspace !== null) {
     // The project restore owns the checkout; never also clone github_repo_url.
@@ -189,11 +193,13 @@ export async function createSession(params: CreateSessionParams): Promise<Create
       throw new MissingUserIdError();
     }
 
-    const accessCheck = await checkGithubRepoAccess(effectiveUserId, effectiveGithubRepoUrl);
+    // A teammate's shared repo clones under its owner's grant; the session stays the caller's.
+    const accessUserId = repoAccessUserFor(workspace, effectiveGithubRepoUrl, effectiveUserId);
+    const accessCheck = await checkGithubRepoAccess(accessUserId, effectiveGithubRepoUrl);
     if (accessCheck.rateLimit !== undefined)
       throw new GithubRateLimitedError(accessCheck.rateLimit);
     if (!accessCheck.allowed) {
-      log.info(`GitHub access denied for user ${effectiveUserId}: ${accessCheck.error ?? ''}`);
+      log.info(`GitHub access denied for user ${accessUserId}: ${accessCheck.error ?? ''}`);
       throw new GitHubAccessDeniedError(accessCheck.error!);
     }
     normalizedRepoUrl = accessCheck.normalizedUrl!;

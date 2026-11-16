@@ -502,6 +502,14 @@ GATES = (
         ("python3", "scripts/tests/concurrent-pr-shared-paths.test.py"),
     ),
     Gate(
+        "cloudbench-disposable-recovery",
+        ("python3", "scripts/tests/cloudbench-disposable-recovery.test.py"),
+    ),
+    Gate(
+        "replicate-llm-dump-panel",
+        ("python3", "scripts/tests/replicate-llm-dump-panel.test.py"),
+    ),
+    Gate(
         "cloudbench-full-selection",
         ("python3", "scripts/tests/cloudbench-full-selection.test.py"),
     ),
@@ -530,6 +538,7 @@ GATES = (
     Gate("worker-pool-cutover", ("python3", "scripts/tests/worker-pool-cutover.test.py")),
     Gate("retained-agent-machine", ("python3", "scripts/tests/retained-agent-machine.test.py")),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
+    Gate("run-bench-durable-service", ("python3", "scripts/tests/run-bench-durable-service.test.py")),
     Gate(
         "claude-md-replay-cli",
         ("python3", "-m", "pytest", "-q", "agents/benchmarks/claude_md_replay/replay_cli_test.py"),
@@ -561,6 +570,12 @@ GATES = (
     Gate(
         "cloudbench-composite-root-cleanup",
         ("python3", "scripts/tests/cloudbench-exact-session-multi-root.test.py"),
+    ),
+    # Quarantined guests stopped before a provider session existed: undelivered
+    # (K12) and delivered-but-exited-before-backend native stops.
+    Gate(
+        "cloudbench-undelivered-native-stop-capture",
+        ("python3", "scripts/tests/cloudbench-undelivered-native-stop-capture.test.py"),
     ),
     Gate(
         "cloudbench-quiesced-forensic-retirement",
@@ -670,6 +685,12 @@ GATES = (
         "cloudbench-controller-orphan-drain",
         ("python3", "scripts/tests/cloudbench-controller-orphan-drain.test.py"),
     ),
+    # Relay retirement ships the drain's guest core; a drain guest change must
+    # also prove the relay exec body still fits its bound (2026-11-06, I-08).
+    Gate(
+        "cloudbench-controller-relay-retire",
+        ("python3", "scripts/tests/cloudbench-controller-relay-retire.test.py"),
+    ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
     Gate("local-stack-retention", ("python3", "scripts/tests/local-stack-retention.test.py")),
     Gate(
@@ -683,6 +704,14 @@ GATES = (
     Gate(
         "cloudbench-controller-gate-flyctl-bounds",
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
+    ),
+    Gate(
+        "cloudbench-disposable-volume",
+        ("python3", "scripts/tests/cloudbench-disposable-volume.test.py"),
+    ),
+    Gate(
+        "cloudbench-disposable-volume-cli",
+        ("python3", "scripts/tests/cloudbench-disposable-volume-cli.test.py"),
     ),
     Gate(
         "cloudbench-recovery-fd",

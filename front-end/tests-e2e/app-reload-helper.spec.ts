@@ -158,4 +158,49 @@ test('acrossAppReload does not retry a navigation that fails without a new docum
     ),
   ).rejects.toThrow(/net::ERR_FAILED|net::ERR_ABORTED/);
   expect(calls).toBe(1);
+
+test('a step that succeeded on a document the app then replaced is repeated on the new one', async ({
+  page,
+}) => {
+  page.setDefaultTimeout(30_000);
+  await openStaticPage(page);
+  const reads: string[] = [];
+  const result = await acrossAppReload(page, async () => {
+    const read = await page.evaluate((key) => sessionStorage.getItem(key) ?? 'replaced', RELOADED);
+    reads.push(read);
+    if (reads.length === 1) {
+      // The read succeeded, then the app reloads itself before the next step starts.
+      await Promise.all([
+        page.waitForRequest((request) => request.isNavigationRequest()),
+        page.evaluate((key) => {
+          sessionStorage.setItem(key, 'new document');
+          setTimeout(() => location.reload(), 0);
+        }, RELOADED),
+      ]);
+    }
+    return read;
+  });
+  expect(reads).toEqual(['replaced', 'new document']);
+  expect(result).toBe('new document');
+});
+
+test('a redirect hop of the step’s own navigation is not an app reload', async ({ page }) => {
+  const target = `${FRONTEND_URL}/__across-app-reload-fixture`;
+  await page.route(`${FRONTEND_URL}/__across-app-reload-redirect`, (route) =>
+    route.fulfill({ status: 302, headers: { location: target } }),
+  );
+  await page.route(target, (route) =>
+    route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>fixture</title>' }),
+  );
+  let navigations = 0;
+  await acrossAppReload(
+    page,
+    async () => {
+      navigations++;
+      await page.goto(`${FRONTEND_URL}/__across-app-reload-redirect`);
+    },
+    1,
+  );
+  expect(navigations).toBe(1);
+  expect(page.url()).toBe(target);
 });

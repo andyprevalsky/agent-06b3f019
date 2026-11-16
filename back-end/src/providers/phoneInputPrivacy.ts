@@ -8,6 +8,9 @@ export interface PhonePrivacy {
   active: boolean;
   values: string[];
   joined?: string;
+  /** Lease whose user (typing or native attention) opened the active phase; only that lease's
+   * user-grace expiry may end it. Agent-opened and legacy phases carry none. */
+  leaseId?: string;
 }
 export function privacyState(encrypted: string | null): PhonePrivacy {
   if (encrypted === null) return { version: 1, active: false, values: [] };
@@ -24,7 +27,8 @@ export function privacyState(encrypted: string | null): PhonePrivacy {
       value.values.length > 64 ||
       Buffer.byteLength(value.values.join(''), 'utf8') > 16_384 ||
       (value.joined !== undefined &&
-        (typeof value.joined !== 'string' || !value.values.includes(value.joined)))
+        (typeof value.joined !== 'string' || !value.values.includes(value.joined))) ||
+      (value.leaseId !== undefined && typeof value.leaseId !== 'string')
     )
       throw new Error('Invalid privacy envelope');
   } catch {
@@ -32,7 +36,7 @@ export function privacyState(encrypted: string | null): PhonePrivacy {
   }
   return value;
 }
-export function rememberPrivate(encrypted: string | null, text: unknown): string {
+export function rememberPrivate(encrypted: string | null, text: unknown, leaseId?: string): string {
   if (typeof text !== 'string' || text.length === 0)
     throw new IPhoneError(400, 'Private phone input must contain text');
   if (Buffer.byteLength(text, 'utf8') > 16_384)
@@ -42,12 +46,27 @@ export function rememberPrivate(encrypted: string | null, text: unknown): string
   for (const value of [text, joined]) if (!state.values.includes(value)) state.values.push(value);
   if (state.values.length > 64 || Buffer.byteLength(state.values.join(''), 'utf8') > 16_384)
     throw new IPhoneError(409, 'Phone private input capacity reached');
-  return sealPhoneValue({ ...state, joined, active: true });
+  return sealPhoneValue({ ...openedBy(state, leaseId), joined, active: true });
+}
+/** An already-active phase keeps its opener; a successor can never adopt an inherited phase. */
+export function openedBy(state: PhonePrivacy, leaseId: string | undefined): PhonePrivacy {
+  return state.active ? state : { ...state, leaseId };
 }
 export function resumedPrivacy(encrypted: string | null): string | null {
   return encrypted === null
     ? null
-    : sealPhoneValue({ ...privacyState(encrypted), joined: undefined, active: false });
+    : sealPhoneValue({
+        ...privacyState(encrypted),
+        joined: undefined,
+        leaseId: undefined,
+        active: false,
+      });
+}
+/** Ends the phase only when the expiring lease's user opened it; otherwise null (unchanged). */
+export function expiredPrivacy(encrypted: string | null, leaseId: string): string | null {
+  if (encrypted === null) return null;
+  const state = privacyState(encrypted);
+  return state.active && state.leaseId === leaseId ? resumedPrivacy(encrypted) : null;
 }
 export function isModelMedia(operation: string): boolean {
   return operation === 'screen.capture' || operation === 'screen.frame';
