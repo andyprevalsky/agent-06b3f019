@@ -793,6 +793,142 @@ async def test_browser_verifier_target_attempt_survives_admission_and_provider_b
         assert "Unrelated Resend code label" not in step
 
 
+async def test_phone_canonical_receipts_survive_window_and_observation_budget():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    history = ActionHistory()
+    sent = {"step": 47, "action": "phone",
+            "params": {"mode": "operation", "operation": "input.tap", "args": {"x": 654, "y": 1252}},
+            "result": {"success": True, "operation": {"id": "original-input-receipt", "cursor": 47,
+                       "operation": "input.tap", "status": "SUCCEEDED", "errorCode": None, "result": True}}}
+    rows = [sent] + [
+        {"step": step, "action": "phone",
+         "params": {"mode": "operation", "operation": "screen.text", "args": {"min_confidence": 0.3}},
+         "result": {"success": True, "operation": {"id": f"observation-{step}", "cursor": step,
+                    "operation": "screen.text", "status": "SUCCEEDED", "result": "x" * 1000}}}
+        for step in range(48, 123)
+    ]
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Inspect the already completed input without repeating it", current_url="https://example.test",
+            browser_state={"dom_tree": "Independent contradictory current browser observation"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    compact = next(m["text"] for m in context if m.get("metadata", {}).get("toolName") == "action_history")
+    assert "Step 47:" not in compact
+    receipts = [m for m in context if m.get("metadata", {}).get("toolName") == "phone"]
+    assert len(receipts) == len(rows)
+    assert next(m["metadata"]["structured_response"] for m in receipts
+                if m["metadata"]["browser_action_step"] == 47) == {k: sent[k] for k in ("step", "params", "result")}
+    body = build_verifier_context_messages(context, "Verify", call_site="verifier_browser")
+    text = json.dumps(body)
+    admitted = {}
+    for message in body:
+        if isinstance(message.get("content"), str):
+            for line in message["content"].splitlines():
+                if line.startswith("TOOL_RESULT "):
+                    try:
+                        payload = json.loads(line[len("TOOL_RESULT "):])
+                    except ValueError:
+                        continue
+                    if payload.get("tool_name") == "phone":
+                        admitted[payload["result"]["step"]] = payload["result"]
+    assert admitted[47] == {k: sent[k] for k in ("step", "params", "result")}
+    assert admitted[48] == {k: rows[1][k] for k in ("step", "params", "result")}
+    assert "observation-48" in text, "First post-input observation must survive later read traffic"
+    assert "observation-122" in text and "Independent contradictory current browser observation" in text
+    tool_lines = [line for message in body if isinstance(message.get("content"), str)
+                  for line in message["content"].splitlines() if line.startswith("TOOL_RESULT ")]
+    assert sum(map(len, tool_lines)) <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+
+async def test_phone_receipt_capacity_limit_keeps_latest_without_inventing_old_evidence():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    rows = [{"step": 47, "action": "phone",
+             "params": {"mode": "operation", "operation": "input.tap", "args": {}},
+             "result": {"success": True, "operation": {"id": "old-input", "status": "SUCCEEDED", "result": True}}}]
+    rows += [{"step": step, "action": "phone",
+              "params": {"mode": "operation", "operation": "screen.text", "args": {}},
+              "result": {"success": True, "operation": {"id": f"read-{step}", "status": "SUCCEEDED", "result": "x" * 7000}}}
+             for step in range(48, 123)]
+    history = ActionHistory()
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Inspect", current_url="https://example.test", browser_state={"dom_tree": "Current browser"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    messages = build_verifier_context_messages(context, "Verify", call_site="verifier_browser")
+    text = json.dumps(messages)
+    assert "read-122" in text and "verifier truncated" in text
+    assert "old-input" not in text, "Capacity exhaustion must not fabricate an omitted receipt"
+    tool_lines = [line for message in messages if isinstance(message.get("content"), str)
+                  for line in message["content"].splitlines() if line.startswith("TOOL_RESULT ")]
+    assert sum(map(len, tool_lines)) <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+
+async def test_phone_latest_screen_survives_alternating_inputs_and_non_screen_read():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages
+
+    rows = [
+        {"step": step, "action": "phone",
+         "params": {"mode": "operation", "operation": "screen.text" if step % 2 == 0 else "input.tap", "args": {}},
+         "result": {"success": True, "operation": {"id": f"operation-{step}",
+                    "status": "SUCCEEDED", "result": "x" * 7000 if step % 2 == 0 else True}}}
+        for step in range(1, 123)
+    ]
+    rows.append({"step": 123, "action": "phone",
+                 "params": {"mode": "operation", "operation": "apps.list", "args": {}},
+                 "result": {"success": True, "operation": {"id": "app-list", "status": "SUCCEEDED", "result": []}}})
+    history = ActionHistory()
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Inspect", current_url="https://example.test", browser_state={"dom_tree": "Native conflict"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    text = json.dumps(build_verifier_context_messages(context, "Verify", call_site="verifier_browser"))
+    assert "operation-122" in text, "A later non-screen read must not displace the latest phone screen"
+    assert "operation-121" in text and "Native conflict" in text
+
+
+async def test_phone_canonical_receipts_preserve_failures_duplicates_and_privacy():
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages
+
+    policy = DOMService("ws://unused.test")
+    policy.register_secret_refs({"secret:fixture": "private-phone-secret"})
+    history = ActionHistory()
+    history.bind_dom_service(policy)
+    rows = [
+        {"step": step, "action": "phone",
+         "params": {"mode": "operation", "operation": "input.text", "args": {"s": "private-phone-secret"}},
+         "result": {"success": False, "operation": {"id": "duplicate-receipt", "cursor": step,
+                    "operation": "input.text", "status": status, "errorCode": "private-phone-secret", "result": None}}}
+        for step, status in [(1, "FAILED"), (2, "UNKNOWN")]
+    ]
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Inspect", current_url="https://example.test", browser_state={"dom_tree": "Native conflict"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    receipts = [m for m in context if m.get("metadata", {}).get("toolName") == "phone"]
+    assert len(receipts) == 2
+    assert all(m["metadata"]["toolStatus"] == "ERROR" for m in receipts)
+    assert [m["metadata"]["structured_response"]["result"]["operation"]["status"] for m in sorted(receipts, key=lambda m: m["metadata"]["browser_action_step"])] == ["FAILED", "UNKNOWN"]
+    assert all(m["metadata"]["structured_response"]["result"]["operation"]["result"] is None for m in receipts)
+    text = json.dumps(build_verifier_context_messages(context, "Verify", call_site="verifier_browser"))
+    assert "private-phone-secret" not in text
+    assert text.count("duplicate-receipt") >= 2
+    assert "Native conflict" in text and "not browser DOM confirmation" in text
+
+
 async def test_browser_evaluate_receipts_survive_compact_history_truncation():
     from browser_tools.dom_service import ActionHistory
     from domains.spawn_browser_agent_v3 import service as bsvc
@@ -41780,6 +41916,10 @@ async def run_all_tests():
     await r.record_async("browser_required_file_delivery_cancellation", test_browser_required_file_delivery_cancellation_propagates)
     r.record("browser_file_delivery_schema_boundaries", test_browser_file_delivery_schema_boundaries)
     await r.record_async("browser_replayed_verifier_requires_explicit_completion_before_terminal", test_browser_replayed_verifier_requires_explicit_completion_before_terminal)
+    await r.record_async("phone_canonical_receipts_survive_window_and_observation_budget", test_phone_canonical_receipts_survive_window_and_observation_budget)
+    await r.record_async("phone_receipt_capacity_limit_keeps_latest_without_inventing_old_evidence", test_phone_receipt_capacity_limit_keeps_latest_without_inventing_old_evidence)
+    await r.record_async("phone_latest_screen_survives_alternating_inputs_and_non_screen_read", test_phone_latest_screen_survives_alternating_inputs_and_non_screen_read)
+    await r.record_async("phone_canonical_receipts_preserve_failures_duplicates_and_privacy", test_phone_canonical_receipts_preserve_failures_duplicates_and_privacy)
     await r.record_async("browser_evaluate_receipts_survive_compact_history_truncation", test_browser_evaluate_receipts_survive_compact_history_truncation)
     await r.record_async("browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets", test_browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets)
     await r.record_async("browser_receipt_budget_keeps_recent_evaluations_and_native_authority", test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority)

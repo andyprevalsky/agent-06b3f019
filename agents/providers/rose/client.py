@@ -1223,6 +1223,10 @@ class RoseClient:
                         "type": type(error).__name__,
                         "message": str(error),
                     }
+                    if isinstance(error, (asyncio.CancelledError, GeneratorExit)):
+                        # Cancelled or closed before `done`: what streamed so far is kept.
+                        output["error"]["cancelled"] = True
+                        output["error"]["message"] = str(error) or "cancelled before completion"
                 update_llm_dump(
                     dump_path,
                     model=_dump_display_model(dump_result.actual_model or pool),
@@ -2327,6 +2331,12 @@ class RoseClient:
                 error=str(exc),
                 **_observability_fields(),
             )
+            raise
+        except BaseException as exc:
+            # Activity cancellation (CancelledError), a consumer closing the stream
+            # before `done` (GeneratorExit) or an unexpected error: close the record
+            # with what streamed so far, then propagate unchanged. No await here.
+            _finalize_dump(exc)
             raise
 
     async def complete_browser_use(

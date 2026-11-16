@@ -22,13 +22,17 @@ tags:
 sources:
   - PR #2210
   - PR #2250
+  - PR #2268
+  - commit 2289691502a3771aa29c6316ec8f5142448c4db6
+  - PR #2262
+  - commit abcfbbc0b7062514ac5e6068b04432b173ef5f06
   - commit 33ef570dae578831f563f9e2e446ebe73afec0fc
   - commit 8e74738f13adfe9a5db1c61cd673dd8c3dd69b73
   - agent 1772a64a-c22a-5cf7-9184-17508eda5df6
   - agent 1772a64a lease 45543f2e-e77c-4470-b258-4c19dc135226
   - agent 1772a64a lease 7c1dd8c6-b81e-4bcc-908b-15f76b23d1ed
 repro: back-end/src/tests/blackbox/iphone-control.setup-verifier-replay.cases.ts "live setup verifier: recorded proof screens and controls"
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -75,6 +79,13 @@ Third gap, icloud_contacts:
 Fix (backend-only): an Accounts screen whose iCloud row's services line explicitly lists Contacts confirms it. A line that doesn't list Contacts (including one truncated with 'and N more'), or Contacts under another account, is unknown and never disabled. The regressions use the real Accounts and See All screens plus those two mutations. The 21-check replay passes 10/10 after and fails 3/3 before.
 
 Remaining for ready, none of them a verifier defect: device_passcode is disabled (no passcode set); imessage needs the real Send & Receive screen; icloud_contacts needs See All under Saved to iCloud. The agent-guidance wording for the last two is held as draft PR #2262. The coordinator will batch it into thread ph78393fcn3's single Fly cutover once the live setup is done. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
+
+**Outcome (live, 2026-11-16):**
+- #2268 merged 2289691502. Production: Render via descendant 26714e91d, backend probes PASS, semantic via descendant 771a3da8.
+- Owner setup 87c1e09a reached **ready at 02:13:45Z**. icloud_contacts confirmed on the real Settings > Apps > Contacts > Accounts screen (cursor 15: 'iCloud Drive, iCloud Mail, Contacts, and' / '10 more...').
+- Every CONFIG_TARGET was confirmed, with security passcode_enabled.
+- #2262 (agent guidance naming the Contacts Accounts proof and the FaceTime look-alike) merged abcfbbc0b7. Its first golden review was NOT_GROUNDED because the See All advice pointed at an unlabeled switch; revision 2 is GROUNDED. Production: Fly cutover deploy-agents run 43802714720 SUCCEEDED, workflow migration PASS, semantic via descendant e3416343.
+
 
 ## Human feedback
 

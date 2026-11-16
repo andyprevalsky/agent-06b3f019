@@ -244,6 +244,27 @@ class DurableLaunchContract(DurableLaunchBase):
             self.assertIn("sticky directory", result.stderr)
         self.assertFalse((self.state / "systemd-run.json").exists())
 
+    def test_subcommands_and_local_runs_refuse_durable_by_name(self):
+        # --durable supervises cloud controller launches only. A subcommand used to
+        # receive the raw flag (an obscure "unknown argument" from its own parser),
+        # and a leading --durable wrapped the subcommand or a local stack in a system
+        # service. Every route is refused by name before anything starts; --help keeps
+        # an unrefused route read-only.
+        routes = ("report-format", "scorecard", "stop-all", "reclaim-stopped", "image-activate",
+                  "image-build", "stability-proof", "monitor", "list", "--list", "code-parity",
+                  "eval", "eval-suite", "--local", "--help")
+        for route in routes:
+            for argv in ((route, "--help", "--durable"), ("--durable", route, "--help"),
+                         ("--durable-log", str(self.log), route, "--help")):
+                with self.subTest(argv=argv):
+                    result = self.run_bench(*argv)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("--durable supports cloud benchmark launches only", result.stderr)
+                    self.assertIn(f"run 'scripts/run-bench {route}' without --durable", result.stderr)
+                    self.assertEqual(result.stdout, "")
+        self.assertFalse((self.state / "systemd-run.json").exists())
+        self.assertFalse(list(self.state.glob("*.mainpid")))
+
 
 def live_systemd_available() -> bool:
     return (os.getuid() != 0 and Path("/run/systemd/system").is_dir() and shutil.which("systemd-run")

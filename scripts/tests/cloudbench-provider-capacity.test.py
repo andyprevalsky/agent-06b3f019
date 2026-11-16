@@ -610,6 +610,136 @@ class ProviderCapacityFleetTests(unittest.TestCase):
         self.assertFalse(self.provider_calls.exists())
 
 
+def delegating_refusal(requested: int, ceiling: int = 70) -> str:
+    return (
+        f"❌ Delegating-guest ceiling: requested {requested} simultaneous REAL/SIM copies, maximum {ceiling} "
+        "(CLOUDBENCH_DELEGATING_PRIMARY_CEILING, default 70).\n"
+        "Fleet admission counts every live REAL/SIM primary on the app (all devboxes) against this ceiling, so this "
+        "launch can never be admitted: its copies would wait out admission and be recorded as INFRA.\n"
+        f"Lower the simultaneous width to {ceiling} or fewer (fewer tasks or -k copies, or a rolling campaign with "
+        f"--concurrency {ceiling} or less).\n"
+        "Raising CLOUDBENCH_DELEGATING_PRIMARY_CEILING needs a measured backend/provider load at the wider width; "
+        "70 is the widest proven-safe width.\n"
+    )
+
+
+def polar_catalog_names(count: int) -> list[str]:
+    names = [task["name"] for task in json.loads((ROOT / "agents/benchmarks/polar_tasks.json").read_text())]
+    assert len(names) >= count, len(names)
+    return names[:count]
+
+
+class DelegatingCeilingPreflightTests(unittest.TestCase):
+    """2026-11-16: two sharded launches of 74 Polar copies passed --check (Polar provider cap 135)
+    and then aborted at the 5% infra stop with "Delegating-guest ceiling reached: 73-79 live
+    REAL/SIM primaries + 1 requested > 70": a 74-copy launch can never fit under fleet admission's
+    app-wide ceiling (run-bench-fleet admit_lane_capacity). Launchers refuse it up front."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="delegating-ceiling-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    @staticmethod
+    def tasks(*names: str) -> list[str]:
+        return [part for name in names for part in ("--task", name)]
+
+    def test_helper_refuses_real_width_above_the_fleet_ceiling_with_the_same_override(self) -> None:
+        fleet = FLEET.read_text()
+        self.assertIn('local delegating_ceiling="${CLOUDBENCH_DELEGATING_PRIMARY_CEILING:-70}"', fleet)
+        polar = self.tasks(*POLAR_TASKS)
+        fits = helper("delegating", "--benches", "70", *polar)
+        self.assertEqual((fits.returncode, fits.stderr), (0, ""))
+        over = helper("delegating", "--benches", "74", *polar)
+        self.assertEqual(over.returncode, 78)
+        self.assertEqual(over.stderr, delegating_refusal(74))
+        for selection in ([], self.tasks(*POLAR_TASKS, "demo-fleet-alpha"), self.tasks("not-a-catalog-task")):
+            with self.subTest(selection=selection):
+                self.assertEqual(helper("delegating", "--benches", "71", *selection).stderr, delegating_refusal(71))
+        raised = helper("delegating", "--benches", "74", *polar, CLOUDBENCH_DELEGATING_PRIMARY_CEILING="74")
+        self.assertEqual(raised.returncode, 0, raised.stderr)
+        self.assertEqual(helper("delegating", "--benches", "75", *polar,
+                                CLOUDBENCH_DELEGATING_PRIMARY_CEILING="74").stderr, delegating_refusal(75, 74))
+        self.assertEqual(helper("delegating", "--benches", "71", *polar,
+                                CLOUDBENCH_DELEGATING_PRIMARY_CEILING="").stderr, delegating_refusal(71))
+        for value in ("abc", "-1", "7 0"):
+            with self.subTest(value):
+                invalid = helper("delegating", "--benches", "1", CLOUDBENCH_DELEGATING_PRIMARY_CEILING=value)
+                self.assertEqual(invalid.returncode, 2, invalid.stderr)
+                self.assertIn("CLOUDBENCH_DELEGATING_PRIMARY_CEILING must be a non-negative integer", invalid.stderr)
+
+    def test_demo_and_infra_lanes_request_no_delegating_primaries(self) -> None:
+        demo = self.tasks("demo-fleet-alpha", "demo-fleet-beta")
+        self.assertEqual(helper("delegating", "--benches", "600", *demo).returncode, 0)
+        for lane in ("demo", "infra"):
+            with self.subTest(lane):
+                self.assertEqual(helper("delegating", "--benches", "600", *self.tasks(*POLAR_TASKS),
+                                        CLOUDBENCH_LANE=lane).returncode, 0)
+        forced = helper("delegating", "--benches", "71", *demo, CLOUDBENCH_LANE="delegating")
+        self.assertEqual(forced.stderr, delegating_refusal(71))
+
+    def campaign(self, tasks: list[str], *, concurrency: int, **env: str) -> subprocess.CompletedProcess[str]:
+        root = self.tmp / "root"
+        (root / "scripts").mkdir(parents=True, exist_ok=True)
+        for member in MEMBERS:
+            shutil.copy2(ROOT / "scripts" / member, root / "scripts" / member)
+        self.child_marker = self.tmp / "child-launched"
+        run_bench = root / "scripts/run-bench"
+        run_bench.write_text(f"#!/bin/sh\n: > {self.child_marker}\nexit 1\n")
+        run_bench.chmod(0o700)
+        self.campaigns = self.tmp / "campaigns"
+        argv = [sys.executable, str(CAMPAIGN), f"--root={root}", "--runs=1", f"--concurrency={concurrency}",
+                *[f"--task={task}" for task in tasks]]
+        return subprocess.run(argv, env=clean_env(RUN_BENCH_CAMPAIGN_ROOT=str(self.campaigns), **env),
+                              capture_output=True, text=True, timeout=60)
+
+    def test_campaign_refuses_74_simultaneous_polar_copies_before_any_controller(self) -> None:
+        polar = polar_catalog_names(74)
+        result = self.campaign(polar, concurrency=74)
+        self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+        self.assertIn("provider demand profile polar-bench", result.stderr)  # the provider cap (135) admitted it
+        self.assertIn(delegating_refusal(74), result.stderr)
+        self.assertFalse(self.child_marker.exists())
+        self.assertFalse(self.campaigns.exists())
+        # One shard of a 74-copy sharded group counts the whole group.
+        shard = self.campaign(polar[:10], concurrency=10, RUN_BENCH_CAMPAIGN_GROUP_TOTAL="74",
+                              BENCHMARK_HUB_GROUP_RUN_ID="delegating-ceiling-fixture-group")
+        self.assertEqual(shard.returncode, 78, shard.stdout + shard.stderr)
+        self.assertIn(delegating_refusal(74), shard.stderr)
+        self.assertFalse(self.child_marker.exists())
+        # A rolling campaign of the same 74 copies at --concurrency 70 fits.
+        module = runpy.run_path(str(CAMPAIGN))
+        width = module["campaign_simultaneous_benches"](70, 74, None)
+        self.assertEqual(width, 70)
+        with mock.patch.dict(os.environ, clean_env(), clear=True), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(module["delegating_ceiling_refusal"](width, polar), 0)
+            self.assertEqual(module["delegating_ceiling_refusal"](74, polar), 78)
+        self.assertEqual(stderr.getvalue(), delegating_refusal(74))
+
+    def test_fleet_refuses_its_group_real_width_before_any_provider_call(self) -> None:
+        fakebin = self.tmp / "bin"
+        fakebin.mkdir()
+        provider_calls = self.tmp / "provider-calls"
+        for name in ("fly", "flyctl", "curl"):
+            path = fakebin / name
+            path.write_text(f'#!/bin/sh\necho "{name} $*" >> {provider_calls}\nexit 99\n')
+            path.chmod(0o700)
+
+        def fleet(*benches: str, **env: str) -> subprocess.CompletedProcess[str]:
+            environment = clean_env(PATH=f"{fakebin}:{os.environ['PATH']}", TMPDIR=str(self.tmp), **env)
+            return subprocess.run(["bash", str(FLEET), *benches], cwd=ROOT, env=environment,
+                                  capture_output=True, text=True, timeout=120)
+        child = fleet("polar-bu-001", CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES="74")
+        self.assertEqual(child.returncode, 78, child.stdout + child.stderr)
+        self.assertIn("provider demand profile polar-bench", child.stderr)
+        self.assertIn(delegating_refusal(74), child.stderr)
+        lowered = fleet("polar-bu-001", "polar-odysseys-0ab48db60760", CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS="71",
+                        CLOUDBENCH_DELEGATING_PRIMARY_CEILING="1")
+        self.assertEqual(lowered.returncode, 78, lowered.stdout + lowered.stderr)
+        self.assertIn(delegating_refusal(71, 1), lowered.stderr)
+        self.assertFalse(provider_calls.exists(), provider_calls.read_text() if provider_calls.exists() else "")
+        self.assertEqual(list(self.tmp.glob("cloudbench-scripts.*")), [])  # owned script snapshot retired
+
+
 class ProviderCapacityLocalTests(unittest.TestCase):
     def test_provider_capacity_local_width_refuses_before_any_stack(self) -> None:
         with tempfile.TemporaryDirectory(prefix="provider-capacity-local-") as name:

@@ -1669,7 +1669,13 @@ def run_fake_driver(mdir):
             log(json.dumps(card, separators=(",", ":")))
             log(f"::CLOUDBENCH-REPORT-CARD-END:: token={token}")
             log(f"::CLOUDBENCH-RESULT-BEGIN:: token={token}")
-            log(json.dumps(run, separators=(",", ":")))
+            if rb_export(rb_text, "CLOUDBENCH_INLINE_RUN_RESULT") == "0":
+                # Boot-launch members emit only the sealed record's identity.
+                with open(stamped_run, "rb") as fh:
+                    sealed_run = fh.read()
+                log(f"run_result: bytes={len(sealed_run)} sha256={hashlib.sha256(sealed_run).hexdigest()}")
+            else:
+                log(json.dumps(run, separators=(",", ":")))
             log(f"::CLOUDBENCH-RESULT-END:: token={token}")
             log("benchmark complete")
             result_stamped = True
