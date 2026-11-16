@@ -4007,14 +4007,18 @@ def _live_successor(target_id: str, merged_sha: str, *, app: object, backend: Pa
     probe = subprocess.run(["node", "--import", "tsx", "scripts/monitor-cooperative-cutover.ts", "--job-id", target_id,
                             "--json"], cwd=backend, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            text=True, timeout=600)
+    # The monitor prints JSON.stringify(report, null, 2) (multi-line) after log
+    # lines, so decode an object starting at each line-initial "{" and keep the
+    # last; a one-line parse never matched real output (#2328, 2026-11-16).
     report = None
-    for line in reversed(probe.stdout.splitlines()):
-        if line.startswith("{"):
-            try:
-                report = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            break
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"(?m)^\{", probe.stdout):
+        try:
+            candidate, _ = decoder.raw_decode(probe.stdout, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            report = candidate
     if not isinstance(report, dict) or report.get("pointerMatchesExpected") is not False:
         return None
     live_id = (report.get("livePointer") or {}).get("updatedBy")
