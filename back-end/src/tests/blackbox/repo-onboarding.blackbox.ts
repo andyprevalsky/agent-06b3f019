@@ -324,7 +324,7 @@ test('agent-init exchanges the code, saves it 0600 outside the repo and prints t
       '1. Detect the repository.',
       '2. Plan the setup with the user.',
       '3. Check GitHub access.',
-      '4. APPROVAL: ask before uploading secrets.',
+      '4. APPROVAL: ask before uploading.',
       '5. Upload.',
       '6. Verify.',
       '7. Tell the user where to find it.',

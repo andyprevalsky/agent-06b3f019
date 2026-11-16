@@ -27,8 +27,9 @@ if (bin === 'codex') {
   fs.writeFileSync(args[args.indexOf('-o') + 1], text);
   console.log('codex finished');
 } else {
-  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success',
-    result: garbage ? text : 'Here is the plan:\\n\\x60\\x60\\x60json\\n' + text + '\\n\\x60\\x60\\x60' }));
+  // --json-schema: the validated plan is structured_output; result stays free text.
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: text,
+    structured_output: garbage ? null : JSON.parse(text) }));
 }
 `;
 export const SECURITY_SCRIPT = `#!${process.execPath}

@@ -295,15 +295,21 @@ async function askAgent(agent, binary, dir, prompt, env, timeoutMs) {
       rmSync(work, { recursive: true, force: true });
     }
   }
+  // Headless and read-only: only the read tools exist (no Bash, edits, agents or
+  // MCP servers), .env reads are denied, and --json-schema makes Claude Code
+  // validate its answer against PLAN_SCHEMA into `structured_output`.
   const args = [
     "-p",
     prompt,
     "--output-format",
     "json",
-    "--permission-mode",
-    "plan",
+    "--json-schema",
+    JSON.stringify(PLAN_SCHEMA),
+    "--tools",
+    "Read,Grep,Glob",
+    "--strict-mcp-config",
     "--disallowedTools",
-    "Bash,Edit,Write,Read(**/.env*),Read(**/*.env)",
+    "Read(**/.env*),Read(**/*.env)",
   ];
   const { code, stdout } = await runProcess(binary, args, {
     cwd: dir,
@@ -317,7 +323,10 @@ async function askAgent(agent, binary, dir, prompt, env, timeoutMs) {
   } catch {
     return null;
   }
-  return result?.is_error === true ? null : parsePlanText(result?.result);
+  const plan = result?.structured_output;
+  return result?.is_error === true || plan === null || typeof plan !== "object"
+    ? null
+    : plan;
 }
 
 // ── validating the plan against the checkout ────────────────────────────────

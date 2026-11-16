@@ -117,4 +117,7 @@ legacy unlinked repo connections is one indexed query per list.
   `~/.gitconfig`, Claude/Codex config (memory files, skills, commands, MCP
   definitions) or thread history; boxes.dev does.
 - A shared project is usable via `github_repo_ref`, not an explicit `project_id`.
+- The root lists 25 projects (the Temporal activity payload stays bounded), then "+N more
+  projects not listed here". A GitHub project beyond them is reachable by its URL; a
+  local-only one is not, until it is among the 25 (alphabetical).
 - A connect racing a delete of the project it matched can fail once.

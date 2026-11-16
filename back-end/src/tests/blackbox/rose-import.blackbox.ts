@@ -200,7 +200,7 @@ test('import scan (codex): signs in, captures, runs Codex read-only and emits a 
   noSecrets('scan codex', result.stdout, result.stderr, JSON.stringify(w.calls()));
 });
 
-test('import scan (claude): plan mode, .env reads denied, JSON parsed from the final result', async () => {
+test('import scan (claude): read-only tools, .env reads denied, plan from --json-schema structured_output', async () => {
   const s = await anonymousSession();
   const w = signedInWorld('scan-claude');
   const repo = checkout(w.dir, 'app');
@@ -220,9 +220,18 @@ test('import scan (claude): plan mode, .env reads denied, JSON parsed from the f
   assert(run !== undefined, 'claude -p ran');
   const args = run.args;
   assert(args[args.indexOf('--output-format') + 1] === 'json', args.join(' '));
-  assert(args[args.indexOf('--permission-mode') + 1] === 'plan', args.join(' '));
+  assert(!args.includes('--permission-mode'), `no plan mode: ${args.join(' ')}`);
+  assert(args[args.indexOf('--tools') + 1] === 'Read,Grep,Glob', args.join(' '));
+  assert(args.includes('--strict-mcp-config'), `no MCP servers: ${args.join(' ')}`);
+  const schema = JSON.parse(args[args.indexOf('--json-schema') + 1] ?? 'null') as {
+    required?: string[];
+  } | null;
+  assert(
+    schema?.required?.includes('setupCommands') === true,
+    `plan schema: ${JSON.stringify(schema)}`
+  );
   const denied = args[args.indexOf('--disallowedTools') + 1] ?? '';
-  assert(denied.includes('.env') && denied.includes('Bash'), `denied tools: ${denied}`);
+  assert(denied === 'Read(**/.env*),Read(**/*.env)', `denied tools: ${denied}`);
   noSecrets('scan claude', result.stdout, result.stderr, JSON.stringify(w.calls()));
 });
 

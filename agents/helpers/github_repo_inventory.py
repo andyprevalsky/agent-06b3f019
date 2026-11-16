@@ -60,8 +60,9 @@ UNTITLED_PROJECT = "Untitled project"
 SHARED_OWNER_FALLBACK = "a teammate"
 PROJECTS_INSTRUCTION = (
     "These are the user's projects. When creating a code agent, pick the project the task is "
-    "about and pass the project id or gh: ref shown in parentheses as github_repo_ref; do not "
-    "guess a project that is not listed."
+    "about and pass the project id or gh: ref shown in parentheses as github_repo_ref. If the "
+    "project the task needs is not listed, pass its GitHub URL when you have it, otherwise ask the "
+    "user which repository to use; never invent a project id."
 )
 PROJECTS_NONE = "None now: the user has no projects (the earlier list no longer applies)."
 
@@ -271,7 +272,7 @@ def render_projects_section(projects: Any) -> str:
     lines.extend(_line(p) for p in shown)
     hidden = total - len(shown)
     if hidden > 0:
-        lines.append(f"+{hidden} more projects")
+        lines.append(f"+{hidden} more projects not listed here")
     return "\n".join(lines)
 
 

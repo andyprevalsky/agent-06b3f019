@@ -119,8 +119,9 @@ SCRATCH_LINE = f"- Scratch — no GitHub repo (project {SCRATCH_ID})"
 HEADING = "# Available projects"
 INSTRUCTION = (
     "These are the user's projects. When creating a code agent, pick the project the task is "
-    "about and pass the project id or gh: ref shown in parentheses as github_repo_ref; do not "
-    "guess a project that is not listed."
+    "about and pass the project id or gh: ref shown in parentheses as github_repo_ref. If the "
+    "project the task needs is not listed, pass its GitHub URL when you have it, otherwise ask the "
+    "user which repository to use; never invent a project id."
 )
 # GET /api/integrations/github/repos rows (the agents service gets teammates' shares too).
 REPO_ROSE = {
@@ -224,7 +225,7 @@ def test_list_is_capped_at_25_lines_then_a_more_line():
     lines = _block(list(reversed(MANY))).splitlines()
     shown = [line for line in lines if line.startswith("- ")]
     assert len(shown) == 25 and shown[0].startswith("- project-00 —") and shown[-1].startswith("- project-24 —")
-    assert lines[-2] == "+5 more projects", lines[-2:]
+    assert lines[-2] == "+5 more projects not listed here", lines[-2:]
 
 
 def test_capped_listing_renders_the_exact_more_count_from_its_total():
@@ -236,9 +237,9 @@ def test_capped_listing_renders_the_exact_more_count_from_its_total():
     assert [p["name"] for p in listing["projects"]] == [f"project-{index:02d}" for index in range(26)]
     assert _block(listing) == full, "a capped listing renders the same block as the full list"
     assert _block({"projects": listing["projects"][:25], "total": 30}) == full
-    assert _block({"projects": listing["projects"], "total": 1_000})[:-15].endswith("+975 more projects")
+    assert _block({"projects": listing["projects"], "total": 1_000})[:-15].endswith("+975 more projects not listed here")
     for bad_total in (None, True, -1, 3, "30"):  # malformed or below the entries carried: count the entries
-        assert "+1 more projects" in _block({"projects": listing["projects"], "total": bad_total}), bad_total
+        assert "+1 more projects not listed here" in _block({"projects": listing["projects"], "total": bad_total}), bad_total
     assert project_listing([ROSE]) == {"projects": _compact_list([ROSE]), "repos": [], "total": 1}
     assert project_listing([]) == {"projects": [], "repos": [], "total": 0}
 
@@ -353,7 +354,7 @@ def test_repos_a_listed_project_covers_are_not_repeated_and_share_the_cap():
     assert len(listing["projects"]) + len(listing["repos"]) == 26 and listing["total"] == 30, listing
     assert set(listing["repos"][0]) == {"repo_name", "repo_url", "canonical_ref"}, listing["repos"][0]
     lines = _block(listing).splitlines()
-    assert len([line for line in lines if line.startswith("- ")]) == 25 and lines[-2] == "+5 more projects"
+    assert len([line for line in lines if line.startswith("- ")]) == 25 and lines[-2] == "+5 more projects not listed here"
     assert _block(listing) == _block(_with_repos(MANY[:20], repos)), "deterministic for any input order"
     assert _block(listing) == _block(_with_repos(list(reversed(MANY[:20])), list(reversed(repos))))
 
@@ -653,7 +654,7 @@ async def test_root_sync_renders_a_capped_result_with_its_exact_total():
         wf = _new_workflow(rows)
         await wf._sync_environment_context(rows)
     assert _texts(rows) == [_block(MANY)], _texts(rows)
-    assert "+5 more projects" in _texts(rows)[0]
+    assert "+5 more projects not listed here" in _texts(rows)[0]
 
 
 async def test_root_sync_survives_a_failed_fetch():

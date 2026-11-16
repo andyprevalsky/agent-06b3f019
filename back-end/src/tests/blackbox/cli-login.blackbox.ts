@@ -365,7 +365,11 @@ test('real CLI: agent-init stores the credential 0600 outside the repo; push use
   assert(!login.stdout.includes(record.credential), 'stdout never shows the credential');
   assert(!login.stdout.includes(secret), 'stdout never shows env values');
   assert(login.stdout.includes('FIXTURE_TOKEN') === false, 'guide does not dump variables');
-  assert(/APPROVAL: ask before uploading secrets/.test(login.stdout), 'approval step printed');
+  assert(/4\. APPROVAL: ask before uploading\./.test(login.stdout), 'approval step printed');
+  assert(
+    login.stdout.includes('the setup commands every new workspace will run'),
+    'approval covers the setup commands'
+  );
   assert(login.stdout.includes(`push --project '${project.id}'`), 'push targets the bound project');
 
   const push = spawnSync(process.execPath, [ROSE_SYNC, 'push', '--dir', repo, '--json'], {
