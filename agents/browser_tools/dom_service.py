@@ -980,6 +980,29 @@ class ActionHistory:
         return len(self._entries)
 
 
+
+def _release_completed_page_state_events(session: Any) -> None:
+    """Drop finished page-state requests from browser-use's event history.
+
+    browser-use keeps its last 50 bus events, and a completed
+    BrowserStateRequestEvent's result holds a whole BrowserStateSummary (DOM
+    tree, selector map, screenshot). The caller already has the returned state
+    and the session caches the latest one, so these history copies only retain
+    memory. With per-step DOM builds on a large re-rendering page (a playing
+    YouTube video), each step kept one more tree and the worker grew ~2 GB in
+    75 s (RCA 2026-11-16-browser-recorder-worker-rss-growth-on-playing-video).
+    In-flight requests are left alone, as browser-use's own history cleanup does.
+    """
+    history = getattr(getattr(session, "event_bus", None), "event_history", None)
+    if not isinstance(history, dict):
+        return
+    for event_id, event in list(history.items()):
+        if (
+            getattr(event, "event_type", None) == "BrowserStateRequestEvent"
+            and getattr(event, "event_completed_at", None) is not None
+        ):
+            history.pop(event_id, None)
+
 class DOMService:
     """Wrapper for browser-use BrowserSession with DOM extraction and coordinate helpers.
 
@@ -2651,11 +2674,14 @@ class DOMService:
         session._rose_dom_build_timing_ms = None
         self.last_dom_build_timing_ms = None
         try:
-            state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
-        except Exception:
-            if session.is_cdp_connected or not await self._restore_cdp_connection(session):
-                raise
-            state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
+            try:
+                state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
+            except Exception:
+                if session.is_cdp_connected or not await self._restore_cdp_connection(session):
+                    raise
+                state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
+        finally:
+            _release_completed_page_state_events(session)
         self.last_dom_build_timing_ms = session._rose_dom_build_timing_ms
         return state
 
