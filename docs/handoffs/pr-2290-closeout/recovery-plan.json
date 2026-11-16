@@ -7,10 +7,15 @@
     "d05",
     "1771",
     "96d",
-    "final-overlay-pending"
+    "final"
   ],
   "initial_git_prerequisite": "Fetch public prerequisite history before importing recovered local-refs.bundle; do not duplicate public history",
   "catalog_reconstruction": "For each restored capture-manifest: initial list rows source/stage;2a files rows;later logical_files map prior mapping or new member; prefix content members with their archive stage dir. Preserve every source+hash version and alias.",
-  "final_overlay": "PENDING; no final object/checksum exists",
+  "final_overlay": {
+    "object": "devbox-closeout-private/pr2290/20261116T1819Z-final-overlay.tar.gz.aesgcm",
+    "ciphertext_sha256": "34065a2bc5e9419a3e0161de56d4c7a8dbcdd9dbf246688151685762a855c7aa",
+    "receipt": "archive-final-receipt.json",
+    "proof": "archive-final-recovery-proof.json"
+  },
   "secret_delivery": "Use existing project-managed values; managed-recovery-proof.json records matching effective delivered sections. No new key; credentials and raw config never appear in Git."
 }

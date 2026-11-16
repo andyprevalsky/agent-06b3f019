@@ -81,9 +81,9 @@ CodeRabbit reported the organization spending cap on the exact final HEAD;
 the native review ledger records the qualified usage-cap skip. PR #2290
 merged unreviewed by CodeRabbit. This external provider failure remains open.
 
-## Production and preservation
+## Production checkpoint before qualified closure
 
-Full deployment closeout is pending. Render's live descendant contains the
+At this checkpoint, full deployment closeout was pending. Render's live descendant contains the
 release and both handoff runtime files match; all sixteen endpoint probes
 passed. The original Fly cutover job reached SUCCEEDED and its retirement
 certificates qualified. The native verifier subsequently failed to parse the
@@ -127,4 +127,32 @@ The records-only follow-up is [PR #2413](https://github.com/Rose-Ai-Labs/rose/pu
 Native independent classification accepted zero actual approval-scoped hunks
 in the documentation filename guard hit. Existing CodeRabbit filters exclude
 the records; the native no-reviewable-paths disposition spent no review.
-Final private preservation and native deletion readiness remain pending.
+At that checkpoint, final private preservation and native deletion readiness
+remained pending. The subsequent recovery proof follows.
+
+### Final recovery verification
+
+The final encrypted overlay is `devbox-closeout-private/pr2290/20261116T1819Z-final-overlay.tar.gz.aesgcm`,
+ciphertext SHA256 `34065a2bc5e9419a3e0161de56d4c7a8dbcdd9dbf246688151685762a855c7aa`.
+It adds959 unique payloads and binds86,648 logical source versions across the
+six chronological archives. Upload authenticated the entire remote object;
+an independent normal-helper restore verified all members and source hashes,
+with zero changed inputs. All86 ignored rows have supported dispositions.
+See [archive index](archive-index.json), [recovery proof](archive-final-recovery-proof.json),
+[coverage proof](archive-coverage-proof.json), [reconstruction](reconstruction.json)
+and [manifest](manifest.json). The full logical catalog stays encrypted.
+
+Restore each archive with the existing versioned helper into a new empty
+private directory, using its matching committed receipt and independently
+delivered project key. Read each restored capture manifest chronologically to
+resolve original paths, hashes and aliases. The initial private Git bundle
+requires its recorded public prerequisite history. No branch deletion is part
+of recovery or this closeout.
+
+[Postcapture obligations](postcapture-obligations.json) distinguish later
+derived receipts, final publication and record-merge metadata from the frozen
+raw evidence. These records are committed here or reproducible from the native
+renderer and durable metadata. New raw runtime evidence would require separate
+preservation. The fresh production application session remains an intentionally
+retained user asset. Final native readiness is certified only by the committed
+receipt and actual post-merge CLI result.

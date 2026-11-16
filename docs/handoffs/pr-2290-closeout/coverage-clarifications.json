@@ -1,0 +1,31 @@
+[
+  {
+    "path": "/tmp/rca-118fff32-quarantine-release/initial-audit.json",
+    "sha256": "c910fb0e70c042b266af8968e47273548863c8b52964a7553ea20883ae40b17d",
+    "mapping": {
+      "sha256": "c910fb0e70c042b266af8968e47273548863c8b52964a7553ea20883ae40b17d",
+      "bytes": 2414936,
+      "archive": "devbox-closeout-private/pr2290/20261116T0622Z-completed-2a-supplement.tar.gz.aesgcm",
+      "archive_sha256": "bad60e1ee383c84edb091019256ae6871707ccdca94ea1a6a644eb59dfac6682",
+      "member": "captured/tmp/rca-118fff32-quarantine-release/initial-audit.json"
+    },
+    "qualification": "Final overlay excluded expanded audit duplication; exact current bytes already preserved in verified2a archive, not discarded."
+  },
+  {
+    "path": "/tmp/rca-118fff32-quarantine-release/observations-compact.json",
+    "sha256": "91e29a9f7c1d79ea93e7bde9b413c791e8a29de065392bebc19ab6aea3ff5e1c",
+    "mapping": {
+      "sha256": "91e29a9f7c1d79ea93e7bde9b413c791e8a29de065392bebc19ab6aea3ff5e1c",
+      "bytes": 259341,
+      "archive": "devbox-closeout-private/pr2290/20261116T0622Z-completed-2a-supplement.tar.gz.aesgcm",
+      "archive_sha256": "bad60e1ee383c84edb091019256ae6871707ccdca94ea1a6a644eb59dfac6682",
+      "member": "captured/tmp/rca-118fff32-quarantine-release/observations-compact.json"
+    },
+    "qualification": "Final overlay excluded expanded audit duplication; exact current bytes already preserved in verified2a archive, not discarded."
+  },
+  {
+    "path": "/tmp/rca-118fff32/red-baseline/back-end/package.json",
+    "symlink_target": "/home/boxes/rose/back-end/package.json",
+    "qualification": "Link to tracked repository package.json; no unique file content. Exact source revisions remain in retained Git refs and initial bundle."
+  }
+]

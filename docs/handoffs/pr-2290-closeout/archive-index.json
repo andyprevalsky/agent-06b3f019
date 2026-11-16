@@ -1,46 +1,56 @@
 {
-  "format": "PR2290-PRIVATE-ARCHIVE-INDEX-V1",
   "archives": [
     {
       "name": "initial",
       "receipt": "archive-initial-receipt.json",
       "proof": "archive-initial-recovery-proof.json",
-      "archive": "devbox-closeout-private/pr2290/20261116T0433Z-stable-initial-evidence-refs.tar.gz.aesgcm",
-      "sha256": "9e97b0a4cce1f24c6b0014bd32f0f2d2a4da1fc4273c8d4a56912e8d38ccda8a",
-      "catalog_rebuild": "Restore capture-manifest.json; initial uses source/stage records,2a uses files; d05/1771/96d use logical_files with mappings and content aliases."
+      "object": "devbox-closeout-private/pr2290/20261116T0433Z-stable-initial-evidence-refs.tar.gz.aesgcm",
+      "ciphertext_sha256": "9e97b0a4cce1f24c6b0014bd32f0f2d2a4da1fc4273c8d4a56912e8d38ccda8a",
+      "mapping": "restore capture-manifest (initial list;2a files;later logical_files); map aliases chronologically"
     },
     {
       "name": "2a",
       "receipt": "archive-2a-receipt.json",
       "proof": "archive-2a-recovery-proof.json",
-      "archive": "devbox-closeout-private/pr2290/20261116T0622Z-completed-2a-supplement.tar.gz.aesgcm",
-      "sha256": "bad60e1ee383c84edb091019256ae6871707ccdca94ea1a6a644eb59dfac6682",
-      "catalog_rebuild": "Restore capture-manifest.json; initial uses source/stage records,2a uses files; d05/1771/96d use logical_files with mappings and content aliases."
+      "object": "devbox-closeout-private/pr2290/20261116T0622Z-completed-2a-supplement.tar.gz.aesgcm",
+      "ciphertext_sha256": "bad60e1ee383c84edb091019256ae6871707ccdca94ea1a6a644eb59dfac6682",
+      "mapping": "restore capture-manifest (initial list;2a files;later logical_files); map aliases chronologically"
     },
     {
       "name": "d05",
       "receipt": "archive-d05-receipt.json",
       "proof": "archive-d05-recovery-proof.json",
-      "archive": "devbox-closeout-private/pr2290/20261116T0718Z-completed-d05-supplement.tar.gz.aesgcm",
-      "sha256": "2a712d2caf578409b73eb3470d797e3db32477ec13c3457395e8b7b04f8f73bc",
-      "catalog_rebuild": "Restore capture-manifest.json; initial uses source/stage records,2a uses files; d05/1771/96d use logical_files with mappings and content aliases."
+      "object": "devbox-closeout-private/pr2290/20261116T0718Z-completed-d05-supplement.tar.gz.aesgcm",
+      "ciphertext_sha256": "2a712d2caf578409b73eb3470d797e3db32477ec13c3457395e8b7b04f8f73bc",
+      "mapping": "restore capture-manifest (initial list;2a files;later logical_files); map aliases chronologically"
     },
     {
       "name": "1771",
       "receipt": "archive-1771-receipt.json",
       "proof": "archive-1771-recovery-proof.json",
-      "archive": "devbox-closeout-private/pr2290/20261116T0837Z-completed-1771-supplement.tar.gz.aesgcm",
-      "sha256": "dd97817672a872b0856d112a87910e86b18e52e1a36ff908804484356441cb3e",
-      "catalog_rebuild": "Restore capture-manifest.json; initial uses source/stage records,2a uses files; d05/1771/96d use logical_files with mappings and content aliases."
+      "object": "devbox-closeout-private/pr2290/20261116T0837Z-completed-1771-supplement.tar.gz.aesgcm",
+      "ciphertext_sha256": "dd97817672a872b0856d112a87910e86b18e52e1a36ff908804484356441cb3e",
+      "mapping": "restore capture-manifest (initial list;2a files;later logical_files); map aliases chronologically"
     },
     {
       "name": "96d",
       "receipt": "archive-96d-receipt.json",
       "proof": "archive-96d-recovery-proof.json",
-      "archive": "devbox-closeout-private/pr2290/20261116T0936Z-completed-96d-supplement.tar.gz.aesgcm",
-      "sha256": "d139b380f0b217841c56a3f533b6b6f78f7956f64dc334d8da32dc2a8d2c3faa",
-      "catalog_rebuild": "Restore capture-manifest.json; initial uses source/stage records,2a uses files; d05/1771/96d use logical_files with mappings and content aliases."
+      "object": "devbox-closeout-private/pr2290/20261116T0936Z-completed-96d-supplement.tar.gz.aesgcm",
+      "ciphertext_sha256": "d139b380f0b217841c56a3f533b6b6f78f7956f64dc334d8da32dc2a8d2c3faa",
+      "mapping": "restore capture-manifest (initial list;2a files;later logical_files); map aliases chronologically"
+    },
+    {
+      "name": "final",
+      "receipt": "archive-final-receipt.json",
+      "proof": "archive-final-recovery-proof.json",
+      "object": "devbox-closeout-private/pr2290/20261116T1819Z-final-overlay.tar.gz.aesgcm",
+      "ciphertext_sha256": "34065a2bc5e9419a3e0161de56d4c7a8dbcdd9dbf246688151685762a855c7aa",
+      "mapping": "restore capture-manifest (initial list;2a files;later logical_files); map aliases chronologically"
     }
   ],
-  "key_delivery": "Existing project-managed environment delivers six required settings to both agents/.env and back-end/.env; effective values equal managed sections, same existing key, no local override. See managed-recovery-proof.json; direct saved-value API not available."
+  "private_catalog_reconstructable": true,
+  "final_capture_manifest_member": ".rca-118fff32-final-overlay-stage/capture-manifest.json",
+  "final_capture_manifest_sha256": "fd643ba1a81f0d3edec2658dd7ef94e6a7d1dd06ea0081850a3e9b039538253f",
+  "key_delivery": "Existing project-managed delivery independently provides archive credentials/key, verified in managed-recovery-proof.json; no values in Git."
 }
