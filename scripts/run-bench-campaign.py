@@ -1168,6 +1168,8 @@ def live_default_fly_agent(directory: Path) -> str | None:
             stream.connect(str(path))
         except (FileNotFoundError, ConnectionRefusedError):
             return None  # No socket, or a stale file left by a dead agent.
+        except OSError as error:
+            return f'{path} (cannot prove no agent: {error})'
         try:
             stream.sendall(struct.pack('<H', 4) + b'ping')
             header = stream.recv(2, socket.MSG_WAITALL)

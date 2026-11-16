@@ -2050,9 +2050,11 @@ PY_PEER_CLAIM
         return 1
     fi
 }
-# Recovery-only maintenance stays available to release retained Machines
-# (operator and /deploy cleanup run it at any time); it starts no benchmark.
-if [ "${RECOVER_STALE_ONLY:-0}" != 1 ]; then
+# Exact-owner recovery (--recover-stale-owner and its variants) stays available
+# to release retained Machines at any time; it starts no benchmark. The fd is not
+# close-on-exec, so a default agent this run starts keeps the shared claim while
+# it lives, which is the same conflict the campaign's PING check refuses.
+if [ -z "${RECOVER_OWNER_TOKEN:-}" ]; then
     claim_home_wireguard_peer_shared || exit 1
 fi
 private_source_holder_identity() {

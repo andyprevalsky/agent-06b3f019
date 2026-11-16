@@ -941,6 +941,10 @@ with (root/'wireguard-calls').open('a')as stream:
         fleet=(ROOT/'scripts/run-bench-fleet').read_text()
         begin=fleet.index('\nclaim_home_wireguard_peer_shared() {')+1
         claim=fleet[begin:fleet.index('\n}\n',begin)+3]
+        # The controller takes the claim before its first flyctl tunnel call; only exact-owner recovery is exempt.
+        call='if [ -z "${RECOVER_OWNER_TOKEN:-}" ]; then\n    claim_home_wireguard_peer_shared || exit 1\nfi\n'
+        self.assertIn(call,fleet)
+        self.assertLess(fleet.index(call),fleet.index('fly_with_timeout'))
         standalone_script='\n'.join(['set -eo pipefail',claim,'claim_home_wireguard_peer_shared',
                                       'flyctl ssh console -a fixture --machine "$WORKER_ID" -C true',
                                       ': > "$CASE/standalone-ready"','read -r _'])
@@ -968,8 +972,10 @@ with (root/'wireguard-calls').open('a')as stream:
             self.assertTrue(default_socket.is_socket(),'standalone fixture did not start the HOME default agent')
             self.assertEqual(len(started()),1)
             refused_dir=f.root/'campaign-after-standalone';refused_dir.mkdir()
-            with self.assertRaisesRegex(ValueError,'WireGuard peer'):
+            with self.assertRaisesRegex(ValueError,'WireGuard peer')as refusal:
                 values.append(module['start_shared_relay'](repo,refused_dir,repo,f.feed,time.monotonic()+15))
+            self.assertIn('standalone run',str(refusal.exception))
+            self.assertIn('pid %d '%standalone.pid,str(refusal.exception),'refusal must name the exact standalone holder')
             self.assertEqual(proxies(),[],'a campaign started a private Fly agent beside a standalone run\'s default agent')
             self.assertEqual(finish(standalone)[0],0)
             # The standalone controller exited, but its default agent still answers.
