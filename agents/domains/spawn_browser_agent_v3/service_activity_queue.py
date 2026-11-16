@@ -19,6 +19,8 @@ class BrowserCleanupOwners:
         self.driver_owners: dict[tuple[str, int], Any] = {}
         self.playwright_startups: dict[int, Any] = {}
         self.admission_closed = False
+        self.phone_leases: dict[tuple[str, str], set[str]] = {}
+        self.phone_cleanup: dict[tuple[str, str], dict[str, str]] = {}
 
     def ensure_acquisition_open(self) -> None:
         if self.admission_closed:
