@@ -1134,8 +1134,13 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     stalls both tunnels (descend-full69-20261023: lost guest /shutdown replies,
     retained Machines). The claim is an open file lock, so a dead holder releases
     it; the caller hands it to the agent's bootstrap so it ends with that agent.
+
+    flyctl keeps its config, agent socket and wire_guard_state in FLY_CONFIG_DIR
+    (default ~/.fly), so the peer and this claim belong to that directory: a
+    campaign launched with its own FLY_CONFIG_DIR gets its own peer and can run
+    beside another campaign in the same HOME.
     """
-    directory = Path(os.environ.get('HOME') or Path.home()) / '.fly'
+    directory = Path(os.environ.get('FLY_CONFIG_DIR') or Path(os.environ.get('HOME') or Path.home()) / '.fly')
     directory.mkdir(mode=0o700, exist_ok=True)
     path = directory / 'rose-campaign-wireguard-peer.lock'
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -1144,9 +1149,10 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     except BlockingIOError:
         holder = os.read(descriptor, 4096).decode(errors='replace').strip() or 'unknown holder'
         os.close(descriptor)
-        raise ValueError(f'another campaign already owns this HOME\'s Fly WireGuard peer ({holder}); '
+        raise ValueError(f'another campaign already owns this Fly config dir\'s WireGuard peer ({holder}); '
                          'a second Fly agent on that peer stalls both tunnels. Run these tasks in that '
-                         'campaign, wait for it to finish, or use a sharded campaign') from None
+                         'campaign, wait for it to finish, launch with its own FLY_CONFIG_DIR, or use a '
+                         'sharded campaign') from None
     except BaseException:
         os.close(descriptor)
         raise
