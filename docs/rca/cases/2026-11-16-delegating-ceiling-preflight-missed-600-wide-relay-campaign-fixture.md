@@ -55,6 +55,11 @@ The product behavior is correct, so the defect is in the test fixture: it does n
 
 Why was this possible? The commit's same-class sweep had to find every test that launches more than 70 REAL/SIM copies through the real campaign preflight.
 This fixture stubs the provider-capacity refusal by name in a `replacements` dict, so a search for the override variable or for provider-limit raises would not find it.
+Test selection was not the gap: `python3 scripts/select_affected_tests.py --changed-file scripts/run-bench-campaign.py --changed-file scripts/cloudbench-provider-capacity.py` selects `deploy-test-cycle` in the `deploy-structural-gates` lane.
+The commit reached main through a direct merge, 2124e4ace4, with no PR, and the source does not record whether that merge ran the gate.
+An independent reviewer, given only the symptom and repro, named the same first bad boundary.
+It checked the other campaign launchers wider than 70 (`cloudbench_campaign_workspace_test.py`, `cloudbench_worker_qualification_test.py`, `cloudbench_campaign_inventory_test.py`, `cloudbench-provider-capacity.test.py`).
+None of them reaches the new preflight unintentionally.
 
 Archive searches: "delegating-guest ceiling exit 78 campaign test", "test_campaign_persists_fixed_commands_before_any_controller_admission RelayStartupEvidence", and a grep for `DELEGATING_PRIMARY_CEILING|delegating-guest` in `docs/rca/cases/` (0 hits).
 This incident is novel. A relative is 2026-11-07-worker-clone-reservation-kept-the-old-56-machine-ceiling.
