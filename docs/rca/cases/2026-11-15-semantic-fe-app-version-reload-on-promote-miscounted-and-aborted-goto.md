@@ -25,6 +25,8 @@ tags:
 sources:
   - PR #2184
   - commit b7ea782519edf3234e93d187a657d06cd98233fe
+  - PR #2221
+  - commit 55655e654472c4ae54edcb4540ae16a808e142b6
   - PR #2110
   - PR #1951
 repro: front-end/tests-e2e/entry-load-recovery.spec.ts, front-end/tests-e2e/sidebar-agent-tree.spec.ts, front-end/tests-e2e/app-reload-helper.spec.ts
@@ -59,6 +61,12 @@ Vercel promoted another merge's production build about once a minute.
      returned `c3efd5060f42-mwhh3534`. It logged `[AppVersion] ... replaced
      by ... (load); reloading` and called `location.reload()`.
    - That reload (06:48:18.319Z) cancelled the pending `GET /` (06:48:18.289Z).
+
+A second occurrence of (1), reported by PR #2221's deploy thread: production
+semantic run 43691173465 (job 132741958284, merge 55655e6544, docs-only).
+`:156` failed with the same `Expected: 2 Received: 3` at `:168:25` while it ran
+07:44:16–07:44:19Z, with f6a9e3b47b promoted at 07:44:15Z and 8207c0b361 at
+07:44:19Z.
 
 Evidence: the run's Playwright artifacts, downloaded to
 `/var/tmp/semfe-repair/art` and unpacked to `/var/tmp/semfe-repair/tr`
