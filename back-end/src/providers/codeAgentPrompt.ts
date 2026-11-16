@@ -2,9 +2,9 @@ import { isRoseRepoUrl } from './codePreview/preview';
 import { installedRoseSkills, roseSkillsTableOfContents } from './roseSkills/skills';
 
 /** Rose Desktop accounts: every Rose skill in the table of contents (C17). */
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-11-16.code-agent-rose-handoff.v12';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-11-13.code-agent-rose-skills.v11';
 /** Every other account: the same contract with the stock skill set. */
-export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-11-16.code-agent-handoff.v12';
+export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-11-13.code-agent-skills.v11';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -98,7 +98,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- If no file output is requested, do not create placeholder files.',
     '',
     'Result handoff:',
-    `- Follow the task's handoff instructions: the transport persists your JSON response or you write ${CODE_AGENT_HANDOFF_PATH}. Match ${CODE_AGENT_HANDOFF_SCHEMA_PATH}; file paths belong in ${CODE_AGENT_OUTPUT_DIR}.`,
+    `- Your task is a goal that ends when ${CODE_AGENT_HANDOFF_PATH} holds one JSON object valid against ${CODE_AGENT_HANDOFF_SCHEMA_PATH}. Your parent receives only that file; give each file field's absolute path in ${CODE_AGENT_OUTPUT_DIR}.`,
     '- rose_handoff.status is complete only when done and verified; blocked or failed only once you showed it cannot be done here.',
     '- Do not ask questions; nobody answers them. Make reasonable assumptions and list them in rose_handoff.summary.',
     '',

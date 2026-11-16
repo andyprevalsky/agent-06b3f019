@@ -93,63 +93,80 @@ No same-cause archived case found.
 
 ## Solution
 
-The initial diagnosis applied no production changes. A local repair candidate now
-exists; no deployment or live outcome proof has occurred, so the case remains open. The parent owns contract decisions,
-independent review, approvals and deployment. A coherent repair must preserve
-user action restrictions and declared output validation, covering the worker,
-system instructions and actual deployed provider transport together; it cannot
-special-case YC strings or make the verifier accept violated constraints.
+The repair separates worker-owned result instructions with an explicit marker.
+Only native Codex with a supported strict output schema replaces that section
+with transport-owned persistence instructions. Its existing host writer creates
+and validates the declared handoff from the final structured response. The
+original task, native thread goal, model, schema and root verifier stay intact.
+Unsupported schemas and other transports retain their existing file protocol;
+this case does not claim to solve their restricted-action incompatibility.
 
-Private local commands (run from the repo root):
+A new task clears stale previous-task results. Goal continuations retain the
+last valid result even when a subsequent continuation produces only commentary.
+Missing final text cannot become a null result. Goal state follows native
+notifications; an acknowledgment cannot overwrite a newer completion. Existing
+backend respawn owns schema changes, so speculative steering/schema mutation
+was removed. The smoke waiter combines completion only with the current turn's
+end. These are capability and lifecycle repairs, not YC string exceptions.
 
-- `source agents/venv/bin/activate && python /tmp/rca-118fff32/replay.py`: exit 0;
-  reproduces wire conflict and validates captured structured output through the
-  real handoff reader.
-- Same command with `--acceptance`: exit 1, assertion that native-output-capable
-  providers must not be told to execute redundant bookkeeping. No after-fix pass
-  claimed; this remains a diagnostic acceptance probe, not a shipped regression.
-- `node /tmp/rca-118fff32/native-replay.mjs`: exit 0; real adapter writes captured
-  schema-valid result once with no shell RPC.
-- `node --test --test-name-pattern='handoff' e2b-templates/codex-code/app-server.test.mjs`:
-  3/3 pass.
-- Existing handoff goal and reader blackbox cases: 2/2 pass, explicitly partial.
+The shared backend system prompt and version headers match main. An intermediate
+candidate offered transport persistence to legacy Claude, causing a real
+missing-handoff flake; that change was removed. See the separate
+2026-11-16 shared-handoff-prompt case. The native task section supplies the
+capability-specific protocol while the shared file-exists condition remains.
 
-The first replay attempt had a diagnostic-script null-metadata error; corrected
-before causal assertions ran. The first full local latency import used the
-wrong working directory; corrected with agents cwd. Neither is production
-failure evidence. No new consistently-run regression or before/after fix proof
-exists yet. This case stays open rather than claiming a fix.
+### Causal and local verification
 
-### Local repair candidate (not deployed)
+The final native regression was run unchanged against an isolated main adapter
+and the repaired adapter:
+`node --test --test-name-pattern='native handoff honors task constraints' e2b-templates/codex-code/app-server.test.mjs`.
+Before: exit 1, native persistence instruction absent (0.194s). After: exit 0
+(0.170s). Real reader controls cover complete/blocked/failed, invalid and missing
+results. Additional controls cover stale prior tasks, valid result retention
+through commentary continuations and native goal ordering. The original private
+`replay.py --acceptance` was a historical diagnostic with contradictory fixed
+wire assertions; it is not used as red/green evidence.
 
-The worker now separates its own handoff instructions with an explicit protocol
-marker. Only the Codex adapter with a supported strict output schema replaces
-that section with transport-owned persistence instructions. The original goal,
-native thread goal, model, and output schema remain. The generic backend system
-prompt defers to that task-specific contract; its file output paths and code-session
-skill requirement remain. Claude/exec/unsupported-schema instructions are unchanged.
+The first full live candidate erased a valid result 17–20ms after a goal
+continuation began. Both ordinary and restricted smokes failed. Captured logs
+and a delayed-close local regression isolated the new per-continuation reset;
+removing that reset fixed the defect without changing model output. Another
+review found acknowledgment ordering and speculative steering changes; those
+were removed before the final native writer revision.
 
-The adapter tracks native goal continuations, resets stale result state at each
-new task/continuation and writes their final JSON through its existing writer.
-Missing final text no longer becomes a `null` handoff. The worker's validation
-is unchanged. A new native suite is wired to the deploy structural registry;
-the owning Python blackbox invokes the native controls and validates filesystem
-reader receipts, with valid complete/blocked/failed and invalid/missing controls.
+On candidate 546e44015464, the full unchanged local command
+`CODE_SMOKE_PARENT_MODEL=rose-labs/rose-1-ultra CODE_SMOKE_SPEED=standard bash scripts/run-blackbox-tests.sh codex-code`
+passed 34/34, no skips, in 94.255s. The restricted task issued exactly one
+`yc me --json`, observed missing CLI exit 127, returned that truthful allowed
+outcome, completed its native goal and delivered a valid handoff. Ordinary
+smoke passed too. Served model: GPT-6.1 Sol/xhigh/standard through ChatGPT OAuth.
+Both owned sandboxes were terminated. This proves the code-session contract,
+not original production's successful account lookup or full-root completion.
 
-The selector stability runner passed four units five consecutive times under
-eight CPU load slots: owning Python controls, backend prompt blackbox, handoff
-unit tests and all 37 native adapter tests. A wrapper-aware focused plan was
-used for the Python suite; its registered run_all_tests wrapper defeats static
-case narrowing. Test-root hashes were unchanged. An extra final Python five-run
-check also passed. Ruff lint and JavaScript/TypeScript formatting passed; whole
-Python-file formatting would reformat unrelated existing code and was not applied.
+The first deploy wave's smoke fleet passed 7/7 and released all seven fleets.
+Its new-test stability gate exposed a pre-existing listener-registration race,
+reproduced on main as well as candidate. The existing PR1874 repair was imported
+with provenance, covering both native Codex and Claude listeners. A new waiter
+test also violated the fixed-sleep ratchet; an event barrier replaced the timer.
+Both independent causes have separate RCA cases. Final local checks after these
+repairs passed 48/48 native transport tests, 13/13 backend regression cases and
+15/15 condition-wait checks. Deployment-wide reruns and production proof remain
+required; the case stays open until shipping.
 
-The final new native tests were run unchanged against an isolated baseline
-source: two failures (old bookkeeping prompt and stale result retained), then
-pass on the candidate. This is local mechanism proof, not proof that a real
-model stopped doing extra work. The live restricted-command smoke is registered
-in the existing Codex blackbox path and remains for parent execution. Open
-PR #1636 must retain this capability-specific invariant if later merged.
+The 546e44015464 local post-harness eval completed a Collatz root in 149.7s;
+its card remains INCOMPLETE because the eval route omitted lifecycle ownership
+receipts. It is supporting outcome evidence, not final deployment acceptance.
+After restoring the shared prompt to main, the same live codex-code domain
+passed 34/34, no skips (88.441s): ordinary 56.017s, restricted 30.871s, same
+served model/effort/speed. The full legacy Claude domain with BLACKBOX_SMOKE=1
+passed 59/59, no skips (26.100s). All five owned sandboxes across these fresh
+runs were terminated. The initial combined run had BLACKBOX_SMOKE unset and
+therefore did not execute Claude's real smoke; it is not live-Claude evidence.
+The helper is executed by the registered codex-code blackbox root, while native
+and owning Python regressions each map directly to their deploy lanes.
+
+The original paused root has never been resumed or changed. Open PR1636 must
+retain the capability-specific invariant if later merged.
 
 ## Human feedback
 
@@ -163,45 +180,3 @@ owned by the coordinating parent. No user approval has been requested here.
 ## Reusable lesson
 
 Keep mandatory handoff bookkeeping compatible with the user's permitted actions, and diagnose repeated correct rejection upstream of the verifier.
-
-### Live follow-up on committed candidate 2d3adc093aba
-
-The first real full codex-code gate failed both generic and restricted smokes:
-no handoff file at close. Captured checkpoint CLI logs show valid final JSON,
-then a goal continuation beginning 17–20 ms later. The candidate's per-turn
-reset removed the file. Gate attribution: INTRODUCED versus main bd35eaed,
-which has no such reset. The local delayed-close regression reproduces missing
-versus present without changing model output. Fix: keep a task's last result
-through its goal continuations; only initialize a new task clears prior data.
-
-Independent candidate review also reproduced acknowledgment overwriting a
-newer goal completion and schema mutation before failed steering. The extra
-ack assignment and deliver schema handling were deleted, restoring the original
-steering owner; production respawns restart the CLI for a new output schema.
-No new active-schema lifecycle was added. A waiter regression now requires the
-currently started turn to finish before combining its result with goal completion.
-
-The first follow-up live run was stopped by exact owned runner PID when the
-review arrived; its single owned sandbox was confirmed torn down. It is not a
-pass. The next full live run is recorded separately in private artifacts.
-
-### Final local live gate
-
-The unchanged full command `CODE_SMOKE_PARENT_MODEL=rose-labs/rose-1-ultra
-CODE_SMOKE_SPEED=standard bash scripts/run-blackbox-tests.sh codex-code` passed
-34/34, no skips, in 94.255 seconds (run 1794799399-937600-24822).
-Generic smoke passed in 63.160s and restricted-command smoke in 28.007s.
-Both served GPT-6.1 Sol, xhigh, standard, through user ChatGPT OAuth. The
-restricted run issued exactly one `yc me --json`, observed missing CLI exit127,
-returned a truthful missing result, completed its native goal and delivered a
-valid handoff. The task explicitly permits missing/unauthenticated outcomes.
-Both owned sandboxes were terminated by the runner. This establishes the
-restricted code-session contract, not that original production's successful
-account lookup was reproduced or its paused root was resumed. Deployment and
-root-verifier live proof remain parent-owned; keep the case open.
-
-The immediately prior full gate passed the generic smoke but rejected the
-restricted command's equivalent `/bin/bash -c` wrapper. That was a smoke assertion
-bug: its payload was exactly the requested command. The final assertion accepts
-`-c` and `-lc` with that literal payload only; negative controls reject appended
-commands. No production goal, timeout or evaluator was weakened.

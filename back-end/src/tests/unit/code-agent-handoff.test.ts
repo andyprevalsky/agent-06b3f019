@@ -112,7 +112,7 @@ async function main(): Promise<void> {
   await test('E2B code-agent prompt: goal end condition, standard fields, no questions, ship only when asked', () => {
     for (const roseDesktop of [false, true]) {
       const prompt = buildCodeAgentSystemPrompt({ roseDesktop });
-      assert.ok(prompt.includes("Follow the task's handoff instructions"), 'goal framing missing');
+      assert.ok(prompt.includes('Your task is a goal that ends when'), 'goal framing missing');
       assert.ok(prompt.includes(CODE_AGENT_HANDOFF_SCHEMA_PATH), 'schema path missing');
       assert.ok(prompt.includes('rose_handoff'), 'standard fields missing');
       assert.ok(

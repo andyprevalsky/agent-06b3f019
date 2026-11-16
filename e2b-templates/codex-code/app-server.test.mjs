@@ -23,7 +23,7 @@ const FIXTURE_ACCESS_FINGERPRINT = createHash("sha256")
   .digest("hex")
   .slice(0, 16);
 import { createRequire } from "node:module";
-import { createServer } from "node:net";
+import { connect as netConnect, createServer } from "node:net";
 const require = createRequire(
   new URL("../../back-end/package.json", import.meta.url),
 );
@@ -593,12 +593,43 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   child.stderr.on("data", (d) => (logs += d));
   let ws;
   const sockets = [];
+  const messages = [];
+  const isReady = (m) =>
+    (m.data || []).some?.(
+      (e) => e.type === "session" && e.status === "ready",
+    ) ||
+    (m.type === "code_agent_event" &&
+      m.data.type === "session" &&
+      m.data.status === "ready");
   try {
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
         port = listeningPort(logs);
-        ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        // Starve this client as a loaded host does: hold its reads until a
+        // viewer connected after it has seen `ready`. The server wrote all of
+        // that here first, so the upgrade, replay and `ready` share one read.
+        const connected = logs.split('"Client connected"').length;
+        ws = new WebSocket(`ws://127.0.0.1:${port}`, {
+          createConnection: (options) => {
+            const socket = netConnect(options.port, options.host).pause();
+            const observe = setInterval(() => {
+              if (logs.split('"Client connected"').length <= connected) return;
+              clearInterval(observe);
+              const observer = new WebSocket(`ws://127.0.0.1:${port}`);
+              sockets.push(observer);
+              observer.on("message", (d) => {
+                if (!isReady(JSON.parse(d))) return;
+                observer.terminate();
+                socket.resume();
+              });
+            }, 5);
+            socket.once("close", () => clearInterval(observe));
+            return socket;
+          },
+        });
         sockets.push(ws);
+        // Replayed events can arrive with the upgrade; listen before awaiting open.
+        ws.on("message", (d) => messages.push(JSON.parse(d)));
         await new Promise((resolve, reject) => {
           ws.once("open", resolve);
           ws.once("error", reject);
@@ -609,8 +640,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       }
     }
     assert.equal(ws.readyState, 1, logs);
-    const messages = [];
-    ws.on("message", (d) => messages.push(JSON.parse(d)));
     const wait = async (predicate) => {
       for (let i = 0; i < 200; i++) {
         if (predicate()) return;
@@ -618,20 +647,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       }
       assert.fail(logs + "\n" + JSON.stringify(messages));
     };
-    await wait(
-      () =>
-        messages.some((m) =>
-          (m.data || []).some?.(
-            (e) => e.type === "session" && e.status === "ready",
-          ),
-        ) ||
-        messages.some(
-          (m) =>
-            m.type === "code_agent_event" &&
-            m.data.type === "session" &&
-            m.data.status === "ready",
-        ),
-    );
+    await wait(() => messages.some(isReady));
     ws.send(
       JSON.stringify({
         type: "user_turn",

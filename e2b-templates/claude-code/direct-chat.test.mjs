@@ -47,8 +47,10 @@ if(turn===1) {
 });
 function finish(){if(!active)return;active=false;send({type:'stream_event',event:{type:'message_delta',usage:{output_tokens:5}}});send({type:'assistant',message:{id:'msg-'+turn,content:[{type:'text',text:body}]}});send({type:'result',subtype:'success',result:body,queued_turn_count:0});}
 `;
-async function connect(url) {
+// Replayed events can arrive with the upgrade; listen before awaiting open.
+async function connect(url, onMessage) {
   const ws = new WebSocket(url);
+  if (onMessage) ws.on("message", onMessage);
   await new Promise((r, j) => {
     ws.once("open", r);
     ws.once("error", j);
@@ -157,9 +159,8 @@ for (const profile of [
       // Port zero requests an ephemeral port; ws server reports its actual listener.
       assert.ok(line.port > 0, log);
       const url = "ws://127.0.0.1:" + line.port;
-      viewer = await connect(url);
       const events = [];
-      viewer.on("message", (raw) => {
+      viewer = await connect(url, (raw) => {
         const m = JSON.parse(raw);
         if (m.type === "code_agent_events") events.push(...m.data);
         if (m.type === "code_agent_event") events.push(m.data);
@@ -499,9 +500,8 @@ test("Claude cold start: the first turn waits for a slow CLI initialize instead 
         }
       })
       .find((m) => m.message === "Server listening");
-    viewer = await connect("ws://127.0.0.1:" + line.port);
     const events = [];
-    viewer.on("message", (raw) => {
+    viewer = await connect("ws://127.0.0.1:" + line.port, (raw) => {
       const m = JSON.parse(raw);
       if (m.type === "code_agent_events") events.push(...m.data);
       if (m.type === "code_agent_event") events.push(m.data);
