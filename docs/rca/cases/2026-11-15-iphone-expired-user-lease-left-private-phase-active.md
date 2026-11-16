@@ -19,6 +19,8 @@ tags:
   - phone-auth
   - attention-request
 sources:
+  - PR #2261
+  - commit 3b5a6e1b20
   - agent 87c1e09a-28ed-5f81-b7ce-6166c18523d7
 repro: back-end/src/tests/blackbox/iphone-control.privacy-expiry.cases.ts "expired user-held phone auth lease ends the private phase for the next agent lease"
 status: fixed
@@ -50,7 +52,9 @@ Not fixed by this case (remaining gap): a successor after a release or cancel of
 
 Regression: `iphone-control.privacy-expiry.cases.ts` (prod path through native attention, plus a negative control inside the grace) an inherited-phase case, and an agent-opened-phase case. Command `cd back-end && bash scripts/run-blackbox-tests.sh iphone-control`: before the fix exit 1, 180/181, `Successor agent wedged after user lease expiry: {"error":"Phone private input is active"}` (both negative controls pass on buggy code); after the fix the three new cases passed in 5/5 consecutive runs (181/181 four times; one run hit an unrelated live-model miss in `live setup verifier: recorded proof screens and controls`, whose runtime import graph reaches none of the changed files). Neighbour domains iphone, iphone-interactions, iphone-rls and auth-assistance pass.
 
-Golden reference: not applicable (no approval-gated hunk), unless the deploy guard flags one.
+Golden reference: not applicable (no approval-gated hunk; deploy freeze guards clear).
+
+Shipped: PR #2261, merged 3b5a6e1b20; Render live 2026-11-16T00:21:06Z; production lanes render, backend-probes and semantic PASS. Phases opened before the deploy carry no leaseId and still need one user handback.
 
 ## Human feedback
 
