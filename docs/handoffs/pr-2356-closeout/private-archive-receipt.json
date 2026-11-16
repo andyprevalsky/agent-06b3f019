@@ -73,10 +73,7 @@
   },
   "live_processes": [],
   "manifest": "/home/boxes/rose/docs/handoffs/pr-2356-closeout/closeout-manifest.json",
-  "open_items": [
-    "1 unpushed commit(s) in /home/boxes/rose",
-    "branch records/pr2356-closeout has 1 commit(s) on no remote"
-  ],
+  "open_items": [],
   "pr": 2356,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -591,16 +588,16 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr2356-closeout",
+      "branch": "refs/heads/main",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [],
-      "unpushed_commits": 1
+      "unpushed_commits": 0
     }
   ]
 }
