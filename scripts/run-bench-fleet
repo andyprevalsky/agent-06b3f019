@@ -2003,6 +2003,12 @@ flyctl() {
 # shellcheck source=lib/cloudbench-inventory.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived-reuse.sh"
+# Read-only view of the shared app-environment maintenance lock: the same file
+# run-bench-cloud holds for --setup/--refresh-deps/--refresh-wmh. The fleet
+# never acquires it; await_stopped_warm_source only reads its live owner.
+APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
+# shellcheck source=lib/cloudbench-app-env-lock.sh
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-app-env-lock.sh"
 
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
@@ -17273,17 +17279,62 @@ read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
 # The direct read can see the donor stopped while a shared inventory snapshot
 # still holds the generation that recorded the transient state, so re-list only
 # from a newer generation, within the same stop budget.
+# Dependency maintenance for another source ref (run-bench-cloud --refresh-deps,
+# ~8-10 min) keeps the donor started while it holds the shared app-environment
+# lock, and parks the donor before releasing that lock. On 2026-11-16 two
+# launches with different refs let the ordinary 300s stop budget expire
+# mid-refresh, and the INFRA failures crossed the 5% stop twice. While a LIVE
+# lock owner explains the transitional donor, keep waiting in ordinary stop-wait
+# rounds, bounded from the start of this wait by the lock's documented wait
+# budget (CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS, sized to outlast its longest
+# legitimate holder; 0 restores the plain stop budget). An unexplained started
+# donor still fails after the original budget. This wait precedes provisioning,
+# so it is outside every bench's execution timeout and start-barrier clock.
 await_stopped_warm_source() {  # sets warm_json warm_state warm_kind warm_cpus warm_memory
     local warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
     local warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"
-    local warm_stop_deadline warm_generation warm_shape
+    local maintenance_budget="${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-3600}"
+    local warm_stop_deadline warm_generation warm_shape round_attempts
+    local maintenance_owner maintenance_deadline maintenance_remaining
+    case "$maintenance_budget" in
+        ''|*[!0-9]*)
+            echo "❌ CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS must be a non-negative integer (got: $maintenance_budget)" >&2
+            return 1
+            ;;
+    esac
+    maintenance_deadline=$((SECONDS + maintenance_budget))
     echo "⏳ warm source is $warm_state; waiting until stopped before fleet provisioning"
-    warm_stop_deadline=$((SECONDS + warm_stop_attempts * warm_stop_sleep))
-    cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID" \
-        "$warm_stop_attempts" "$warm_stop_sleep" || {
-        echo "❌ warm source must be stopped before fleet provisioning (state=$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown))" >&2
-        return 1
-    }
+    round_attempts="$warm_stop_attempts"
+    while :; do
+        warm_stop_deadline=$((SECONDS + round_attempts * warm_stop_sleep))
+        cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID" \
+            "$round_attempts" "$warm_stop_sleep" && break
+        warm_state="$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown)"
+        maintenance_owner=""
+        case "$warm_state" in
+            started|starting|stopping|replacing|updating|restarting)
+                maintenance_owner="$(app_environment_lock_live_owner)" || maintenance_owner=""
+                ;;
+        esac
+        if [ -z "$maintenance_owner" ]; then
+            echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
+            return 1
+        fi
+        maintenance_remaining=$((maintenance_deadline - SECONDS))
+        if [ "$maintenance_remaining" -le 0 ] || [ "$maintenance_remaining" -lt "$warm_stop_sleep" ]; then
+            echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state; shared app environment maintenance owner=$maintenance_owner still live after the ${maintenance_budget}s lock wait budget)" >&2
+            return 1
+        fi
+        echo "⏳ warm source is $warm_state under live shared app environment maintenance (lock owner=$maintenance_owner); waiting up to ${maintenance_remaining}s more"
+        # The stop wait does not sleep after its final read; keep the cadence,
+        # and end each round within the remaining budget.
+        sleep "$warm_stop_sleep"
+        round_attempts="$warm_stop_attempts"
+        if [ "$warm_stop_sleep" -gt 0 ] \
+            && [ $((maintenance_remaining / warm_stop_sleep)) -lt "$round_attempts" ]; then
+            round_attempts=$((maintenance_remaining / warm_stop_sleep))
+        fi
+    done
     while :; do
         warm_generation="$(machines_snapshot_identity)"
         campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?

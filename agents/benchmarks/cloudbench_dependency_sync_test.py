@@ -8773,14 +8773,34 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
 
     # The RUN path is concurrent-workstream safe: it reconciles its own pool,
     # then READ-ONLY verifies the shared environment. It never refreshes it,
-    # never inherits another process's lock ownership, and never references
-    # the app-environment lock at all.
+    # never acquires, releases or inherits the app-environment lock. Its only
+    # contact is the read-only live-owner probe that lets the warm-source stop
+    # wait outlast in-flight donor maintenance (2026-11-16).
     verify_call = 'bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets'
     assert fleet.index("reconcile_pool || exit 1") < fleet.index(verify_call)
     assert fleet.index(verify_call) < fleet.index('        provision_primary_machine "$bench" "$out"')
     assert "run-bench-cloud --refresh-secrets;" not in fleet
-    assert "APP_ENV_LOCK" not in fleet
-    assert "acquire_app_environment_lock" not in fleet
+    for forbidden in (
+        "acquire_app_environment_lock",
+        "release_app_environment_lock",
+        "assert_app_environment_lock_ownership",
+        "CLOUDBENCH_HOLD_APP_ENV_LOCK",
+        "shlock",
+    ):
+        assert forbidden not in fleet, forbidden
+    lock_lines = [
+        line.strip() for line in fleet.splitlines()
+        if ("APP_ENV_LOCK" in line or "app_environment_lock" in line) and not line.lstrip().startswith("#")
+    ]
+    assert lock_lines == [
+        'APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"',
+        'local maintenance_budget="${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-3600}"',
+        'echo "❌ CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS must be a non-negative integer (got: $maintenance_budget)" >&2',
+        'maintenance_owner="$(app_environment_lock_live_owner)" || maintenance_owner=""',
+    ], lock_lines
+    probe_start = lock_lib.index("app_environment_lock_live_owner() {")
+    probe = lock_lib[probe_start:lock_lib.index("\n}\n", probe_start)]
+    assert "shlock" not in probe and "rm " not in probe and ">" not in probe.replace("2>/dev/null", "")
     assert "CLOUDBENCH_APP_ENV_LOCK_OWNER_PID" not in cloud
     assert 'clone_machine_target "$out/worker-clones.ids" "$primary_id"' in fleet
     verify_start = cloud.index("verify_app_environment() {")
