@@ -1,5 +1,5 @@
 /**
- * Team-shared CLI connections (docs/plans/active/share-all-integrations.md).
+ * Team-shared CLI connections (docs/plans/completed/share-all-integrations.md).
  *
  *   teammate's code agent ──rose cli list──► own CLIs + CLIs shared with its teams
  *   teammate's code agent ──rose cli run───► the OWNER's template sandbox runs it

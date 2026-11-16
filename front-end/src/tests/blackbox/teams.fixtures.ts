@@ -78,6 +78,7 @@ export const accounts: ShareableIntegration[] = [
   shareable('int-claude-acct', 'claude_code', 'acct-claude-1', { label: 'claude@example.test' }),
   shareable('int-codex-acct', 'gpt_code', 'acct-codex-1', { label: 'codex@example.test' }),
   shareable('cli-yc', 'cli', 'req-yc', { label: 'YC CLI' }),
+  shareable('mcp-docs', 'mcp', 'mcp-docs', { label: 'Context7' }),
 ];
 /** Accounts the backend never lists; served only to prove their rows still ask for no caption. */
 export const unshareableAccounts: ShareableIntegration[] = [
