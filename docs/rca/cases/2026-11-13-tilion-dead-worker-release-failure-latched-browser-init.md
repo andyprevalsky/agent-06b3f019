@@ -343,6 +343,23 @@ made after cleanup, fails the run on a create that arrives during teardown. A
 flakiness cross-review found no new risk: the branch only runs once a plan is used
 up, a 500 is outside the client's retry set, and rows are keyed per run.
 
+Cloud proof, task unchanged: `scripts/run-bench browser-auth-email-otp -k 5 --concurrency 5
+--ref 26714e91d0` (campaign `campaign-20261116-021338-1326195`) scored 5 of 5 PASS, with
+0 infra failures and every guest release verified (runs `20261116-021359-{1330109,1330116,1330124,1330131,1330138}`).
+
+An earlier attempt overlapped a standalone fleet run with a `-k 4` campaign in the same
+HOME. Two Fly agents shared one WireGuard peer, so all 5 guests printed `passed` but
+scored NORESULT/INFRA. That is open item (1) of
+`2026-10-18-campaign-children-started-second-fly-agent-on-shared-wireguard-peer`,
+handed off as repair thread ph75ad04jetrf28c71t4thrs818ja0qr. Recovery of 4 of those
+owners is blocked by a single-volume `attached_machine_id: null` read, handed off as
+repair thread ph71rk67w9v8r071m4vee1hxg98jbvs6. Neither is this cause.
+
+The `browser-auth-email-otp` quarantine marker (`6c5f96b1`) is released. Deploy smoke
+does not select this task (category `auth`, outside the floor), so its streak could
+never start from deploy rows. The five scored fleet passes on main stand in for the
+five-pass release rule.
+
 The regression stays in `/deploy` through `browser-session.blackbox.ts`
 (`select_affected_tests.py --lanes-for` → `backend-blackbox browser-session`).
 That file statically imports `browser-session-logical.cases.ts`, which runs
