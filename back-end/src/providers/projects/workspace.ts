@@ -135,10 +135,25 @@ async function repoExists(ctx: RestoreContext): Promise<boolean> {
 }
 
 async function cloneInto(ctx: RestoreContext, source: string, label: 'remote' | 'bundle') {
-  const out = await ctx.ex.run(`git clone --quiet ${shq(source)} ${shq(ctx.paths.repoDir)}`, {
-    cwd: ctx.paths.homeDir,
-    timeoutMs: GIT_TIMEOUT_MS,
-    env: { GIT_TERMINAL_PROMPT: '0' },
+  // Keep all commits/refs, but fetch only the checked-out tree's blobs now.
+  // Full clones transfer every historical artifact before the CLI can start;
+  // Git's promisor remote retrieves older file contents when actually needed.
+  // A synced bundle is already local and must retain its complete payload.
+  const filter = label === 'remote' ? ' --filter=blob:none' : '';
+  const cloneStarted = Date.now();
+  const out = await ctx.ex.run(
+    `git clone${filter} --quiet ${shq(source)} ${shq(ctx.paths.repoDir)}`,
+    {
+      cwd: ctx.paths.homeDir,
+      timeoutMs: GIT_TIMEOUT_MS,
+      env: { GIT_TERMINAL_PROMPT: '0' },
+    }
+  );
+  log.info('Project clone finished', {
+    projectId: ctx.ws.project.id,
+    source: label,
+    durationMs: Date.now() - cloneStarted,
+    exitCode: out.exitCode,
   });
   if (out.exitCode !== 0) {
     ctx.report.checkout.error = `git clone (${label}) failed: ${ctx.redact(out.stderr).slice(-1000)}`;
