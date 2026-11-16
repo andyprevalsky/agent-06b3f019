@@ -1,5 +1,5 @@
 /**
- * Team-shared compute subscriptions (docs/plans/active/share-all-integrations.md).
+ * Team-shared compute subscriptions (docs/plans/completed/share-all-integrations.md).
  *
  *   lease order (computeCredentials.ts): own → TEAM → pool → funded keys
  *

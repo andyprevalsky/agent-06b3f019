@@ -1,6 +1,6 @@
 /**
  * A teammate's `rose cli run` on a team-shared native-template CLI, executed
- * entirely on the OWNER's side (docs/plans/active/share-all-integrations.md):
+ * entirely on the OWNER's side (docs/plans/completed/share-all-integrations.md):
  *
  *   start a fresh sandbox from the owner's published CLI template snapshot
  *     └► lease the owner's credential bundle server-side (holder = teammate's task)

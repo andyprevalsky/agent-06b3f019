@@ -1,5 +1,5 @@
 /**
- * Team-shared GitHub repos (docs/plans/active/share-all-integrations.md).
+ * Team-shared GitHub repos (docs/plans/completed/share-all-integrations.md).
  *
  *   a ref the reader has no own connection for
  *     ─► resolveTeamDataAccess(reader): validated github_repo grants

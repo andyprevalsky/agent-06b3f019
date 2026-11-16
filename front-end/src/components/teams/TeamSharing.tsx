@@ -105,6 +105,7 @@ const SHARE_EFFECT = new Map<string, string>([
   ['claude_code', SUBSCRIPTION],
   ['gpt_code', SUBSCRIPTION],
   ['cli', "Teammates' agents can run this CLI in your sandbox."],
+  ['mcp', "Teammates' code agents can use this server's tools through your connection."],
 ]);
 const shareEffect = (account: ShareableIntegration) =>
   SHARE_EFFECT.get(account.provider) ?? "Teammates' agents can read this account's messages.";
