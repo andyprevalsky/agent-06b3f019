@@ -1,0 +1,40 @@
+=== attempt 1 (FAIL) ===
+
+=== attempt 2 (PASS) ===
+fixture payload: 49.9MB at /tmp/idb-upload-memory-MCwKqa/payload.json (Postgres backend peak 482MB)
+✅ payload fixture path belongs to one run
+✅ database fixture user ID belongs to one run
+✅ building the fixture keeps one Postgres backend under 1536MB
+✅ the fixture is jsonb canonical text, so the stored blob must equal it byte for byte
+✅ control JSON.parse OOMs under a 256MB heap
+✅ treatment ingest survives the same 256MB heap
+[36m[2026-11-15T03:34:06.218Z] INFO [Integrations] Received IndexedDB origins batchInfo=ingest userId=idb-upload-memory-6469e542-64b0-4485-a148-4849d0eff0e9 bytes=126[0m
+[36m[2026-11-15T03:34:06.238Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$executeRawUnsafe duration_ms=1 status=ok[0m
+[36m[2026-11-15T03:34:06.239Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$executeRawUnsafe duration_ms=1 status=ok[0m
+prisma:error 
+Invalid `prisma.$queryRawUnsafe()` invocation:
+
+
+Raw query failed. Code: `22003`. Message: `ERROR: value "2147483648" is out of range for type integer`
+[36m[2026-11-15T03:34:06.242Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$queryRawUnsafe duration_ms=3 status=error[0m
+✅ batchIndex above the PG int range is a payload error, not a DB error
+[36m[2026-11-15T03:34:06.242Z] INFO [Integrations] Received IndexedDB origins batchInfo=ingest userId=idb-upload-memory-6469e542-64b0-4485-a148-4849d0eff0e9 bytes=127[0m
+[36m[2026-11-15T03:34:06.243Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$executeRawUnsafe duration_ms=1 status=ok[0m
+[36m[2026-11-15T03:34:06.243Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$executeRawUnsafe duration_ms=0 status=ok[0m
+prisma:error 
+Invalid `prisma.$queryRawUnsafe()` invocation:
+
+
+Raw query failed. Code: `22003`. Message: `ERROR: value "-2147483649" is out of range for type integer`
+[36m[2026-11-15T03:34:06.244Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$queryRawUnsafe duration_ms=1 status=error[0m
+✅ batchIndex below the PG int range is a payload error, not a DB error
+[36m[2026-11-15T03:34:06.244Z] INFO [Integrations] Received IndexedDB origins batchInfo=ingest userId=idb-upload-memory-6469e542-64b0-4485-a148-4849d0eff0e9 bytes=261[0m
+[36m[2026-11-15T03:34:06.245Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$executeRawUnsafe duration_ms=0 status=ok[0m
+[36m[2026-11-15T03:34:06.245Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$executeRawUnsafe duration_ms=0 status=ok[0m
+[36m[2026-11-15T03:34:06.246Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$queryRawUnsafe duration_ms=1 status=ok[0m
+[36m[2026-11-15T03:34:06.247Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=undefined operation=$queryRawUnsafe duration_ms=1 status=ok[0m
+[36m[2026-11-15T03:34:06.247Z] INFO [Integrations] Upserted IndexedDB origins batchInfo=batch 1/1 count=1 userId=idb-upload-memory-6469e542-64b0-4485-a148-4849d0eff0e9[0m
+✅ duplicate origins in one payload deterministically keep the last occurrence
+✅ both origins land and the large blob round-trips by md5
+
+10/10 passed

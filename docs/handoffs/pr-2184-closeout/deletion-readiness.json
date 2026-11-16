@@ -741,7 +741,9 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [],
+      "uncommitted": [
+        "docs/handoffs/pr-2184-closeout/deletion-readiness.json"
+      ],
       "unpushed_commits": 0
     }
   ]
