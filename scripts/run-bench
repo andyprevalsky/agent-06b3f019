@@ -254,11 +254,13 @@ if [ "$RUN_BENCH_DURABLE_REQUESTED" -eq 1 ]; then
     touch "$durable_log"  # caller-owned; systemd would otherwise create it root-owned
     durable_caller_cgroup="$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null || true)"
     # A service starts with a clean environment: forward the launch's knobs, never secrets.
+    # FLY_CONFIG_DIR is a path (not a credential): a second campaign's own Fly config
+    # dir keeps its own WireGuard peer instead of silently falling back to ~/.fly.
     durable_env=(--setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=RUN_BENCH_DURABLE_CONTROLLER="$durable_unit")
     durable_skipped=()
     while IFS= read -r name; do
         case "$name" in
-            CLOUDBENCH_*|RUN_BENCH_*|BENCHMARK_*|PREDEPLOY_*|ROSE_*|BOXES_*|CONDUCTOR_*|CLAUDE_CODE_SESSION_ID|TMPDIR|LANG|LC_*|TZ|NO_PROXY|no_proxy|VIRTUAL_ENV) ;;
+            CLOUDBENCH_*|RUN_BENCH_*|BENCHMARK_*|PREDEPLOY_*|ROSE_*|BOXES_*|CONDUCTOR_*|CLAUDE_CODE_SESSION_ID|FLY_CONFIG_DIR|TMPDIR|LANG|LC_*|TZ|NO_PROXY|no_proxy|VIRTUAL_ENV) ;;
             *) continue ;;
         esac
         [ "$name" != RUN_BENCH_DURABLE_CONTROLLER ] || continue

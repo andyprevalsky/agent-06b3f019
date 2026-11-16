@@ -24714,7 +24714,13 @@ def test_unified_catalog_delineates_bench_axes():
 def test_catalog_refuses_a_task_with_a_duplicate_json_key():
     """A textual merge that leaves two `quarantine` objects on one task must fail validation;
     json's last-one-wins silently dropped PR1910's markers on two smoke tasks (2026-11-13)."""
-    from benchmarks.long_horizon import load_raw_catalog
+    from benchmarks.long_horizon import DEFAULT_CATALOG, load_raw_catalog, _reject_duplicate_keys
+
+    # Also guard the checked-in catalogs: the synthetic refusal alone did not
+    # catch a real merge duplicating a quarantine marker on 2026-11-16.
+    for real_catalog in (DEFAULT_CATALOG, DEFAULT_CATALOG.with_name("polar_tasks.json")):
+        text = real_catalog.read_text()
+        assert json.loads(text, object_pairs_hook=_reject_duplicate_keys) == json.loads(text)
 
     with tempfile.TemporaryDirectory() as tmp:
         catalog = Path(tmp) / "tasks.json"

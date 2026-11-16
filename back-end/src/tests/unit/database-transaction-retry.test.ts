@@ -20,6 +20,7 @@ import assert from 'node:assert';
 import {
   prisma,
   runTransactionWithRetry,
+  runReadOnlyTransactionWithRetry,
   isRetryableTransactionError,
   retryOnTransientTransactionStart,
 } from '../../providers/database';
@@ -270,6 +271,25 @@ async function main(): Promise<void> {
     }
   });
 
+  // Regression (deploy-agents run 43822297504): #2285 gave the read-only
+  // transaction a 5 s body timeout, so during a slow-DB window (one query took
+  // 5987 ms, p50 120 ms) assertWorkerDeploymentOwned failed 5 of 5 attempts with
+  // P2028 "Transaction already closed ... timeout 5000 ms". Before #2285 it ran
+  // under runTransactionWithRetry's 10 s body budget. Real local Postgres.
+  await test('read-only transaction keeps a 10 s body budget: a 6 s body succeeds on attempt 1', async () => {
+    let attempts = 0;
+    const readOnly = await runReadOnlyTransactionWithRetry(async (tx) => {
+      attempts++;
+      await tx.$executeRaw`SELECT pg_sleep(6)`;
+      const [row] = await tx.$queryRaw<Array<{ transaction_read_only: string }>>`
+        SHOW transaction_read_only`;
+      return row.transaction_read_only;
+    });
+    assert.strictEqual(attempts, 1, 'a 6 s read-only body must not time out and replay');
+    assert.strictEqual(readOnly, 'on', 'the transaction must stay Postgres READ ONLY');
+  });
+
+  await prisma.$disconnect();
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length > 0) {
     for (const f of failures) console.log(`  ❌ ${f}`);

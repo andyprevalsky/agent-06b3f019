@@ -1,0 +1,14 @@
+{
+  "not_ready": true,
+  "derived_records_after_capture": [
+    "This final archive receipt, recovery proof, aggregate index, compact manifest and handoff: commit sanitized records in PR2413",
+    "Final reviewed/merged PR2413 metadata and link from PR2290",
+    "Native deletion-readiness receipt after archive integration and final process scan",
+    "Final scorecard HTML regenerated from captured renderer/spec and committed readiness/merge metadata",
+    ".context/deploy-scorecard-latest.json later pointer change",
+    "Reporting interval closure after finish, derived from recorded native event timestamps; captured interval was still open"
+  ],
+  "rule": "No later raw trajectory or unique runtime evidence is covered by this snapshot. If new raw evidence appears, explicitly archive it or commit an appropriate sanitized durable record before READY.",
+  "resources": "Persistent PAUSED production codeSession for df99 retained normally with remote checkpoint and user repository; not a released benchmark resource and no deletion authorized.",
+  "production": "Do not claim all lanes PASS: native Fly failure and semantic refusal remain qualified NOT_INTRODUCED owner PR2407; direct workflow migration45/45 passed. Captured records preserve these outcomes."
+}

@@ -950,6 +950,12 @@
   },
   {
     "name": "background-agent-message-smoke",
+    "quarantine": {
+      "since": "2026-11-16",
+      "repair": "pending-handoff:df8b8c8fdef1423187eec31d764ebd9e",
+      "error": "Timeout after 183s (task timeout=180s) | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR #2358 deploy smoke agent 4bdfc1f6-0c74-4042-9931-d5010b657d48: 18 live rose-1-ultra LLM spans totalled 191 s (execute_loop iteration 8 call cancelled at 45 s by the task deadline); 0 Prisma errors; the PR's only changed path (runReadOnlyTransactionWithRetry) never executed. Rerun on the same source passed."
+    },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,

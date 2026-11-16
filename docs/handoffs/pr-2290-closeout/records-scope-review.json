@@ -1,0 +1,15 @@
+{
+  "files": [
+    "docs/handoffs/pr-2290-closeout/failure-report.json",
+    "docs/rca/cases/2026-11-16-shared-handoff-prompt-offered-unsupported-native-channel.md"
+  ],
+  "head": "9ded7123ee52ccd414260bbd3b5649b18c38168e",
+  "reviewer": "thr_ac0ba84a7f724691af3de36ea60a6b50",
+  "status": "code-only",
+  "owner_thread": "ph75rdnnakqvqqjzm38dg0w2sd8jb4h9",
+  "owner_turn": "01a1e590-fead-7193-8415-c4a82d1c21a3",
+  "review_thread": "ph71vhbf2pr5gg5f9n91ps4thd8ja60f",
+  "review_turn": "01a1e591-f88e-7482-b0b8-abd2a8792052",
+  "evidence_sha256": "55c9521029b593c3c3d1f424e2d547074d7f7cfba1e1b3bcd186e628dea06138",
+  "qualification": "Fresh independent zero-scope classification of D1case and generated failure-report description fields. V1carried check correctly requested review for the new report. Metadata had been pushed after path-review before the pending guard was noticed; no merge occurred. V2native authority verification passed before final integration."
+}
