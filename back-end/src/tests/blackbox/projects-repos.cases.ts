@@ -1,5 +1,5 @@
 /**
- * Projects are repos (docs/plans/active/projects-are-repos.md P4, P5), registered
+ * Projects are repos (docs/plans/completed/projects-are-repos.md P4, P5), registered
  * by projects.blackbox.ts over real HTTP + local Postgres.
  *
  *   POST /api/integrations/github/repos (no project) ─► the user's project with that

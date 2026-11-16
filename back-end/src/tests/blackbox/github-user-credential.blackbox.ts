@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * A user's own GitHub credential, and projects shared at spawn
- * (docs/plans/active/projects-are-repos.md, round 4), over HTTP + local Postgres.
+ * (docs/plans/completed/projects-are-repos.md, round 4), over HTTP + local Postgres.
  * GitHub is a fetch stub in this process; the credential routes run on an
  * in-process app (so the stub answers their verification), agent placement on
  * the isolated test backend.

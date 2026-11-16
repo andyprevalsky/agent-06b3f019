@@ -1,6 +1,6 @@
 /**
  * A code spawn with `github_repo_ref=<project id>` restores exactly that project
- * (docs/plans/active/projects-are-repos.md P5), including one imported by
+ * (docs/plans/completed/projects-are-repos.md P5), including one imported by
  * `rose push` from a checkout with no remote. Registered by
  * project-workspace.blackbox.ts, which owns the fixture directory, the CLI
  * runner and the leak scan list.

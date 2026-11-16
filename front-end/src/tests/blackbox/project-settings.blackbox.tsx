@@ -1,7 +1,7 @@
 /**
  * Blackbox tests for project settings (UI ledger rows 19/30/60), opened from a
  * project row's ⚙ in Integrations › Projects (the left bar has no projects
- * since 2026-11-15; plan docs/plans/active/projects-are-repos.md).
+ * since 2026-11-15; plan docs/plans/completed/projects-are-repos.md).
  *
  * Projects API = MSW in-memory mock in rose-sidebar.fixtures.tsx, strict like
  * the server: GET /api/projects -> { projects } · PUT /api/projects/:id (edited

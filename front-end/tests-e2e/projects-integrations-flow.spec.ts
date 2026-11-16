@@ -1,6 +1,6 @@
 /**
  * Repositories live in Integrations; the left bar only has folders (plan
- * docs/plans/active/projects-are-repos.md, P1/P2/P7), in the real desktop and
+ * docs/plans/completed/projects-are-repos.md, P1/P2/P7), in the real desktop and
  * mobile app. Controlled API only (every /api/** route is answered here).
  *
  *   - left bar: folders (isFolder rows) with plain folder icons and no settings;

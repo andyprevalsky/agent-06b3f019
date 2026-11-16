@@ -1,6 +1,6 @@
 /**
  * Blackbox tests: Integrations › GitHub Repositories (projects and GitHub repos
- * are one thing; plan docs/plans/active/projects-are-repos.md, P1 + P2).
+ * are one thing; plan docs/plans/completed/projects-are-repos.md, P1 + P2).
  *
  *   - every repository is one integration row: name + "owner/repo · branch · N
  *     env files · synced …", or "From your computer" with no GitHub repo; no
@@ -24,7 +24,7 @@
  *     longer has the old GitHub Repos card
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -370,9 +370,9 @@ describe('Integrations › GitHub Repositories', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel import' }));
     expect(held.bridge.cancelImport).toHaveBeenCalledWith('run-2');
     expect(screen.queryByTestId('local-import')).toBeNull();
-    // A late plan from the cancelled run never shows.
-    held.release();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A late plan from the cancelled run never shows: release() emits synchronously,
+    // and act() flushes every React update it could cause.
+    await act(async () => held.release());
     expect(screen.queryByTestId('local-import-review')).toBeNull();
   });
 

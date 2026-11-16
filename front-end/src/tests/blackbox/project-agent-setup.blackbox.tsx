@@ -6,8 +6,8 @@
  * shows the plan for approval and applies it to this project. Outside the Mac
  * app the section links Download for Mac and mints nothing.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -99,6 +99,8 @@ describe('Sync from your computer', () => {
 
   it('outside the Mac app it links Download for Mac and mints nothing', async () => {
     const mints = mockMint();
+    // A mint starts its POST synchronously, so the fetch calls show it without waiting.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const section = renderPanel();
     expect(within(section).getByRole('link', { name: 'Download for Mac' })).toHaveAttribute(
       'href',
@@ -106,7 +108,12 @@ describe('Sync from your computer', () => {
     );
     expect(section).toHaveTextContent('Open the Rose Mac app to sync');
     expect(within(section).queryByRole('button', { name: 'Choose folder…' })).toBeNull();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await act(async () => {});
+    const minting = fetchSpy.mock.calls.filter(([input]) =>
+      String(input).includes('cli-login-codes'),
+    );
+    expect(minting).toEqual([]);
     expect(mints).toEqual([]);
+    fetchSpy.mockRestore();
   });
 });
