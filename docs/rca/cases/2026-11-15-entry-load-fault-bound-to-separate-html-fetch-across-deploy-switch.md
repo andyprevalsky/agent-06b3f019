@@ -23,6 +23,8 @@ tags:
   - playwright-route
   - fault-injection
 sources:
+  - PR #2229
+  - commit 1f7bbe84e708eeb88108737491219fa43f93ac40
   - PR #2205
   - commit 9d6a810aeabb9e96734ed50a843bd9f058c2b731
   - PR #1922
@@ -97,7 +99,8 @@ The whole spec passes 40/40 with `--repeat-each=5` on a local production build.
 
 The cached-404 test's observed failure in run 43686929632 (`Expected: 2 Received: 3`) is a
 different mechanism (appVersion's reload onto a newer build after mount) and stays a
-follow-up. Test-only change; no runtime or 10k-agent impact. The spec runs in the deploy
+follow-up. Shipped in PR #2229 (merge 1f7bbe84e7); production semantic run 43809390145 passed on that SHA with all
+eight entry-load tests green. Test-only change; no runtime or 10k-agent impact. The spec runs in the deploy
 semantic-stack `ui` lane (every spec except chat latency, per `deploy_test_semantic.py`) and in
 the production semantic gate. `select_affected_tests.py --lanes-for` reports NOT RUN for every
 `tests-e2e` spec because the mapper does not register the semantic lanes, a gap that predates
