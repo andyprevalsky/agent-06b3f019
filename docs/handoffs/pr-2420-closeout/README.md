@@ -25,3 +25,5 @@ No Freedom setting or protected instruction was changed. No unowned process was 
 Production semantic workflow [43949838339](https://github.com/Rose-Ai-Labs/rose/actions/runs/43949838339) passed all five jobs on exact merge `1ec28940191764ecf435ffc38b345006269bc95b`: frontend semantic flows and agent-plan, web-search, agent-execute, direct-answer lifecycle ratchets. Runtime deployments and payment probes were not applicable. The native production receipt retains source-equivalent frontend binding and exact merge/source IDs.
 
 The timing/outcome command completed and published 21 native factory-ledger rows. Final deletion readiness is recorded by the native checker, rather than inferred from passing tests. Earlier dormant processes disappeared without being signalled; no unowned process was killed.
+
+Final native readiness receipt has `ready: true`, `open_items: []`; the CLI requires that receipt to be committed and merged in this records PR before final READY certification. No old processes remained and no process was signalled.
