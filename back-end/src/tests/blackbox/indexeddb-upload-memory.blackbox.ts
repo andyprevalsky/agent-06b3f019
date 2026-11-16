@@ -41,7 +41,6 @@ import {
   formatUploadChildFailure,
   type UploadChildResult,
 } from './indexeddb-upload-memory.diagnostics';
-import { quarantine } from '../helpers/quarantine';
 
 assertLocalDatabase();
 
@@ -433,18 +432,4 @@ async function main(): Promise<void> {
   }
 }
 
-const runsSuite = !isChildMode && !process.argv.some((arg) => arg.startsWith('--print-'));
-const indexedDbUploadMemoryUnit = 'indexeddb-upload-memory';
-void (runsSuite
-  ? quarantine(
-      {
-        since: '2026-11-15',
-        repair: 'pending-handoff:27bccbe224b44535a662b172d1f728c3',
-        error: 'RERUN: indexeddb-upload-memory failed (813ms); rerunning once',
-        evidence:
-          '.context/deploy-pipeline-pr2104/attempts/6/final/backend-coverage-blackbox/remote-artifact/files/back-end/coverage/blackbox-run-shard1/indexeddb-upload-memory.log (PR2104 FLAKY 27bccbe2)',
-      },
-      main,
-      { unit: indexedDbUploadMemoryUnit }
-    )()
-  : main());
+void main();

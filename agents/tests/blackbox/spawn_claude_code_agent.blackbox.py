@@ -21,7 +21,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "lib"))
-from test_quarantine import quarantine
 
 from _test_utils import (
     BlackboxResult,
@@ -930,12 +929,6 @@ async def test_handoff_complete_needs_standard_and_declared_fields():
         assert expected in reasoning, (expected, reasoning)
 
 
-@quarantine(
-    since="2026-11-13",
-    repair="https://boxes.dev/thread/ph70grxsq8n6vgq6sfw4m1tmf98jaxw8",
-    error="claude_ws_server_task_is_a_goal: AssertionError: not ok 4 - a user's direct turn that writes the handoff hands the session back at once: timeout waiting for CLI exit",
-    evidence="PR1865 round 67 agents-coverage-blackbox spawn-claude-code-agent FLAKY: goal-turn.test.mjs subtest 4 CLI exit not seen within 15 s under coverage load; same-source rerun passed",
-)
 async def test_claude_ws_server_starts_every_task_as_a_goal():
     """The sandbox ws-server turns each task into ``/goal <task + end condition>`` and
     hands a held session back once the goal handoff exists (goal-turn.test.mjs)."""

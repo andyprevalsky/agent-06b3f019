@@ -187,17 +187,31 @@ The full live Codex domain passed34/34, no skips, in102.365s on the bounded
 retention revision and terminated both owned sandboxes. Renewed grounding and
 deployment-wide verification remain required.
 
+The required post-harness eval on runtime 2a2c99 completed its Collatz root in
+136.5 seconds, one attempt, with its verifier confirming 111 steps and 112
+sequence values. Actual parent: Claude Opus 5.5 through OAuth; child: legacy
+Claude Code with exact model/effort/speed unrecorded. This is compatibility
+measurement, not a native restricted-task outcome or a speed comparison. The
+native card remains INCOMPLETE because the eval route lacks lifecycle ledger
+receipts, despite independently verified cleanup. Its optional mirror reported
+a read timeout; readback and the normal publisher later verified the original
+write committed, the FE rendered 54 messages and the final dump was reachable.
+No duplicate upload or extra agent run was made. Full private receipts retain
+all cost, cache, timing and publication qualifications.
+
 The original paused root has never been resumed or changed. Open PR1636 must
 retain the capability-specific invariant if later merged.
 
 ## Human feedback
 
-The user reported noncompletion after 24 hours with status PAUSED and required
-classification as input stall, harness failure, or justified progress. Standing
-human instructions prohibit treating pause as the root cause, changing models
-or trajectories to speed up, and weakening task constraints or validators.
-Cost work must consider cache/planner memory first. Approval and deployment are
-owned by the coordinating parent. No user approval has been requested here.
+The user reported noncompletion after 24 hours with status PAUSED and requested
+classification as input stall, harness failure, or justified progress. For an
+input stall, the user requires speeding up without changing the model or using
+prompts/context injection to alter its trajectory. For a price limit, use cache
+hits or planner memory before prompt changes. All approval requests belong to
+the main agent. The observed pause was preserved; evidence, rather than a user
+instruction about causality, establishes that failure preceded the pause.
+RCA118-HANDOFF-4 received a GROUNDED review without a human approval request.
 
 ## Reusable lesson
 

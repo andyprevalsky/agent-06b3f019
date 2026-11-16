@@ -950,12 +950,6 @@
   },
   {
     "name": "background-agent-message-smoke",
-    "quarantine": {
-      "since": "2026-11-15",
-      "repair": "https://boxes.dev/thread/ph77xckbcc8jvnqeaaw3x92tg18j0eb4",
-      "error": "Timeout after 182s (task timeout=180s) | Investigate: python agents/benchmarks/agent_latency.py 058a97e4-1978-4db6-b342-35da913f3a71 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
-      "evidence": "PR #2097 deploy 17ba8b2cd6 smoke: first attempt (root 058a97e4) still ACTIVE at 180s: response_schema refresh after the mid-run follow-up (Cerebras 429 -> Foundry fallback, 16.5s) blocked the root's next turn, explore finished first, verifier rejected the post-completion forward (50%), second cycle completed ~16s late; same-source rerun PASSED (FLAKY 48f4f224); NOT_INTRODUCED, #2097 changes only front-end/ (0 /api/teams or browser traffic); same symptom as docs/rca/cases/2026-11-10-background-message-completion-exceeded-deadline.md, repair owner PR #1946"
-    },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,
@@ -4776,12 +4770,6 @@
   },
   {
     "name": "browser-auth-account-locked",
-    "quarantine": {
-      "since": "2026-11-11",
-      "repair": "https://boxes.dev/thread/thr_c71bb796ab6e4c7aa1f6543fae520280",
-      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2.",
-      "evidence": ".context/deploy-session/round23-flaky-account-locked/REPORT.md (Tilion closed CDP 1012/410 shutdown mid-run; rerun PASS)"
-    },
     "title": "Hosted Sign-In: Locked Account",
     "description": "The saved login's account is locked; the browser agent must stop trying and ask the user for sign-in help.",
     "prompt": "Tell me my member number for {auth_test_site_url}",
@@ -6207,12 +6195,6 @@
     ]
   },
   {
-    "quarantine": {
-      "since": "2026-11-13",
-      "repair": "https://boxes.dev/thread/thr_7ab578db49d2474cad54e3807e2c5220",
-      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2 (Tilion sess_993d70* worker 503 on CDP connect and DELETE; browser agent recorded 0 steps). First native attempt FAILED; one automatic retry PASS (FLAKY).",
-      "evidence": "PR1910 deploy v3 smoke .context/deploy-cloud/c96ccd4b4bc36d6c51f4e4f74f752ad8d0f0cab7ea264ca9b2651ce259996b0f; RCA: tilion.ts validation+cleanup AggregateError skips replacement retry"
-    },
     "name": "browser-auth-member-discount-purchase",
     "title": "Hosted Purchase: Account Chosen For The Member Price",
     "description": "The shop lets guests buy, but members pay 10% less; the browser agent creates an account with the minted identity instead of checking out as a guest, and pays the member price.",
