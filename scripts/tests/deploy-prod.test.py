@@ -917,6 +917,25 @@ class FlyTest(Base):
         self.assertIn(dp.EXISTING_PROCESS_DOC, self.report()['lanes']['fly']['reason'])
         self.assertEqual(fake.runs, [])
 
+    def test_prequeue_migration_uses_qualified_identity_preserving_original(self) -> None:
+        live = 'a' * 40
+        original = {'deployment_token': '123-2', 'conclusion': 'failure', 'job_id': None}
+        self.write_production(status='passed', fly=original, cutover_verify={
+            'verified_by': 'prequeue-live-descendant', 'source_commit': live, 'attempt': '140-1',
+            'original_source_commit': SHA, 'monitor_verify_exit': 0})
+        fake = Fake(self.root, [])
+        passed, reason, code = dp.lane_workflow_migration(self.ctx(fake))
+        self.assertTrue(passed, reason)
+        self.assertEqual(code, 0)
+        self.assertEqual(fake.runs[0][2]['TEMPORAL_WORKER_BUILD_ID'], live)
+        self.assertEqual(fake.runs[0][2]['TEMPORAL_WORKER_DEPLOYMENT_TOKEN'], '140-1')
+        self.assertIn('qualified descendant', reason)
+        self.assertEqual(json.loads((self.state / 'production.json').read_text())['fly'], original)
+        self.write_production(status='failed')
+        rejected = Fake(self.root, [])
+        self.assertFalse(dp.lane_workflow_migration(self.ctx(rejected))[0])
+        self.assertEqual(rejected.runs, [])
+
     def test_migration_without_token_fails(self) -> None:
         fake = Fake(self.root, [])
         passed, reason, _code = dp.lane_workflow_migration(self.ctx(fake))

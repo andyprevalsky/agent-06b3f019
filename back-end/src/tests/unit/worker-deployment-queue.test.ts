@@ -1,3 +1,4 @@
+import { qualificationCases } from './worker-qualification.cases';
 import { emptyRetentionCases } from './worker-empty-retention.cases';
 import { retainedRouteMismatchCases } from './worker-route-retention.cases';
 import {
@@ -416,6 +417,8 @@ async function processSafety() {
   }
 }
 async function main() {
+  await test('production qualifier reads durable terminal originals and live pointer without mutations', () =>
+    qualificationCases({ api, prisma, appFor, identity }));
   let lease = await acquireWorkflowDeploymentLease({ leaseMs: 60000, heartbeatMs: 59000 });
   try {
     await test('concurrent enqueue/reservation FIFO, retained failure, same job recovery', () =>

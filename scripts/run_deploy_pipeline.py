@@ -298,6 +298,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from typing import Literal, overload
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3653,6 +3654,7 @@ def merged_changes(merged_sha: str, root: Path | None = None) -> list[str]:
     root = SOURCE_ROOT if root is None else root
     output = subprocess.run(
         ["git", "diff", "--name-only", f"{merged_sha}^1", merged_sha], cwd=root, check=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300,
     ).stdout
     return [line for line in output.splitlines() if line]
@@ -3707,6 +3709,7 @@ def agent_cutover_required(changed: list[str], root: Path | None = None, merged_
     # The filter that governed the merge's push is the one committed in it.
     workflow_text = subprocess.run(
         ["git", "show", f"{merged_sha}:{AGENTS_WORKFLOW_PATH}"], cwd=root, check=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
     ).stdout if merged_sha else (root / AGENTS_WORKFLOW_PATH).read_text(encoding="utf-8")
     triggers = [path for path in deploy_agents_push_matches(changed, workflow_text) if path not in runtime]
@@ -3750,7 +3753,18 @@ def _gh_read_token(root: Path) -> str | None:
     return token
 
 
-def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS, read_only: bool = False) -> str:
+@overload
+def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
+             read_only: bool = False, binary: Literal[False] = False) -> str: ...
+
+
+@overload
+def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
+             read_only: bool = False, binary: Literal[True]) -> bytes: ...
+
+
+def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
+             read_only: bool = False, binary: bool = False) -> str | bytes:
     """``gh ...`` stdout; a failed call raises with gh's own message. Writes
     (dispatch, rerun) run with the inherited GH_TOKEN, the workflow-scoped
     identity. ``read_only`` calls run with the token pool's best member and,
@@ -3758,10 +3772,11 @@ def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SE
     authoritative), once more with the inherited GH_TOKEN."""
     def run(env: dict[str, str] | None) -> subprocess.CompletedProcess:
         return subprocess.run([_gh_executable(), *arguments], cwd=root, env=env, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True, timeout=timeout)
+                              stderr=subprocess.PIPE, text=not binary, timeout=timeout)
 
     def message(completed: subprocess.CompletedProcess) -> str:
-        return completed.stderr.strip() or completed.stdout.strip()
+        value = completed.stderr.strip() or completed.stdout.strip()
+        return value.decode(errors="replace") if isinstance(value, bytes) else value
 
     token = _gh_read_token(root) if read_only else None
     if token is not None and token != os.environ.get("GH_TOKEN"):
@@ -3791,6 +3806,30 @@ def _gh_json(arguments: list[str], root: Path) -> object:
 
 def _gh_run_log(run_id: str, root: Path) -> str:
     return _gh_text(["run", "view", run_id, "--log"], root, timeout=GH_TIMEOUT_SECONDS * 5, read_only=True)
+
+
+def complete_failed_run_log(run_id: str, attempt: str, *, root: Path) -> tuple[str, dict]:
+    """The terminal attempt's complete GitHub log archive. A CLI preview or a
+    truncated/invalid archive is not proof of non-enqueue."""
+    import io
+    import zipfile
+
+    if not run_id.isdigit() or not attempt.isdigit():
+        raise ProductionGateError("missing exact original run/attempt for log archive")
+    raw = _gh_text(["api", "--allow-escape-sequences",
+                    f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/attempts/{attempt}/logs"],
+                   root, timeout=GH_TIMEOUT_SECONDS * 5, read_only=True, binary=True)
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            names = archive.namelist()
+            if archive.testzip() is not None or not names:
+                raise ValueError("empty or corrupt log archive")
+            texts = [archive.read(name).decode("utf-8") for name in names if name.endswith(".txt")]
+            if not texts or any(not text.strip() for text in texts):
+                raise ValueError("missing job logs")
+    except (ValueError, TypeError, OSError, zipfile.BadZipFile) as error:
+        raise ProductionGateError(f"complete original attempt log archive unavailable: {error}") from error
+    return "\n".join(texts), {"archive_sha256": hashlib.sha256(raw).hexdigest(), "entries": names}
 
 
 def recover_job_id(log: str, run_id: str) -> str:
@@ -3876,7 +3915,19 @@ def fly_wait(merged_sha: str, *, root: Path, waits: list[dict], state: dict | No
     # Step 13), and `gh run rerun` would mint an attempt whose token the job
     # identity rejects. The durable job recovered from this run's log is the
     # authority for "live" (Step 13ab: stage SUCCEEDED + monitor --verify).
-    result["job_id"] = recover_job_id(log=_gh_run_log(run_id, root), run_id=run_id)
+    log = _gh_run_log(run_id, root)
+    found = sorted(set(JOB_ID_PATTERN.findall(log)))
+    if (not found and conclusion in ("failure", "timed_out", "cancelled")
+            and re.search(r"No queued worker deployment for [a-z0-9-]+", log)):
+        log, archive = complete_failed_run_log(run_id, attempt, root=root)
+        # Archive and durable absence independently corroborate non-enqueue.
+        if (not log.strip() or "Queued production worker deployment" in log
+                or not re.search(r"No queued worker deployment for [a-z0-9-]+", log)):
+            raise ProductionGateError("original workflow log is empty or has an invalid queued identity")
+        result["no_job_evidence"] = {"log": log, "sha256": hashlib.sha256(log.encode()).hexdigest(),
+                                     "queued_job_ids": [], "run_id": run_id, "attempt": attempt, **archive}
+    else:
+        result["job_id"] = recover_job_id(log=log, run_id=run_id)
     return result
 
 
@@ -3914,13 +3965,14 @@ def surface_hash(root: Path, commit: str) -> str:
     def failed(detail: str) -> ProductionGateError:
         return ProductionGateError(f"could not compute the agent workflow surface hash of {commit}: {detail}")
 
-    algorithm = subprocess.run(["git", "show", f"{commit}:{SURFACE_HASH_SCRIPT.as_posix()}"], cwd=root,
+    git_env = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+    algorithm = subprocess.run(["git", "show", f"{commit}:{SURFACE_HASH_SCRIPT.as_posix()}"], cwd=root, env=git_env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
     if algorithm.returncode != 0:
         raise failed(algorithm.stderr.strip())
     # deploy-agents.yml's sparse checkout excludes agents/benchmarks/; so does this.
     archive = subprocess.run(["git", "archive", "--format=tar", commit, "--", ":(glob)agents/**/*.py",
-                              ":(exclude)agents/benchmarks/"], cwd=root,
+                              ":(exclude)agents/benchmarks/"], cwd=root, env=git_env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
     if archive.returncode != 0:
         raise failed(archive.stderr.decode(errors="replace").strip())
@@ -4042,6 +4094,82 @@ def _live_successor(target_id: str, merged_sha: str, *, app: object, backend: Pa
             "live_surface_hash": live["identity"].get("surfaceHash"), "replaced_job_id": target_id}
 
 
+def prequeue_descendant_verify(fly: dict, merged_sha: str, *, root: Path) -> dict:
+    """Qualify a terminal failed workflow through physical descendant proof.
+    Never assign the descendant's identity to the original workflow/job fields."""
+    import tomllib
+
+    config = subprocess.run(["git", "show", f"{merged_sha}:agents/fly.toml"], cwd=root, check=True,
+                            env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    app = tomllib.loads(config.stdout).get("app")
+    if not isinstance(app, str) or not re.fullmatch(r"[a-z0-9-]+", app):
+        raise ProductionGateError("original source has no valid Fly app")
+    if not re.search(rf"No queued worker deployment for {re.escape(app)}(?:\s|$)",
+                     fly["no_job_evidence"]["log"]):
+        raise ProductionGateError("original recovery log does not establish no queued job for the source app")
+    backend = root / "back-end"
+    env = {**_dotenv_values(backend / ".env"), **os.environ}
+    def read_snapshot() -> dict:
+        read = subprocess.run(["node", "--import", "tsx", "scripts/production-worker-qualification.ts",
+                               "--app", app, "--source", merged_sha], cwd=backend, env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+        if read.returncode != 0:
+            raise ProductionGateError(f"qualification snapshot read failed: {read.stderr.strip()}")
+        try:
+            snapshot = json.loads(read.stdout)
+        except ValueError as error:
+            raise ProductionGateError("qualification snapshot is not valid JSON") from error
+        if not isinstance(snapshot, dict):
+            raise ProductionGateError("qualification snapshot is not an object")
+        return snapshot
+
+    snapshot = read_snapshot()
+    try:
+        if snapshot.get("app") != app or snapshot.get("sourceCommit") != merged_sha:
+            raise ValueError("qualification snapshot source/app mismatch")
+        if snapshot.get("originalJobs") != []:
+            raise ValueError("durable original job exists or absence is unproven; recover the saved job")
+        live = snapshot["liveJob"]
+        identity = live["identity"]
+        live_id, source, token = live["jobId"], identity["sourceCommit"], identity["attempt"]
+        if (not re.fullmatch(r"[a-f0-9]{64}", live_id) or live["stage"] != "SUCCEEDED"
+                or identity["app"] != app or snapshot["livePointer"]["updatedBy"] != live_id
+                or not re.fullmatch(r"[a-f0-9]{40}", source) or source == merged_sha
+                or not isinstance(token, str) or not token):
+            raise ValueError("live pointer/job is not a same-app SUCCEEDED strict descendant identity")
+    except (ValueError, TypeError, KeyError) as error:
+        raise ProductionGateError(f"prequeue descendant qualification refused: {error}") from error
+    ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", merged_sha, source], cwd=root,
+                              env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=120)
+    if ancestry.returncode != 0:
+        raise ProductionGateError("live source is not a proven strict Git descendant of the original merge")
+    expected = surface_hash(root, source)
+    if identity.get("surfaceHash") != expected:
+        raise ProductionGateError("live job surface hash does not match its actual source")
+    # Reuse the owning exact-identity verifier. This also binds attempt and runs
+    # managed --verify including qualified retirement; CI success is insufficient.
+    qualified_fly = {"job_id": live_id, "deployment_token": token}
+    proof = cutover_verify(qualified_fly, source, expected, root=root)
+    if proof.get("verified_by"):
+        raise ProductionGateError("live pointer moved during prequeue verification; rerun read-only qualification")
+    final_run = _gh_json(["run", "view", fly["run_id"], "--json", "status,conclusion,attempt,headSha"], root)
+    if (not isinstance(final_run, dict) or final_run.get("status") != "completed"
+            or final_run.get("headSha") != merged_sha or str(final_run.get("attempt")) != fly["attempt"]
+            or final_run.get("conclusion") != fly["conclusion"]):
+        raise ProductionGateError("original workflow source/attempt/status changed during qualification")
+    # This is an observed physical proof, not a promise of permanent absence.
+    # Recheck after monitor verification so a newly saved original job or moved
+    # pointer cannot authorize this observation through the earlier snapshot.
+    if read_snapshot() != snapshot:
+        raise ProductionGateError("durable absence or live pointer/job changed during qualification")
+    return {**proof, "verified_by": "prequeue-live-descendant", "original_job_id": None,
+            "original_source_commit": merged_sha, "absence": snapshot,
+            "original_run_recheck": final_run,
+            "live_job_id": live_id, "live_source_commit": source}
+
+
 def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path) -> dict:
     """deploy.md Step 13ab for the cooperative route: the saved job must be
     ``SUCCEEDED`` (CI cut over only when its durable job is; a green build or
@@ -4051,8 +4179,10 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
     records the stage read, separately from the run's conclusion. A
     ``SUPERSEDED`` job is verified by its descendant's cutover instead
     (``verified_by: descendant-cutover``), never reported as its own."""
+    if fly.get("job_id") is None and fly.get("no_job_evidence"):
+        return prequeue_descendant_verify(fly, merged_sha, root=root)
     backend = root / "back-end"
-    env = {**os.environ, **_dotenv_values(backend / ".env")}
+    env = {**_dotenv_values(backend / ".env"), **os.environ}
     job_id = fly["job_id"]
     read = subprocess.run(["node", "--import", "tsx", "scripts/worker-deployment-queue.ts", "read", "--job-id", job_id],
                           cwd=backend, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
@@ -4201,7 +4331,8 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
             live = receipt["cutover_verify"].get("live_job_id")
             print(f"PIPELINE_PRODUCTION cutover=verified job={fly['job_id']} job_stage={fly['job_stage']} "
                   f"hash={expected}" + (f" verified_by=descendant-cutover descendant={carried}" if carried else "")
-                  + (f" verified_by=live-successor-cutover live={live}" if live else ""), flush=True)
+                  + (f" verified_by={receipt['cutover_verify'].get('verified_by', 'live-successor-cutover')} live={live}"
+                     if live else ""), flush=True)
         else:
             receipt["fly"] = {"required": False,
                               "reason": "no agent runtime or deploy-agents.yml push-path change in the merge"}

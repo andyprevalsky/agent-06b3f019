@@ -2680,7 +2680,8 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         subprocess.run([*git, "commit", "-qm", message], check=True)
         return subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
 
-    commit("base", {"README": "base\n"})
+    commit("base", {"README": "base\n", "agents/fly.toml": 'app = "navi-whisper-lux"\n',
+                    "scripts/agent_workflow_surface_hash.py": 'print("feedface")\n'})
     tests_only = commit("agents tests + backend", {"agents/tests/new_case.py": "x\n", "back-end/src/x.ts": "y\n"})
     runtime = commit("agents runtime", {"agents/worker_patch.py": "z\n"})
     # 2026-11-16 (#2147): a controller-only merge starts deploy-agents.yml through its push paths.
@@ -2703,6 +2704,7 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         "#!/usr/bin/env bash\n"
         'echo "$*" >> "$FAKE_GH_DIR/calls.log"\n'
         'case "$1 $2" in\n'
+        '  "api --allow-escape-sequences") [ "$3" = "repos/{owner}/{repo}/actions/runs/123/attempts/1/logs" ] || exit 1; cat "$FAKE_GH_DIR/logs.zip" ;;\n'
         '  "run list") cat "$FAKE_GH_DIR/list.json" ;;\n'
         '  "run view")\n'
         '    case " $* " in\n'
@@ -2716,6 +2718,8 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         "#!/usr/bin/env bash\n"
         'echo "$*" >> "$FAKE_GH_DIR/node-calls.log"\n'
         'case " $* " in\n'
+        '  *production-worker-qualification.ts*) n=$(cat "$FAKE_GH_DIR/qualification-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/qualification-count"\n'
+        '    f="$FAKE_GH_DIR/qualification.json"; if [ "$n" -gt 1 ] && [ -f "$FAKE_GH_DIR/qualification-next.json" ]; then f="$FAKE_GH_DIR/qualification-next.json"; fi; cat "$f" ;;\n'
         '  *worker-deployment-queue.ts*) args="$*"; id="${args##*--job-id }"; id="${id%% *}"\n'
         '    f="$FAKE_GH_DIR/job-$id.json"\n'
         '    [ -f "$f" ] || f="$FAKE_GH_DIR/job.json"; cat "$f" ;;\n'
@@ -2735,7 +2739,8 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     def reset(list_rows: list[dict], views: list[dict], log: str = "") -> None:
         for stale in fake.glob("view-*"):
             stale.unlink()
-        for stale in (calls, fake / "node-calls.log", *fake.glob("job-*.json"), *fake.glob("monitor-*.json")):
+        for stale in (calls, fake / "node-calls.log", fake / "qualification-count", fake / "qualification-next.json",
+                      *fake.glob("job-*.json"), *fake.glob("monitor-*.json")):
             stale.unlink(missing_ok=True)
         (fake / "list.json").write_text(json.dumps(list_rows))
         for index, view in enumerate(views, start=1):
@@ -2894,7 +2899,7 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
             "jobId": descendant_id, "stage": descendant_stage,
             "identity": {"app": "app", "sourceCommit": descendant_source, "attempt": "130-1", "surfaceHash": "c0ffee"}}))
 
-    done = {"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}
+    done = {"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"], "headSha": runtime}
     reset([running], [done], log)
     write_superseded("SUCCEEDED", later)
     ran = run_production(runtime, tmp / "production-state-7a")
@@ -2974,6 +2979,121 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         assert ran.returncode == 1 and expected in ran.stdout, (expected, ran.stdout)
         assert "dispatch" not in call_lines(), call_lines()
         assert f"--job-id {live_id} --verify" not in (fake / "node-calls.log").read_text(), "no live verify before proof"
+    # Failed before enqueue: no original identity may be invented. A read-only
+    # durable snapshot proves absence and names the live strict descendant.
+    reset([running], [{**done, "conclusion": "failure"}], "build timed out before enqueue\nNo queued worker deployment for navi-whisper-lux\n")
+    (fake / "qualification.json").write_text(json.dumps({
+        "app": "navi-whisper-lux", "sourceCommit": runtime, "attempt": "123-1", "originalJobs": [],
+        "livePointer": {"updatedBy": live_id},
+        "liveJob": {"jobId": live_id, "stage": "SUCCEEDED", "identity": {
+            "app": "navi-whisper-lux", "sourceCommit": newest, "attempt": "140-1", "surfaceHash": "feedface"}}}))
+    (fake / f"job-{live_id}.json").write_text(json.dumps({"jobId": live_id, "stage": "SUCCEEDED", "identity": {
+        "app": "navi-whisper-lux", "sourceCommit": newest, "attempt": "140-1", "surfaceHash": "feedface"}}))
+    import zipfile
+    with zipfile.ZipFile(fake / "logs.zip", "w") as archive:
+        archive.writestr("0_deploy.txt", "build timed out before enqueue\n")
+        archive.writestr("1_recover.txt", "No queued worker deployment for navi-whisper-lux\n")
+    state_no_job = tmp / "production-prequeue"
+    ran = run_production(runtime, state_no_job)
+    assert ran.returncode == 0, ran.stdout
+    qualified = json.loads((state_no_job / "production.json").read_text())
+    assert qualified["fly"]["job_id"] is None and qualified["fly"]["conclusion"] == "failure", qualified
+    assert qualified["fly"]["deployment_token"] == "123-1", qualified
+    assert qualified["cutover_verify"]["verified_by"] == "prequeue-live-descendant", qualified
+    assert qualified["cutover_verify"]["attempt"] == "140-1", qualified
+    assert call_lines()[-1] == "dispatch", call_lines()
+
+    # Local replace refs must not change the source app, runtime classifier,
+    # ancestry or the hash algorithm used for physical qualification.
+    forged = commit("forged replacement", {
+        "agents/fly.toml": 'app = "foreign"\n',
+        "scripts/agent_workflow_surface_hash.py": 'print("forged")\n',
+    })
+    subprocess.run([*git, "reset", "--hard", head], check=True, stdout=subprocess.PIPE)
+    for original in (runtime, newest):
+        subprocess.run([*git, "replace", original, forged], check=True)
+    try:
+        reset([running], [{**done, "conclusion": "failure"}],
+              "No queued worker deployment for navi-whisper-lux\n")
+        (fake / f"job-{live_id}.json").write_text(json.dumps(json.loads((fake / "qualification.json").read_text())["liveJob"]))
+        ran = run_production(runtime, tmp / "prequeue-replacement-ignored")
+        assert ran.returncode == 0 and call_lines()[-1] == "dispatch", ran.stdout
+    finally:
+        for original in (runtime, newest):
+            subprocess.run([*git, "replace", "-d", original], check=True, stdout=subprocess.PIPE)
+
+    snapshot_path = fake / "qualification.json"
+    good_snapshot = json.loads(snapshot_path.read_text())
+    for name, changed in (
+            ("original-inserted", {**good_snapshot, "originalJobs": [{"jobId": job_id}]}),
+            ("pointer-moved", {**good_snapshot, "livePointer": {"updatedBy": job_id}})):
+        reset([running], [{**done, "conclusion": "failure"}],
+              "No queued worker deployment for navi-whisper-lux\n")
+        (fake / f"job-{live_id}.json").write_text(json.dumps(good_snapshot["liveJob"]))
+        (fake / "qualification-next.json").write_text(json.dumps(changed))
+        ran = run_production(runtime, tmp / f"prequeue-race-{name}")
+        assert ran.returncode == 1 and "changed during qualification" in ran.stdout, ran.stdout
+        assert "dispatch" not in call_lines(), call_lines()
+    for name, changed in (
+            ("attempt", {"attempt": 2}), ("active", {"status": "in_progress"}),
+            ("source", {"headSha": tests_only})):
+        reset([running], [{**done, "conclusion": "failure"}, {**done, "conclusion": "failure", **changed}],
+              "No queued worker deployment for navi-whisper-lux\n")
+        (fake / f"job-{live_id}.json").write_text(json.dumps(good_snapshot["liveJob"]))
+        ran = run_production(runtime, tmp / f"prequeue-race-{name}")
+        assert ran.returncode == 1 and "changed during qualification" in ran.stdout, ran.stdout
+        assert "dispatch" not in call_lines(), call_lines()
+    reset([running], [{**done, "conclusion": "failure"}],
+          "No queued worker deployment for navi-whisper-lux\n")
+    # Invalid/unreadable authoritative data never grants execution credit.
+    mutations = {
+        "existing-original": lambda x: x.update(originalJobs=[{"jobId": job_id}]),
+        "missing-absence": lambda x: x.pop("originalJobs"),
+        "wrong-app": lambda x: x["liveJob"]["identity"].update(app="foreign"),
+        "equal-source": lambda x: x["liveJob"]["identity"].update(sourceCommit=runtime),
+        "unrelated-source": lambda x: x["liveJob"]["identity"].update(sourceCommit=tests_only),
+        "unknown-source": lambda x: x["liveJob"]["identity"].update(sourceCommit="f" * 40),
+        "unsucceeded": lambda x: x["liveJob"].update(stage="PREPARING"),
+        "missing-pointer": lambda x: x.update(livePointer=None),
+        "pointer-mismatch": lambda x: x["livePointer"].update(updatedBy=job_id),
+        "hash-mismatch": lambda x: x["liveJob"]["identity"].update(surfaceHash="bad"),
+        "missing-attempt": lambda x: x["liveJob"]["identity"].update(attempt=""),
+    }
+    for name, mutate in mutations.items():
+        snapshot = json.loads(json.dumps(good_snapshot))
+        mutate(snapshot)
+        snapshot_path.write_text(json.dumps(snapshot))
+        calls.unlink(missing_ok=True)
+        ran = run_production(runtime, tmp / f"prequeue-negative-{name}")
+        assert ran.returncode == 1, (name, ran.stdout)
+        assert "dispatch" not in call_lines(), (name, call_lines())
+    snapshot_path.write_text(json.dumps(good_snapshot))
+    for name, log_content, monitor_exit in (
+            ("partial-log", "build timed out\n", "0"),
+            ("empty-log", "", "0"),
+            ("ambiguous-jobs", log + f"Queued production worker deployment {live_id}\n", "0"),
+            ("retirement-unqualified", "No queued worker deployment for navi-whisper-lux\n", "1")):
+        reset([running], [{**done, "conclusion": "failure"}], log_content)
+        (fake / f"job-{live_id}.json").write_text(json.dumps(good_snapshot["liveJob"]))
+        ran = run_production(runtime, tmp / f"prequeue-negative-{name}",
+                             env={**prod_env, "FAKE_MONITOR_EXIT": monitor_exit})
+        assert ran.returncode == 1, (name, ran.stdout)
+        assert "dispatch" not in call_lines(), (name, call_lines())
+    archive_path = fake / "logs.zip"
+    good_archive = archive_path.read_bytes()
+    for name, content in (("truncated-archive", good_archive[:-20]), ("auth-failed-archive", b"Forbidden")):
+        archive_path.write_bytes(content)
+        reset([running], [{**done, "conclusion": "failure"}],
+              "No queued worker deployment for navi-whisper-lux\n")
+        ran = run_production(runtime, tmp / f"prequeue-negative-{name}")
+        assert ran.returncode == 1 and "dispatch" not in call_lines(), (name, ran.stdout)
+    archive_path.write_bytes(good_archive)
+    snapshot_path.write_text("not JSON")
+    reset([running], [{**done, "conclusion": "failure"}],
+          "No queued worker deployment for navi-whisper-lux\n")
+    ran = run_production(runtime, tmp / "prequeue-negative-invalid-json")
+    assert ran.returncode == 1 and "dispatch" not in call_lines(), ran.stdout
+
     # 7c. The merge's own job SUCCEEDED (never superseded) and a later cutover then
     #     moved the pointer (production 11-16, #2328: d345a37c at 765eb3abe5 overtaken
     #     by live dc4b75d6 at 20f67b1ca9). The live successor verifies it.
@@ -3109,7 +3229,8 @@ def check_production_render(tmp: Path, env: dict[str, str]) -> None:
         subprocess.run([*git, "commit", "-qm", message], check=True)
         return subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
 
-    commit("base", {"README": "base\n"})
+    commit("base", {"README": "base\n", "agents/fly.toml": 'app = "navi-whisper-lux"\n',
+                    "scripts/agent_workflow_surface_hash.py": 'print("feedface")\n'})
     live = commit("backend v1", {"back-end/src/server.ts": "v1\n"})
     docs_only = commit("docs only", {"docs/notes.md": "notes\n", "scripts/tool.py": "x = 1\n"})
     backend_change = commit("backend v2", {"back-end/src/server.ts": "v2\n"})
