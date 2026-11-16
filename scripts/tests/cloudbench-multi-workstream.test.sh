@@ -6451,6 +6451,11 @@ grep -qF "ceiling 140 (governor 160" "$TMP_ROOT/controller-active-capacity.log" 
     fail "active capacity rejection must report the governor ceiling"
 grep -qF "capacity admission remained blocked for 10s" "$TMP_ROOT/controller-active-capacity.log" ||
     fail "a governor denial is retryable and must exhaust the admission wait before failing"
+# Only a lane ceiling defers as capacity; an expired governor wait stays INFRA.
+if grep -qF "CLOUDBENCH_RETRYABLE_CAPACITY=" "$TMP_ROOT/controller-active-capacity.log" \
+    || compgen -G "$WS_A/.context/fleet/runs/*/_batch/capacity-deferred.json" >/dev/null; then
+    fail "an expired shared-CPU governor wait must not be recorded as a capacity deferral"
+fi
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
     fail "an over-governor burst must be rejected BEFORE cloning"
 fi
@@ -6462,7 +6467,11 @@ echo "PASS: scenario 4 — shared-CPU governor blocks an over-ceiling burst; sto
 # the native app inventory: DEMO guests against the production-pooler budget, and
 # REAL/SIM ("delegating") guests against the widest proven-safe width. Stopped and
 # suspended Machines and performance-1x autoscaler workers never count; unlabelled
-# live primaries count as delegating. A denial happens before any clone.
+# live primaries count as delegating. A denial happens before any clone. A lane
+# ceiling still full of other workstreams' guests when the bounded admission wait
+# expires is capacity, not infrastructure: the controller exits 75 with
+# CLOUDBENCH_RETRYABLE_CAPACITY=<lane reason> and its run records CAPACITY_DEFERRED,
+# which a campaign never counts toward its infra stop.
 # ═════════════════════════════════════════════════════════════════════════════
 lane_fixture() {  # lane_fixture <demo-live> <delegating-labelled> <delegating-unlabelled>
     reset_fake_state
@@ -6500,15 +6509,42 @@ with open(path, "w") as fh:
 PY
 }
 
+assert_lane_capacity_deferred() {  # <workspace> <controller log> <reason>
+    grep -qxF "CLOUDBENCH_RETRYABLE_CAPACITY=$3" "$2" ||
+        fail "an expired $3 wait must announce a retryable capacity deferral"
+    python3 - "$1/.context/fleet/runs" "$3" "$ROOT_DIR" <<'PY_LANE_DEFERRED' ||
+import json
+import runpy
+import sys
+from pathlib import Path
+runs, reason, root = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+batches = sorted(runs.glob("*/_batch"))
+assert len(batches) == 1, batches
+marker = json.loads((batches[0] / "capacity-deferred.json").read_text())
+assert marker["schema"] == "cloudbench-capacity-deferred-v1" and marker["reason"] == reason, marker
+rows = json.loads((batches[0] / "run.json").read_text())["tasks"]
+assert rows and all(row["status"] == "CAPACITY_DEFERRED" and row["passed"] is False for row in rows), rows
+assert all("capacity, not infrastructure" in row["failure_reason"] for row in rows), rows
+campaign = runpy.run_path(str(root / "scripts/run-bench-campaign.py"))
+verdicts = [campaign["task_verdict"](row) for row in rows]
+assert not any(verdict["infra_failure"] for verdict in verdicts), verdicts
+jobs = [{"job_id": row["name"], "status": "failed", **verdict} for row, verdict in zip(rows, verdicts)]
+assert campaign["infra_stop_receipt"](jobs, 1, "enabled") is None
+PY_LANE_DEFERRED
+        fail "an expired $3 wait must record CAPACITY_DEFERRED outside the infra stop"
+}
+
 lane_fixture 49 0 0
 lane_status=0
 CLOUDBENCH_SHARED_CPU_GOVERNOR=100000 CLOUDBENCH_APP_MACHINE_CEILING=100000 \
 CLOUDBENCH_LANE=demo CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-lane-demo.log" \
     capacity-a capacity-b --timeout 120 || lane_status=$?
-[ "$lane_status" -eq 1 ] || fail "a DEMO burst past the pooler budget must be refused (exit=$lane_status)"
+[ "$lane_status" -eq 75 ] ||
+    fail "a DEMO burst past the pooler budget must be deferred as capacity (exit=$lane_status)"
 grep -qF "DEMO guest ceiling reached: 49 live + 2 requested > 50" "$TMP_ROOT/controller-lane-demo.log" ||
     fail "DEMO refusal must count live DEMO guests only (stopped/suspended/workers/infra excluded)"
+assert_lane_capacity_deferred "$WS_A" "$TMP_ROOT/controller-lane-demo.log" demo_guest_ceiling
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
     fail "a DEMO lane refusal must happen before cloning"
 fi
@@ -6520,16 +6556,18 @@ CLOUDBENCH_LANE=delegating CLOUDBENCH_DELEGATING_PRIMARY_CEILING=67 \
 CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-lane-delegating.log" \
     capacity-a capacity-b --timeout 120 || lane_status=$?
-[ "$lane_status" -eq 1 ] || fail "a delegating burst past its ceiling must be refused (exit=$lane_status)"
+[ "$lane_status" -eq 75 ] ||
+    fail "a delegating burst past its ceiling must be deferred as capacity (exit=$lane_status)"
 grep -qF "Delegating-guest ceiling reached: 66 live REAL/SIM primaries + 2 requested > 67" \
     "$TMP_ROOT/controller-lane-delegating.log" ||
     fail "delegating refusal must count labelled and unlabelled live primaries, not workers or infra"
 grep -qF "capacity admission remained blocked for 3s" "$TMP_ROOT/controller-lane-delegating.log" ||
     fail "a lane refusal is retryable and must exhaust the admission wait before failing"
+assert_lane_capacity_deferred "$WS_A" "$TMP_ROOT/controller-lane-delegating.log" delegating_primary_ceiling
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
     fail "a delegating lane refusal must happen before cloning"
 fi
-echo "PASS: scenario 4b — DEMO and delegating lane ceilings count every workstream's live primaries"
+echo "PASS: scenario 4b — DEMO and delegating lane ceilings count every workstream's live primaries and defer as capacity"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 5 — pre-ack quarantine survives deletion of the workspace-local ledger

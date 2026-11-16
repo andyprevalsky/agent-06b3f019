@@ -26302,7 +26302,7 @@ def test_capacity_admission_follows_nested_canary_and_precedes_provisioning() ->
     fleet = fleet_source_text()
     canary = fleet.index("fleet_infra_canary_preflight || exit $?")
     refresh = fleet.index("start_machines_snapshot_loop", canary)
-    admission = fleet.index("admit_app_capacity_with_wait 1 || exit 1", canary)
+    admission = fleet.index('admit_app_capacity_with_wait 1 || { [ "$?" -eq 75 ] && exit 75; exit 1; }', canary)
     provision = fleet.index("# ── Phase 1: provision every bench", canary)
     assert canary < refresh < admission < provision
     pool = fleet[fleet.index('if [ -n "$PROVISION_POOL" ]; then') : canary]
@@ -36321,7 +36321,7 @@ def test_private_fleet_source_post_admission_inventory_keeps_original_wait_clock
 ) -> None:
     """A real borrowed generation may expire after admission but before reuse."""
     fleet = fleet_source_text()
-    marker = 'admit_app_capacity_with_wait 1 || exit 1\n\n# ── Clone one'
+    marker = 'admit_app_capacity_with_wait 1 || { [ "$?" -eq 75 ] && exit 75; exit 1; }\n\n# ── Clone one'
     start = fleet.index('mkdir -p "$FLEET_DIR"', fleet.index(marker))
     post_admission = fleet[start:fleet.index('echo ""', start)]
     optional_waiter = (
