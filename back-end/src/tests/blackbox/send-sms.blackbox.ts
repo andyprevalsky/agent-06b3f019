@@ -110,6 +110,7 @@ import {
   testBoundary_notifyWriteLockPaymentCardEnriched,
   testBoundary_notifyAgentStartedSuppressedForBenchmark,
   testBoundary_notifyCompletionPreviewForBenchmark,
+  testStartup_onlyTheAppPrismaClientBeforeFirstQuery,
 } from './send-sms.behavior-5';
 import {
   testBoundary_notifyAgentStartedKeepsLongGoalInsideAgent,
@@ -148,7 +149,6 @@ import {
   testKickoffScope_untouchedAgentSilentQuestionsStillSent,
   testKickoffScope_messagingCreatedAgentKickoffSent,
 } from './send-sms.behavior-6';
-import { quarantine } from '../helpers/quarantine';
 
 // ==================== RUNNER ====================
 interface TestGroup {
@@ -164,6 +164,15 @@ async function runAll() {
   const captureAvailable = await checkCaptureAvailable();
 
   const parallelGroups: TestGroup[] = [
+    {
+      name: 'startup -- Prisma clients',
+      tests: [
+        {
+          name: 'only the app client exists before the first query',
+          fn: testStartup_onlyTheAppPrismaClientBeforeFirstQuery,
+        },
+      ],
+    },
     {
       name: 'POST / (send) -- contract',
       tests: [
@@ -571,18 +580,7 @@ async function runWithFixture(): Promise<void> {
   }
 }
 
-const sendSmsUnit = 'send-sms';
-quarantine(
-  {
-    since: '2026-11-15',
-    repair: 'https://boxes.dev/thread/thr_8546ad3b31604793827d9b1c23945f72',
-    error: 'RERUN: send-sms failed (2422ms); rerunning once',
-    evidence:
-      '.context/deploy-pipeline-pr2104/attempts/8/final/backend-coverage-blackbox/remote-artifact/files/back-end/coverage/blackbox-run-shard2/send-sms.log (PR2104 FLAKY fe640f0e)',
-  },
-  runWithFixture,
-  { unit: sendSmsUnit }
-)().catch((error) => {
+runWithFixture().catch((error) => {
   console.error('\nBlack-box test suite crashed:', error);
   process.exitCode = 1;
 });
