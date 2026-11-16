@@ -92,6 +92,27 @@ def publish_rebuilt_packet(destination: Path, canonical: Path, rejected: Path, h
     sync(canonical.parent)
 
 
+def preserve_failed_partial(canonical: Path) -> None:
+    """Move a failed build's manifest-less partial archive aside, never deleting it.
+
+    A failed build keeps its partial originals.tar.gz for diagnosis but never
+    publishes a manifest. Left in place, it blocked every retry. Only that exact
+    shape is preserved under a digest-named sibling; anything else still refuses.
+    """
+    if not os.path.lexists(canonical):
+        return
+    info = canonical.lstat()
+    assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(), "existing forensic packet is unsafe"
+    assert {entry.name for entry in canonical.iterdir()} == {"originals.tar.gz"}, \
+        "a forensic packet already exists; use --rebuild-existing"
+    partial = canonical / "originals.tar.gz"
+    assert stat.S_ISREG(partial.lstat().st_mode)
+    digest = hashlib.sha256(partial.read_bytes()).hexdigest()
+    helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-original-volume-capture.py")))
+    helper["rename_noreplace"](canonical, canonical.with_name(f"_forensic.partial-{digest[:16]}"))
+    helper["fsync_directory"](canonical.parent)
+
+
 def build(args) -> None:
     registry = args.registry.resolve()
     owner = registry.name
@@ -139,6 +160,7 @@ def build(args) -> None:
         run_identity = run_info.st_dev, run_info.st_ino
     else:
         destination = canonical
+        preserve_failed_partial(canonical)
         destination.mkdir(mode=0o700, exist_ok=False)
     archive_path = destination / "originals.tar.gz"
     rows = []
