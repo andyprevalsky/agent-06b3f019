@@ -4,8 +4,8 @@
  * The production AgentCard lifecycle probe runs as the owner admin account
  * (providers/ownerLifecycleBilling.ts). After its assertions pass, its $1 probe purchase must not
  * stay in the owner's purchase history. Only a benchmark agent's purchases are purged, and only
- * when every one is terminal with its company-wallet funding reclaimed (or never funded): money
- * still in flight keeps its records for reconciliation.
+ * when every one is terminal with its company-wallet funding reclaimed, consumed by a cleared
+ * purchase, or never funded: money still in flight keeps its records for reconciliation.
  */
 import { isBenchmarkAgent } from '../../providers/benchmarkAgent';
 import { createLogger } from '../../providers/logger';
@@ -15,8 +15,20 @@ import * as repo from './repo';
 
 const log = createLogger('TestPaymentPurgeLifecycle');
 
-const SETTLED = new Set<string>(['REFUNDED', 'VOIDED', 'FAILED', 'FUNDING_ABANDONED']);
-const FUNDING_SETTLED = new Set<string>(['RECLAIMED']);
+// An abandoned probe settles refunded/voided with its funding reclaimed; a completed purchase probe
+// settles CLEARED with its funding CONSUMED by the card spend.
+const SETTLED = new Set<string>(['REFUNDED', 'VOIDED', 'FAILED', 'FUNDING_ABANDONED', 'CLEARED']);
+const FUNDING_SETTLED = new Set<string>(['RECLAIMED', 'CONSUMED']);
+
+export function isSettledProbePurchase(row: {
+  status: string;
+  walletFunding: { status: string } | null;
+}): boolean {
+  return (
+    SETTLED.has(row.status) &&
+    (row.walletFunding === null || FUNDING_SETTLED.has(row.walletFunding.status))
+  );
+}
 
 export type PurgeLifecycleResult = { agentId: string; purged: number };
 
@@ -37,11 +49,7 @@ export async function purgeOwnerLifecycleProbeRecords(
     );
   }
   const { purchases } = record;
-  const unsettled = purchases.filter(
-    (row) =>
-      !SETTLED.has(row.status) ||
-      (row.walletFunding !== null && !FUNDING_SETTLED.has(row.walletFunding.status))
-  );
+  const unsettled = purchases.filter((row) => !isSettledProbePurchase(row));
   if (unsettled.length > 0) {
     throw new TestPaymentError(
       `lifecycle probe purchases are not settled: ${unsettled

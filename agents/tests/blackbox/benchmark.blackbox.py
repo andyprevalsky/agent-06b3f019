@@ -14368,6 +14368,34 @@ async def test_owner_probe_purges_records_when_lifecycle_already_reconciled():
             purge.assert_awaited_once_with("https://benchmark.invalid", "agent-reconciled")
 
 
+async def test_owner_purchase_probe_purges_records_before_agent_deletion():
+    """Live owner purchase 2026-11-16 (agent f28b31bd): the purchase probe never purged, so its
+    $1 record stayed on the owner account, and deleting the agent nulled agentId, putting it beyond
+    the agent-scoped purge route. The purchase probe must purge, whatever the grade, before
+    deletion; the abandon probe purges in ensure_payment_lifecycle_cleanup instead."""
+    import inspect
+    from unittest.mock import AsyncMock, patch
+
+    import httpx
+
+    import benchmarks.run_benchmark as bench
+
+    purchase = bench.get_task_by_name("agent-payment-production-purchase")
+    abandon = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    sandbox = bench.get_task_by_name("agent-payment-abandonment")
+    for task, expected in ((purchase, 1), (abandon, 0), (sandbox, 0)):
+        purge = AsyncMock()
+        with patch.object(bench, "purge_owner_lifecycle_records", purge):
+            await bench.purge_owner_purchase_probe_records("https://benchmark.invalid", "agent-p", task)
+        assert purge.await_count == expected, (task.name, purge.await_count)
+    failing = AsyncMock(side_effect=httpx.ConnectError("backend unreachable"))
+    with patch.object(bench, "purge_owner_lifecycle_records", failing):
+        await bench.purge_owner_purchase_probe_records("https://benchmark.invalid", "agent-p", purchase)
+    source = inspect.getsource(bench._run_single_task_as_run_user)
+    purge_at = source.index("await purge_owner_purchase_probe_records(base_url, agent_id, task)")
+    assert purge_at < source.index("await delete_task_agent()"), "purge must precede agent deletion"
+
+
 async def test_parallel_tasks_keep_their_own_run_user():
     """A parallel sibling can neither borrow nor erase another task's run identity.
 
@@ -30414,6 +30442,10 @@ async def run_all_tests():
     await r.record_async(
         "owner_probe_purges_records_when_lifecycle_already_reconciled",
         test_owner_probe_purges_records_when_lifecycle_already_reconciled,
+    )
+    await r.record_async(
+        "owner_purchase_probe_purges_records_before_agent_deletion",
+        test_owner_purchase_probe_purges_records_before_agent_deletion,
     )
     await r.record_async(
         "parallel_tasks_keep_their_own_run_user",
