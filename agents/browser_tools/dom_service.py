@@ -3046,6 +3046,81 @@ class DOMService:
                 return candidates[0]
         return None
 
+    @staticmethod
+    def _frame_owner_chain(element: Any) -> List[Any]:
+        """Return the iframe/frame elements that own ``element``, innermost first."""
+        owners: List[Any] = []
+        child, node = element, getattr(element, "parent_node", None)
+        while node is not None:
+            if (
+                str(getattr(node, "node_name", "")).upper() in ("IFRAME", "FRAME")
+                and getattr(node, "content_document", None) is child
+            ):
+                owners.append(node)
+            child, node = node, getattr(node, "parent_node", None)
+        return owners
+
+    async def _rect_in_top_viewport(self, element: Any, rect: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Translate a frame-local viewport rect into top-level viewport coordinates.
+
+        ``getBoundingClientRect()`` runs in the element's own frame, but the
+        humanizer dispatches mouse input on the top page. Each owning iframe's
+        content-box origin is added, and the rect is clipped to every ancestor
+        viewport, so a control inside an offset (cross-origin) iframe is clicked
+        where it is drawn. Returns None when no part of it is visible on top.
+        """
+        owners = self._frame_owner_chain(element)
+        if not owners:
+            return rect
+        x, y = float(rect["x"]), float(rect["y"])
+        right, bottom = x + float(rect["width"]), y + float(rect["height"])
+        viewport_width, viewport_height = rect.get("viewportWidth"), rect.get("viewportHeight")
+        for owner in owners:
+            cdp_session = await self._session.cdp_client_for_node(owner)
+            resolved = await cdp_session.cdp_client.send.DOM.resolveNode(
+                params={"backendNodeId": owner.backend_node_id},
+                session_id=cdp_session.session_id,
+            )
+            object_id = resolved.get("object", {}).get("objectId")
+            if not object_id:
+                return None
+            js_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+                params={
+                    "objectId": object_id,
+                    "functionDeclaration": """
+                    function() {
+                        const rect = this.getBoundingClientRect();
+                        const style = window.getComputedStyle(this);
+                        return {
+                            x: rect.left + this.clientLeft + (Number.parseFloat(style.paddingLeft) || 0),
+                            y: rect.top + this.clientTop + (Number.parseFloat(style.paddingTop) || 0),
+                            viewportWidth: window.innerWidth || document.documentElement.clientWidth || 0,
+                            viewportHeight: window.innerHeight || document.documentElement.clientHeight || 0
+                        };
+                    }
+                    """,
+                    "returnByValue": True,
+                },
+                session_id=cdp_session.session_id,
+            )
+            box = js_result.get("result", {}).get("value")
+            if not box:
+                return None
+            viewport_width, viewport_height = box["viewportWidth"], box["viewportHeight"]
+            x, right = max(0.0, x + box["x"]), min(float(viewport_width), right + box["x"])
+            y, bottom = max(0.0, y + box["y"]), min(float(viewport_height), bottom + box["y"])
+            if right <= x or bottom <= y:
+                return None
+        return {
+            **rect,
+            "x": x,
+            "y": y,
+            "width": right - x,
+            "height": bottom - y,
+            "viewportWidth": viewport_width,
+            "viewportHeight": viewport_height,
+        }
+
     async def get_element_rect(
         self,
         index: int,
@@ -3217,6 +3292,15 @@ class DOMService:
                     extra={"index": index, "rect": rect_data},
                 )
                 return None
+
+            top_rect = await self._rect_in_top_viewport(element, rect_data)
+            if top_rect is None:
+                logger.warning(
+                    "Iframe element has no visible top-level viewport intersection",
+                    extra={"index": index, "frame_rect": rect_data},
+                )
+                return None
+            rect_data = top_rect
 
             viewport_width = rect_data.get("viewportWidth") or self.viewport_width
             viewport_height = rect_data.get("viewportHeight") or self.viewport_height
