@@ -163,8 +163,10 @@ For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
 receiving, not merely listed. The verifier sees only screen.text OCR, never app
 identity or switch position, so observe screens whose text states the fact:
-iCloud targets under Settings > your name > iCloud, opening See All under Saved
-to iCloud when a row such as Contacts is not visible, imessage and receive_address
+iCloud targets under Settings > your name > iCloud, except icloud_contacts on
+Settings > Apps > Contacts > Accounts, where the iCloud account row's services
+line lists Contacts (the iCloud See All list shows Contacts only as an unlabeled
+switch and does not prove it), imessage and receive_address
 on Settings > Apps > Messages > Send & Receive with its Apple Account line (the
 FaceTime page with Caller ID does not prove iMessage), and gmail on the account
 Settings screen inside the Gmail app. For portrait_lock, open native Settings with
