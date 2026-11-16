@@ -2,10 +2,12 @@
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { prisma } from '../../providers/database';
 import {
   acquireWorkflowDeploymentLease,
   WORKFLOW_DEPLOYMENT_LEASE_KEY,
+  WorkflowDeploymentLeaseBusyError,
 } from '../../providers/workflowDeploymentLease';
 import { createTestHarness } from './trace-archive-test-utils';
 
@@ -15,6 +17,25 @@ async function clearLease(): Promise<void> {
   await prisma.toolSideEffect.deleteMany({
     where: { operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY },
   });
+}
+
+async function withEnv<T>(
+  overrides: Record<string, string | undefined>,
+  run: () => Promise<T>
+): Promise<T> {
+  const previous = Object.fromEntries(Object.keys(overrides).map((k) => [k, process.env[k]]));
+  const apply = (values: Record<string, string | undefined>): void => {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  apply(overrides);
+  try {
+    return await run();
+  } finally {
+    apply(previous);
+  }
 }
 
 async function main(): Promise<void> {
@@ -40,6 +61,81 @@ async function main(): Promise<void> {
     });
     await next.assertOwned();
     await next.release();
+  });
+
+  await test('lease row records holder identity on acquire and renew, and contention names it', async () => {
+    const holder = await withEnv(
+      { GITHUB_RUN_ID: '424242', GITHUB_RUN_ATTEMPT: '3', GITHUB_WORKFLOW: undefined },
+      () =>
+        acquireWorkflowDeploymentLease({
+          leaseMs: 5_000,
+          heartbeatMs: 4_000,
+          purpose: 'lease-identity-regression',
+        })
+    );
+    try {
+      const expected = {
+        host: hostname(),
+        pid: process.pid,
+        purpose: 'lease-identity-regression',
+        githubRunId: '424242',
+        githubRunAttempt: '3',
+      };
+      const acquiredRow = await prisma.toolSideEffect.findUniqueOrThrow({
+        where: { operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY },
+      });
+      const acquiredRequest = acquiredRow.request as {
+        leaseMs: number;
+        holder: Record<string, unknown>;
+      };
+      assert.equal(acquiredRow.externalId, holder.ownerId);
+      assert.equal(acquiredRequest.leaseMs, 5_000);
+      assert.deepEqual(
+        { ...acquiredRequest.holder, acquiredAt: undefined },
+        {
+          ...expected,
+          acquiredAt: undefined,
+        }
+      );
+      assert.equal(typeof acquiredRequest.holder.acquiredAt, 'string');
+
+      await holder.assertOwned();
+      const renewedRow = await prisma.toolSideEffect.findUniqueOrThrow({
+        where: { operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY },
+      });
+      const renewedRequest = renewedRow.request as {
+        leaseMs: number;
+        renewedAt: string;
+        holder: Record<string, unknown>;
+      };
+      assert.equal(renewedRequest.leaseMs, 5_000);
+      assert.equal(typeof renewedRequest.renewedAt, 'string');
+      assert.deepEqual(renewedRequest.holder, acquiredRequest.holder);
+
+      const contention = await acquireWorkflowDeploymentLease({
+        leaseMs: 5_000,
+        heartbeatMs: 4_000,
+      }).then(
+        () => assert.fail('a second owner acquired a live lease'),
+        (error: unknown) => error
+      );
+      assert(contention instanceof WorkflowDeploymentLeaseBusyError);
+      assert.match(contention.message, /another Temporal workflow deployment/i);
+      for (const fragment of [
+        `owner ${holder.ownerId}`,
+        `host ${hostname()}`,
+        `pid ${process.pid}`,
+        'purpose lease-identity-regression',
+        'GitHub run 424242/3',
+      ]) {
+        assert(
+          contention.message.includes(fragment),
+          `missing "${fragment}": ${contention.message}`
+        );
+      }
+    } finally {
+      await holder.release();
+    }
   });
 
   await test('crashed stale owner can be reclaimed without its release', async () => {
