@@ -1,0 +1,57 @@
+{
+  "format": "RCA204-PRESERVATION-SUMMARY-V1",
+  "source_head": "6841639be56ade6adf0c0d9c3fc17867fb8eeb3e",
+  "primary_merge": "457cc757d706bad1360fe89876a1b4a79b820d3a",
+  "cutoff": "2026-11-16T17:35:33.979166+00:00",
+  "archives": [
+    {
+      "role": "immutable-base",
+      "receipt": "base-archive-receipt.json",
+      "key": "devbox-closeout-private/rca204/immutable-base-20261116T170115Z.tar.gz.aesgcm",
+      "ciphertext_sha256": "8809dc165beabf2d783e18fdf937a71b36ac43d581ddcd8ea5a94e8e7d9cf1c6"
+    },
+    {
+      "role": "final-delta",
+      "receipt": "final-archive-receipt.json",
+      "key": "devbox-closeout-private/rca204/final-20261116T173056Z.tar.gz.aesgcm",
+      "ciphertext_sha256": "406399da592eff3eb0306d34d68c3fb6cea47cb85c250d0450d6769462f44952"
+    },
+    {
+      "role": "cited-reference-supplement",
+      "receipt": "reference-archive-receipt.json",
+      "key": "devbox-closeout-private/rca204/reference-terminal-20261116T173950Z.tar.gz.aesgcm",
+      "ciphertext_sha256": "70b1dde6398c7eb6a382fbfbc5a930519adae134446d07ca2642b4e7fe873328"
+    }
+  ],
+  "selected_original_files": 97374,
+  "base_reused_files": 3749,
+  "final_archive_members": 93629,
+  "original_calls": 526,
+  "reference_source_and_marker_files": 20,
+  "combined_git_targets": 18914,
+  "verification": {
+    "all_archives_full_authenticated_readback": true,
+    "all_archives_independent_verify": true,
+    "all_archives_empty_restore": true,
+    "selected_new_payload_hashes": true,
+    "combined_git_connectivity": true,
+    "processes_terminal": true
+  },
+  "known_limits": {
+    "absent_requested_root": [
+      {
+        "path": "/opt/cursor/artifacts/rca_evidence/20440423-026a-584f-aed1-dbd59d6dc693",
+        "reason": "absent at final cutoff"
+      }
+    ],
+    "pruned_reflog_warnings_preserved": true,
+    "historical_pruned_objects_not_claimed_recovered": true,
+    "reference_bulk_cleanstate": "UNKNOWN; exact citations preserved separately",
+    "after_cutoff": "PR2409 public records and terminal preservation proof are published separately; no later raw bytes claimed",
+    "scope": "Requested RCA/checkout records and exact cited reference bytes; no claim of whole host database/home/runtime backup"
+  },
+  "deletion_ready_claim": false,
+  "native_deletion_check_owner": "parent",
+  "worker_codex_thread": "01a1e30f-5539-7bf2-a887-36394a693577",
+  "worker_turn_id": "not exposed by available tools"
+}
