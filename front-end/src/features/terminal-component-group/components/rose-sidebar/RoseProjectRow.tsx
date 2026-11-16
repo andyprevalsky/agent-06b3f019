@@ -29,14 +29,7 @@
  *   [EDITING] --Escape | blur--> [IDLE]
  */
 
-import {
-  Folder,
-  FolderPlus,
-  Home,
-  Pencil,
-  Plus,
-  Trash2,
-} from 'lucide-react';
+import { Folder, FolderPlus, Home, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 import {
