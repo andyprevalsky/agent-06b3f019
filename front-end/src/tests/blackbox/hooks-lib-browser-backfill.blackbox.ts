@@ -211,6 +211,7 @@ describe('browser completion recovery ownership', () => {
       deliver(handlers, starts[0]!);
       await vi.advanceTimersByTimeAsync(100);
       expect(blocked).toBe(true);
+      const leaseExpiresAt = Date.now() + CONNECTED_COMPLETION_BACKFILL_WINDOW_MS;
       deliver(handlers, starts[1]!);
       await vi.advanceTimersByTimeAsync(100);
       expect(maximumInFlight).toBe(1);
@@ -220,6 +221,10 @@ describe('browser completion recovery ownership', () => {
       phase = 'done';
       await vi.advanceTimersByTimeAsync(2_500);
       expect(computeActiveBrowserPanels(messages)).toHaveLength(0);
+      expect(maximumInFlight).toBe(1);
+      const terminalCalls = calls;
+      await vi.advanceTimersByTimeAsync(leaseExpiresAt + 1_000 - Date.now());
+      expect(calls).toBeGreaterThan(terminalCalls);
       expect(maximumInFlight).toBe(1);
       const recoveredCalls = calls;
       await vi.advanceTimersByTimeAsync(5_000);

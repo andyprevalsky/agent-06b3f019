@@ -37,6 +37,8 @@ export interface QuarantineOptions {
   write?: (line: string) => void;
   /** Receives the failure's full detail (default: stderr), like the Python marker. */
   writeError?: (text: string) => void;
+  /** Suppress only explicitly eligible errors; false, invalid results and predicate errors fail closed. */
+  acceptsError?: (error: unknown) => boolean;
 }
 
 const SINCE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -122,6 +124,9 @@ export function quarantine<Args extends unknown[]>(
 ): (...args: Args) => Promise<void> {
   const checked = validateQuarantineMeta(meta);
   if (typeof fn !== 'function') throw new QuarantineMetadataError(['test function is required']);
+  if (options.acceptsError !== undefined && typeof options.acceptsError !== 'function') {
+    throw new QuarantineMetadataError(['acceptsError must be a function']);
+  }
   return async (...args: Args): Promise<void> => {
     const env = options.env ?? process.env;
     const name = options.unit ?? contextName(args) ?? fn.name;
@@ -139,6 +144,15 @@ export function quarantine<Args extends unknown[]>(
     try {
       await fn(...args);
     } catch (error) {
+      if (options.acceptsError) {
+        let accepted: boolean;
+        try {
+          accepted = options.acceptsError(error);
+        } catch (predicateError) {
+          throw new AggregateError([error, predicateError], 'quarantine error eligibility failed');
+        }
+        if (accepted !== true) throw error;
+      }
       const detail = describeError(error);
       try {
         (options.writeError ?? ((text: string) => process.stderr.write(text)))(

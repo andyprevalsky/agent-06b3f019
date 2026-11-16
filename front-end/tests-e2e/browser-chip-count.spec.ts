@@ -31,7 +31,6 @@ import {
   injectSemanticSession,
   trackPageProbe,
 } from './helpers';
-import { quarantine } from '../src/tests/gate-progress/quarantine';
 
 const LIVE_VIEW_URL = 'https://example.com/semantic-browser-live-view';
 /** Per-wait budget for every chip-count step and the post-reload hydration gate. */
@@ -79,20 +78,7 @@ async function expectChipCount(page: Page, expected: number, step: string): Prom
 type ChipCountTest = (fixtures: { page: Page }) => Promise<void>;
 
 const chipCountTest = 'visible browser chips always equal active browser agents';
-/** FLAKY occurrence 764c43fc (PR #2259, NOT_INTRODUCED): still runs and reports, never blocks. */
-const quarantinedChipCount = (run: ChipCountTest): ChipCountTest =>
-  quarantine(
-    {
-      since: '2026-11-16',
-      repair: 'https://boxes.dev/thread/ph7193zbgchqaaz524rn3e69858jb1k9',
-      error: 'Error: page answered 32 probe(s); slowest 39ms',
-      evidence: '.context/deploy-pipeline/rca/764c43fceeb84b16abc375a8b14cc00f.json',
-    },
-    run,
-    { unit: `tests-e2e/browser-chip-count.spec.ts > browser-chip-count > ${chipCountTest}` },
-  );
-
-const chipCountRun = quarantinedChipCount(async ({ page }) => {
+const chipCountRun: ChipCountTest = async ({ page }) => {
   const rec = attachRecorder(page);
   const agentId = await createAgent('Semantic test: browser chip count invariant (no real work).');
 
@@ -206,9 +192,30 @@ const chipCountRun = quarantinedChipCount(async ({ page }) => {
   } finally {
     await deleteAgent(agentId);
   }
-});
+};
 
 test.describe('browser-chip-count', () => {
   // Playwright resolves fixtures from a destructured first parameter.
   test(chipCountTest, async ({ page }) => chipCountRun({ page }));
+
+  test('recovers a successor browser start whose realtime INSERT is lost', async ({ page }) => {
+    let dropped = 0;
+    await page.routeWebSocket(/\/realtime\/v1\/websocket/, (socket) => {
+      const upstream = socket.connectToServer();
+      upstream.onMessage((message) => {
+        // Drop only this committed start. Every other broker frame (including
+        // terminals and heartbeats) still uses the real transport unchanged.
+        if (typeof message === 'string' && message.includes('retry-task-old')) {
+          dropped += 1;
+          return;
+        }
+        socket.send(message);
+      });
+    });
+    await chipCountRun({ page });
+    expect(
+      dropped,
+      'the transport fault must actually withhold the successor start',
+    ).toBeGreaterThan(0);
+  });
 });

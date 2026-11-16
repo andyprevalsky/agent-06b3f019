@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout/browser-chip-count-726b25a4/local-branches-8a0a28cbef.bin",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "51ac18d41dd201a544598941ec76d196ba10d100eaf4f361f6b53ef1500a7ce5",
+  "gzip_sha256": "f4ca8d9a4ece0fa832ce8ce2f1e90fe9c488198f1c2101cc4cf820aeb4c516bb",
+  "stored_bytes": 1102040131,
+  "frames": 132,
+  "files": 3,
+  "original_bytes": 1108196047,
+  "manifest_sha256": "60f995ed06c3fa0ffebe73838f278f6c2f2679ff73b57b973aab65c80256271f",
+  "full_readback_verified": true
+}

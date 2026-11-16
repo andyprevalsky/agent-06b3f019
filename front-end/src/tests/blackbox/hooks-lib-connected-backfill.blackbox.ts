@@ -133,6 +133,7 @@ describe('connected completion backfill', () => {
         await vi.advanceTimersByTimeAsync(2_500);
         expect(computeActiveBrowserPanels(messages)).toHaveLength(0);
         expect(messages.some((message) => message.message_id === terminal.message_id)).toBe(true);
+        await vi.advanceTimersByTimeAsync(CONNECTED_COMPLETION_BACKFILL_WINDOW_MS + 5_000);
         const recoveredCalls = calls;
         await vi.advanceTimersByTimeAsync(5_000);
         expect(calls).toBe(recoveredCalls);

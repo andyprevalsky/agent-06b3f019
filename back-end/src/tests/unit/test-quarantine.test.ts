@@ -113,7 +113,10 @@ async function rowsAndLines(): Promise<void> {
     log: '',
     quarantine: META,
   });
-  assert.match(String(fail.detail), /^Error: expected 2 got 3\n\s+at /);
+  assert.match(
+    String((fail as Record<string, unknown>).detail),
+    /^Error: expected 2 got 3\n\s+at /
+  );
   assert.equal(errors.length, 1, 'only the failure prints its detail');
   assert.match(
     errors[0],
@@ -202,6 +205,75 @@ async function unitNames(): Promise<void> {
   );
 }
 
+async function guardedFailures(): Promise<void> {
+  const original = new Error('original test failure');
+  for (const acceptsError of [() => false, () => undefined as unknown as boolean]) {
+    const output: string[] = [];
+    const guarded = quarantine(
+      META,
+      () => {
+        throw original;
+      },
+      {
+        unit: 'guarded',
+        env: {},
+        write: (line) => output.push(line),
+        writeError: (line) => output.push(line),
+        acceptsError,
+      }
+    );
+    await assert.rejects(guarded(), (error) => error === original);
+    assert.deepEqual(output, [], 'rejected errors emit no misleading quarantine outcome');
+  }
+  const predicateError = new Error('eligibility failure');
+  const output: string[] = [];
+  await assert.rejects(
+    quarantine(
+      META,
+      () => {
+        throw original;
+      },
+      {
+        unit: 'guarded',
+        env: {},
+        write: (line) => output.push(line),
+        writeError: (line) => output.push(line),
+        acceptsError: () => {
+          throw predicateError;
+        },
+      }
+    )(),
+    (error: unknown) =>
+      error instanceof AggregateError &&
+      error.errors[0] === original &&
+      error.errors[1] === predicateError
+  );
+  assert.deepEqual(output, []);
+  const acceptedOutput: string[] = [];
+  await quarantine(
+    META,
+    () => {
+      throw original;
+    },
+    {
+      unit: 'guarded',
+      env: {},
+      write: (line) => acceptedOutput.push(line),
+      writeError: () => undefined,
+      acceptsError: (error) => error === original,
+    }
+  )();
+  assert.equal(acceptedOutput.length, 1);
+  assert.match(acceptedOutput[0], /status=QUARANTINED_FAIL/);
+  assert.throws(
+    () =>
+      quarantine(META, () => undefined, {
+        acceptsError: true as unknown as (error: unknown) => boolean,
+      }),
+    /acceptsError must be a function/
+  );
+}
+
 function realNodeTest(): void {
   const file = join(root, 'held.test.ts');
   const progress = join(root, 'node-test.jsonl');
@@ -246,6 +318,7 @@ async function main(): Promise<void> {
     refusals();
     await rowsAndLines();
     await unitNames();
+    await guardedFailures();
     realNodeTest();
     process.stdout.write(
       'PASS test-quarantine: refusal, rows, stdout lines, unit ids, node:test\n'
