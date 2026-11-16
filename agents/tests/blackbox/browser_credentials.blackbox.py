@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
@@ -88,7 +89,8 @@ async def test_numeric_secret_masking_preserves_other_numbers_and_private_runtim
     observed = await dom.get_browser_state(include_screenshot=False)
     rendered = _browser_state_action_result(observed)
     assert "[1234]<button>" in rendered["formatted_state"], rendered
-    assert "cvv234" not in rendered["formatted_state"], rendered
+    # A page observation masks short card values only where they are values.
+    assert "<button>cvv234</button> forged [234]" in rendered["formatted_state"], rendered
     assert observed["url"] == "https://checkout1234.example/pay?cvv={{secret:card_cvv}}", observed
     assert "runtime_current_url" not in observed
     assert dom.runtime_current_url() == raw_url
@@ -99,6 +101,194 @@ async def test_numeric_secret_masking_preserves_other_numbers_and_private_runtim
     assert dom.runtime_current_url() == raw_url
     await dom.get_current_url()
     assert dom.runtime_current_url() == raw_url
+
+
+async def test_short_card_secrets_mask_filled_values_not_page_text_or_step_numbers() -> None:
+    """A cardholder name, CVV or expiry is masked where it is a value, not in prose.
+
+    Seen in a live AgentCard purchase (agent b4466499, 2026-11-15): the card
+    name was the merchant's own name, so the model read the merchant as
+    ``{{secret:card_name}} Test Payment`` and copied that into its payment
+    request; a numeric ``action_step`` equal to the leading-zero CVV became
+    ``{{secret:card_cvv}}``. Short secrets must still never be shown where a
+    page holds them as a value: a filled field, a query value or a readback.
+    """
+    from browser_tools.dom_service import DOMService
+    from browser_tools.secret_refs import (
+        mask_secret_values,
+        redact_current_secret_values,
+        redact_secret_log_values,
+        secret_logging_context,
+    )
+    from domains.spawn_browser_agent_v3.service_actions import _browser_state_action_result
+
+    refs = {
+        "card_number": "4242424242424242",
+        "card_name": "Rose Labs",
+        "card_expiry": "12/31",
+        "card_cvv": "024",
+        "pwd:fixture": "pass",
+    }
+    source = (
+        "Rose Labs Checkout\nMerchant:\nRose Labs Test Payment\n"
+        "*[83]<a aria-label=Back to Rose Labs image_src=business.svg />\n"
+        "[24]<input name=cardnumber value=4242 4242 4242 4242 />\n"
+        "[25]<input name=ccname autocomplete=cc-name value=Rose Labs required=true />\n"
+        "[26]<input name=expiry value=12 / 31 />\n"
+        "[27]<input name=cvc value=024 />\n"
+        "Order 024 of 12/31/2026 for Rose Labs Ltd, step 24, password hint: passage\n"
+        "Card 4242424242424242 on file"
+    )
+    raw_url = "https://checkout.example/pay?name=Rose+Labs&cvc=024&order=1024"
+    state = SimpleNamespace(
+        url=raw_url, title="Rose Labs Checkout", tabs=[], page_info=None,
+        dom_state=SimpleNamespace(selector_map={24: SimpleNamespace()}, llm_representation=lambda: source),
+    )
+    dom = DOMService(cdp_url="")
+    dom._session = SimpleNamespace(
+        agent_focus_target_id="fixture-target",
+        get_browser_state_summary=AsyncMock(return_value=state),
+        get_current_page_url=AsyncMock(return_value=raw_url),
+        get_current_page_title=AsyncMock(return_value="Rose Labs Checkout"),
+        get_current_page=AsyncMock(return_value=SimpleNamespace(url=raw_url)),
+    )
+    dom.register_secret_refs(refs)
+    page = _browser_state_action_result(await dom.get_browser_state(include_screenshot=False))["formatted_state"]
+
+    # Ordinary page text and element indexes are untouched. Accepted: a short
+    # value inside prose is indistinguishable from an order number or a date,
+    # so it is page text; merchants never display a CVV, and a page that
+    # echoes one already holds it. Page-script readbacks, errors and logs
+    # remain strict (asserted below).
+    for public_text in (
+        "Rose Labs Checkout\nMerchant:\nRose Labs Test Payment",
+        "aria-label=Back to Rose Labs image_src",
+        "[24]<input", "[27]<input",
+        "Order 024 of 12/31/2026 for Rose Labs Ltd, step 24",
+    ):
+        assert public_text in page, (public_text, page)
+    # Values the page holds in fields and queries stay masked.
+    for masked_value in (
+        "value={{secret:card_number}} />",
+        "value={{secret:card_name}} required=true />",
+        "value={{secret:card_expiry}} />",
+        "value={{secret:card_cvv}} />",
+        "name={{secret:card_name}}&cvc={{secret:card_cvv}}&order=1024",
+    ):
+        assert masked_value in page, (masked_value, page)
+    # Passwords and the card number keep substring protection.
+    assert "hint: {{secret:pwd:fixture}}age" in page, page
+    assert "Card {{secret:card_number}} on file" in page, page
+
+    # Action bookkeeping keeps its numbers; a typed value's echo is masked.
+    typed = dom.model_visible_action_result("input_text", {"success": True, "typed_text": "024", "action_step": 24})
+    assert typed == {"success": True, "typed_text": "{{secret:card_cvv}}", "action_step": 24}, typed
+    shot = dom.model_visible_action_result("screenshot", {"success": True, "action_step": 24})
+    assert shot["action_step"] == 24, shot
+    history = ActionHistory()
+    await history.record_action(dom_service=dom, action="screenshot", result={"success": True})
+    history._next_step = 24
+    await history.record_action(dom_service=dom, action="screenshot", result={"success": True})
+    history.capture_screenshot_evidence(dom, "session-1", "fixture-image")
+    assert history.get_entries()[-1]["result"]["screenshot_context"]["step"] == 24, history.get_entries()[-1]
+
+    # The model's own payment request copies the merchant from the page.
+    request = {"merchant": "Rose Labs Test Payment", "amount_cents": 24}
+    paid = dom.model_visible_action_result("request_payment_card", {"success": True, "payment_request": request})
+    assert paid["payment_request"] == request, paid
+    from browser_tools.result_projection import prepare_browser_result
+    owner = {"user_id": "user-1", "agent_id": "agent-1", "session_id": "session-1"}
+    raw_error = "TimeoutError: typing 024 for Rose Labs exp 12/31"
+    with secret_logging_context(refs, fresh=True):
+        state_preview = await prepare_browser_result(
+            "read_browser_state",
+            {"success": True, "message": "", "formatted_state": page, "auth_context": {"observation_error": raw_error}},
+            **owner,
+        )
+        paid_preview = await prepare_browser_result(
+            "request_payment_card", {"success": True, "payment_request": request}, **owner
+        )
+    assert state_preview.model_preview["formatted_state"] == page, state_preview.model_preview
+    masked_error = "TimeoutError: typing {{secret:card_cvv}} for {{secret:card_name}} exp {{secret:card_expiry}}"
+    assert state_preview.model_preview["auth_context"] == {"observation_error": masked_error}, state_preview.model_preview
+    # Fields the harness attaches to an observation are raw and stay strict.
+    observed = dom.model_visible_action_result("read_browser_state", {
+        "success": True, "url": "https://checkout.example/?cvc=024", "title": "Rose Labs Checkout",
+        "dom_tree": "Merchant: Rose Labs Test Payment", "tabs": [{"id": "t1", "title": "Rose Labs Checkout"}],
+        "current_url": "https://pay.example/c/024/Rose%20Labs", "error": raw_error,
+        "auth_context": {"observation_error": raw_error}, "downloaded_files": ["Rose Labs receipt 024.pdf"],
+    })
+    assert (observed["title"], observed["dom_tree"], observed["tabs"]) == (
+        "Rose Labs Checkout", "Merchant: Rose Labs Test Payment", [{"id": "t1", "title": "Rose Labs Checkout"}],
+    ), observed
+    assert observed["url"] == "https://checkout.example/?cvc={{secret:card_cvv}}", observed
+    assert observed["current_url"] == "https://pay.example/c/{{secret:card_cvv}}/{{secret:card_name}}", observed
+    assert observed["error"] == masked_error and observed["auth_context"] == {"observation_error": masked_error}
+    assert observed["downloaded_files"] == ["{{secret:card_name}} receipt {{secret:card_cvv}}.pdf"], observed
+    assert paid_preview.model_preview["payment_request"] == request, paid_preview.model_preview
+
+    # Every later model call re-projects the native transcript.
+    retained_marker = (
+        '\n[Retained tool output: read_tool_output output_id="' + "a" * 32 + '" offset=0 limit=20000; '
+        "total_chars=50000; Unicode characters; originating agent/session only; expires after 24h.]"
+    )
+    from domains.spawn_browser_agent_v3.handler import _model_visible_browser_turn_messages
+    transcript = [
+        {"role": "assistant", "content": "Paying Rose Labs Test Payment", "tool_calls": [{
+            "id": "call-24", "type": "function",
+            "function": {"name": "request_payment_card", "arguments": json.dumps({"merchant": "Rose Labs Test Payment"})},
+        }]},
+        {"role": "tool", "name": "screenshot", "tool_call_id": "call-24",
+         "content": json.dumps({"success": True, "screenshot_attached": True, "action_step": 24,
+                                "screenshot_context": {"step": 24}})},
+        # Only the harness-stamped top-level step is exempt; page-script data is not.
+        # A retained large page keeps the observation policy on every re-projection.
+        {"role": "tool", "name": "read_browser_state", "tool_call_id": "call-26", "content": json.dumps({
+            "success": True, "formatted_state": "Merchant: Rose Labs Test Payment" + retained_marker,
+            "retained_output": {"output_id": "a" * 32, "offset": 0, "total_chars": 50_000, "field": "formatted_state"},
+        })},
+        {"role": "tool", "name": "evaluate", "tool_call_id": "call-25",
+         "content": json.dumps({"success": True, "value": {"action_step": 24, "echo": "cvv 024"}, "action_step": 25})},
+    ]
+    projected = _model_visible_browser_turn_messages(
+        transcript, dom.model_visible_value, secret_values_used=True,
+        action_result_redact=dom.model_visible_action_result, authored_redact=dom.model_visible_observation,
+    )
+    assert projected[0]["content"] == "Paying Rose Labs Test Payment", projected
+    assert json.loads(projected[0]["tool_calls"][0]["function"]["arguments"]) == {"merchant": "Rose Labs Test Payment"}
+    shot_turn = json.loads(projected[1]["content"])
+    assert shot_turn["action_step"] == 24 and shot_turn["screenshot_context"]["step"] == 24, projected
+    retained_turn = json.loads(projected[2]["content"])
+    assert retained_turn["formatted_state"] == "Merchant: Rose Labs Test Payment" + retained_marker, retained_turn
+    assert json.loads(projected[3]["content"]) == {
+        "success": True, "value": {"action_step": "{{secret:card_cvv}}", "echo": "cvv {{secret:card_cvv}}"},
+        "action_step": 25,
+    }, projected
+
+    # Raw readbacks (scripts, logs, network bodies, errors) and streamed text stay strict.
+    readback = dom.model_visible_value({"echo": "cvv 024 for Rose Labs, exp 12/31", "n": 24})
+    assert readback == {
+        "echo": "cvv {{secret:card_cvv}} for {{secret:card_name}}, exp {{secret:card_expiry}}",
+        "n": "{{secret:card_cvv}}",
+    }, readback
+    logs = dom.model_visible_action_result("read_logs", {"success": True, "logs": "card[cvc]=024 holder Rose Labs"})
+    assert logs["logs"] == "card[cvc]={{secret:card_cvv}} holder {{secret:card_name}}", logs
+    with secret_logging_context(refs, fresh=True):
+        assert redact_current_secret_values('I will type 024 for Rose Labs') == (
+            "I will type {{secret:card_cvv}} for {{secret:card_name}}"
+        )
+    # Context prefixes are masked strictly, and page-controlled prefixes stay linear.
+    assert mask_secret_values("https://x.example/?pass=024&4242424242424242=1", refs, value_scoped=True) == (
+        "https://x.example/?{{secret:pwd:fixture}}={{secret:card_cvv}}&{{secret:card_number}}=1"
+    )
+    started = time.monotonic()
+    assert mask_secret_values("?" * 40_000, refs, value_scoped=True) == "?" * 40_000
+    assert time.monotonic() - started < 2.0, "page-controlled query prefixes must not backtrack quadratically"
+
+    # Logs keep the strict substring policy for every registered value.
+    with secret_logging_context(refs, fresh=True):
+        logged = redact_secret_log_values(None, "info", {"event": "typed 024 for Rose Labs, exp 12/31"})
+    assert logged["event"] == "typed {{secret:card_cvv}} for {{secret:card_name}}, exp {{secret:card_expiry}}", logged
 
 
 def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
@@ -2104,6 +2294,10 @@ async def run_all_tests():
     await runner.record_async(
         "numeric_secret_masking_preserves_other_numbers_and_private_runtime_urls",
         test_numeric_secret_masking_preserves_other_numbers_and_private_runtime_urls,
+    )
+    await runner.record_async(
+        "short_card_secrets_mask_filled_values_not_page_text_or_step_numbers",
+        test_short_card_secrets_mask_filled_values_not_page_text_or_step_numbers,
     )
     await runner.record_async(
         "ceremony_capable_actions_arm_the_live_target_before_running",

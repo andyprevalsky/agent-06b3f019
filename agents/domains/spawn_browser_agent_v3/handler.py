@@ -1267,19 +1267,26 @@ def _model_visible_browser_message(
     *,
     action_result_redact: Any = None,
     secret_values_used: bool = False,
+    authored_redact: Any = None,
 ) -> Any:
-    """Project a native transcript envelope without exempting its page payloads."""
+    """Project a native transcript envelope without exempting its page payloads.
+
+    ``authored_redact`` projects the model's own text and tool arguments; the
+    model can only have copied them from what it was shown.
+    """
     if not isinstance(message, dict):
         return redact(message)
+    authored = authored_redact if callable(authored_redact) else redact
 
     def visible_json(text: Any, action_name: str = "", *, tool_arguments: bool = False) -> Any:
+        project = authored if tool_arguments else redact
         if not isinstance(text, str):
-            return redact(text)
+            return project(text)
         try:
             original = json.loads(text)
         except (ValueError, TypeError):
-            return redact(text)
-        payload = redact(original)
+            return project(text)
+        payload = project(original)
         if tool_arguments:
             target_fields = {
                 "click": ("index",),
@@ -1300,7 +1307,10 @@ def _model_visible_browser_message(
         elif action_name and callable(action_result_redact):
             payload = action_result_redact(action_name, original)
         from browser_tools.result_projection import preserve_output_protocol
-        payload = preserve_output_protocol(original, payload, action_name, redact, arguments=tool_arguments)
+        payload = preserve_output_protocol(
+            original, payload, action_name, project, arguments=tool_arguments,
+            scoped_redact=authored_redact if callable(authored_redact) else None,
+        )
         return json_dumps_compact(payload)
 
     safe = redact_with_screenshots(message, redact)
@@ -1322,7 +1332,10 @@ def _model_visible_browser_message(
             blocks.append(visible_block)
         safe["content"] = blocks
     elif content is not None:
-        safe["content"] = visible_json(content, str(message.get("name") or "")) if role == "tool" else redact(content)
+        safe["content"] = (
+            visible_json(content, str(message.get("name") or "")) if role == "tool"
+            else authored(content) if role == "assistant" else redact(content)
+        )
         if is_inter_agent_message(message) and isinstance(safe["content"], str):
             # Keep the inter-agent marker: RoseClient settles a trailing one to user role.
             safe["content"] = InterAgentText(safe["content"])
@@ -1361,10 +1374,13 @@ def _model_visible_browser_turn_messages(
     *,
     secret_values_used: bool,
     action_result_redact: Any = None,
+    authored_redact: Any = None,
 ) -> Any:
     """Keep ordinary image results and their original tool-call association."""
     return [
-        _model_visible_browser_message(message, redact, action_result_redact=action_result_redact)
+        _model_visible_browser_message(
+            message, redact, action_result_redact=action_result_redact, authored_redact=authored_redact
+        )
         for message in messages
     ] if isinstance(messages, list) else redact_with_screenshots(messages, redact)
 
@@ -3952,6 +3968,7 @@ async def _call_browser_use_with_rotation(
             redact,
             secret_values_used=dom_service.secret_values_used,
             action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+            authored_redact=getattr(dom_service, "model_visible_observation", None),
         )
         rose_kwargs["browser_state"] = redact(browser_state_for_llm)
         from browser_tools.dom_service import ActionHistory
@@ -3973,6 +3990,7 @@ async def _call_browser_use_with_rotation(
                 redact,
                 secret_values_used=dom_service.secret_values_used,
                 action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+                authored_redact=getattr(dom_service, "model_visible_observation", None),
             )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
@@ -8539,10 +8557,16 @@ async def _spawn_browser_agent_activity_v3_real(
         )
         # Private hydration can precede DOM binding, and cleanup can outlive
         # its transport. Keep those boundaries under the activity's policy.
-        return mask_secret_values(
+        redacted = mask_secret_values(
             redact_current_secret_values(visible),
             (write_lock_resume_state or {}).get("secret_redaction_refs"),
         )
+        if action_entries:
+            # Entry steps are harness bookkeeping that the projection restored.
+            for entry, safe_entry in zip(visible, redacted):
+                if isinstance(entry, dict) and isinstance(safe_entry, dict) and type(entry.get("step")) is int:
+                    safe_entry["step"] = entry["step"]
+        return redacted
 
     async def _save_browser_action_message(**kwargs: Any) -> Any:
         # Routing IDs stay exact; only user/model-visible payloads are redacted.
@@ -10026,6 +10050,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 dom_service.model_visible_value,
                 secret_values_used=dom_service.secret_values_used,
                 action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+                authored_redact=getattr(dom_service, "model_visible_observation", None),
             )
             verifier_checkpoints[:] = dom_service.model_visible_value(verifier_checkpoints)
             reasoning_messages[:] = dom_service.model_visible_value(reasoning_messages)
@@ -10669,15 +10694,22 @@ async def _spawn_browser_agent_activity_v3_real(
                     # Do not restore the pre-redaction preview over the DOM's
                     # private-entry/secret projection. Keep only issued protocol IDs.
                     model_preview = getattr(result, "model_preview", model_preview)
+                    from browser_tools.result_projection import project_result
+                    preview_action = action.get("action", "")
                     if hasattr(dom_service, "model_visible_value"):
+                        observe = getattr(dom_service, "model_visible_observation", None)
                         model_preview = preserve_output_protocol(
-                            model_preview, dom_service.model_visible_value(model_preview),
-                            action.get("action", ""), dom_service.model_visible_value,
+                            model_preview,
+                            project_result(model_preview, preview_action, dom_service.model_visible_value, observe),
+                            preview_action, dom_service.model_visible_value, scoped_redact=observe,
                         )
                     for refs in redaction_refs:
                         redact_preview = lambda value: mask_secret_values(value, refs)
+                        scoped_preview = lambda value: mask_secret_values(value, refs, value_scoped=True)
                         model_preview = preserve_output_protocol(
-                            model_preview, redact_preview(model_preview), action.get("action", ""), redact_preview,
+                            model_preview,
+                            project_result(model_preview, preview_action, redact_preview, scoped_preview),
+                            preview_action, redact_preview, scoped_redact=scoped_preview,
                         )
                     if not hasattr(result, "__dict__"):
                         result = BrowserModelResult(result)
