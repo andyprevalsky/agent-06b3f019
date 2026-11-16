@@ -889,7 +889,7 @@ async def test_handoff_complete_needs_standard_and_declared_fields():
 
 @quarantine(
     since="2026-11-13",
-    repair="pending-handoff:2854b704d986413186c70246efa22388",
+    repair="https://boxes.dev/thread/ph70grxsq8n6vgq6sfw4m1tmf98jaxw8",
     error="claude_ws_server_task_is_a_goal: AssertionError: not ok 4 - a user's direct turn that writes the handoff hands the session back at once: timeout waiting for CLI exit",
     evidence="PR1865 round 67 agents-coverage-blackbox spawn-claude-code-agent FLAKY: goal-turn.test.mjs subtest 4 CLI exit not seen within 15 s under coverage load; same-source rerun passed",
 )
