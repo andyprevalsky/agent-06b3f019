@@ -111,6 +111,13 @@ controls: the unchanged guard `guard-click-into-cross-origin-frame-keeps-page-si
 and the new `guard-click-on-cross-site-wallet-button-keeps-page-signal` (a
 button inside an out-of-process frame still locks as purchase).
 
+CodeRabbit review on PR #2338 found two more fail-open mappings, both fixed fail-closed
+(return None, keep the page signal): a rotated or skewed frame (non-axis-aligned content
+quad), and a hop after an in-process frame (its box model is in root-viewport
+coordinates). Guards `guard-click-into-skewed-cross-site-frame-keeps-page-signal` and
+`guard-click-through-in-process-frame-into-nested-frame-keeps-page-signal` misfired
+(expected purchase, got none) on the earlier probe and pass now.
+
 10k-agent behavior: extra CDP round trips (at most 4 hops, 5 s cap) only on
 coordinate clicks that land in a cross-origin frame; per-browser, no shared
 state.

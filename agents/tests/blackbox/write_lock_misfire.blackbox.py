@@ -147,22 +147,13 @@ class _CorpusServer:
 
     ``{frame_origin}`` differs only by port (same site, so Chromium renders the
     frame in-process); ``{cross_site_frame_origin}`` is another site (an
-    out-of-process frame, like a payment provider's hosted field).
+    out-of-process frame, like a payment provider's hosted field). Inside
+    ``frame_html``, ``{cross_site_frame_origin}`` points at ``frame2_html``.
     """
 
     def __init__(self, cases: list[dict], *, frame_origin: str = "") -> None:
-        pages = {}
+        pages: dict[str, bytes] = {}
         cross_site_frame_origin = frame_origin.replace("://127.0.0.1:", "://localhost:")
-        for case in cases:
-            body = (
-                case["html"]
-                .replace("{frame_origin}", frame_origin)
-                .replace("{cross_site_frame_origin}", cross_site_frame_origin)
-            )
-            pages[f"/case/{case['id']}"] = _PAGE_SHELL.format(title=case["id"], body=body).encode("utf-8")
-            if case.get("frame_html"):
-                frame = _PAGE_SHELL.format(title=f"{case['id']} frame", body=case["frame_html"])
-                pages[f"/frame/{case['id']}"] = frame.encode("utf-8")
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
@@ -182,6 +173,20 @@ class _CorpusServer:
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        # A frame page may nest ``frame2_html`` from this server on another site.
+        own_cross_site = self.base.replace("://127.0.0.1:", "://localhost:")
+        for case in cases:
+            body = (
+                case["html"]
+                .replace("{frame_origin}", frame_origin)
+                .replace("{cross_site_frame_origin}", cross_site_frame_origin)
+            )
+            pages[f"/case/{case['id']}"] = _PAGE_SHELL.format(title=case["id"], body=body).encode("utf-8")
+            for key, prefix in (("frame_html", "frame"), ("frame2_html", "frame2")):
+                if case.get(key):
+                    frame_body = case[key].replace("{cross_site_frame_origin}", own_cross_site)
+                    frame = _PAGE_SHELL.format(title=f"{case['id']} {prefix}", body=frame_body)
+                    pages[f"/{prefix}/{case['id']}"] = frame.encode("utf-8")
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
     def close(self) -> None:
@@ -395,6 +400,55 @@ _EXEMPTION_GUARD_CASES = [
         "frame_html": (
             "<style>body{margin:0}button{display:block;width:100%;height:80px;margin:0}</style>"
             '<button type="button">Pay with PayPal</button>'
+        ),
+        "action": {"action": "click", "target": "coordinates"},
+        "expect": "purchase",
+    },
+    {
+        # A skewed frame's content quad is not a rectangle: mapping the click
+        # through its top-left corner lands on the field, the true point on the
+        # wallet button. The frame probe must give up and keep the page signal.
+        "id": "guard-click-into-skewed-cross-site-frame-keeps-page-signal",
+        "url": "https://www.example-shop.com/checkout/review",
+        "html": (
+            "<h2>Review and place order</h2>"
+            '<iframe title="Secure express checkout frame" data-wl-target '
+            'style="display:block;margin-left:120px;width:200px;height:100px;border:0;transform:skewX(45deg)" '
+            'src="{cross_site_frame_origin}/frame/guard-click-into-skewed-cross-site-frame-keeps-page-signal"></iframe>'
+        ),
+        "frame_html": (
+            "<style>body{margin:0}button,input{position:absolute;top:0;height:100px;margin:0;"
+            "box-sizing:border-box;border:0}</style>"
+            '<button type="button" style="left:0;width:125px">Pay with PayPal</button>'
+            '<input style="left:125px;width:75px" placeholder="Email">'
+        ),
+        "action": {"action": "click", "target": "coordinates"},
+        "expect": "purchase",
+    },
+    {
+        # A cross-site frame nested in an in-process frame: the second hop's box
+        # model is in root-viewport coordinates, so mapping it would shift the
+        # click 200px onto the field. The frame probe must keep the page signal.
+        "id": "guard-click-through-in-process-frame-into-nested-frame-keeps-page-signal",
+        "url": "https://www.example-shop.com/checkout/review",
+        "html": (
+            "<h2>Review and place order</h2>"
+            '<iframe title="Checkout" data-wl-target '
+            'style="position:absolute;left:200px;top:0;width:600px;height:300px;border:0" '
+            'src="{frame_origin}/frame/guard-click-through-in-process-frame-into-nested-frame-keeps-page-signal">'
+            "</iframe>"
+        ),
+        "frame_html": (
+            "<style>body{margin:0}</style>"
+            '<iframe title="Secure payment frame" style="display:block;width:600px;height:300px;border:0" '
+            'src="{cross_site_frame_origin}/frame2/'
+            'guard-click-through-in-process-frame-into-nested-frame-keeps-page-signal"></iframe>'
+        ),
+        "frame2_html": (
+            "<style>body{margin:0}button,input{position:absolute;top:0;height:300px;margin:0;"
+            "box-sizing:border-box;border:0}</style>"
+            '<input style="left:0;width:200px" placeholder="Cardholder name">'
+            '<button type="button" style="left:200px;width:400px">Pay with PayPal</button>'
         ),
         "action": {"action": "click", "target": "coordinates"},
         "expect": "purchase",

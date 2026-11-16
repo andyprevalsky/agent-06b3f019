@@ -684,17 +684,28 @@ async def _frame_context(session: Any, cdp_session: Any, frame_id: str) -> tuple
     return cdp_session, world["executionContextId"]
 
 
+def _axis_aligned(quad: list) -> bool:
+    """A rotated or skewed frame's content quad is not a translated, scaled rectangle."""
+    x1, y1, x2, y2, x3, y3, x4, y4 = quad
+    return abs(y1 - y2) < 0.5 and abs(x2 - x3) < 0.5 and abs(y3 - y4) < 0.5 and abs(x4 - x1) < 0.5
+
+
 async def _probe_through_frames(session: Any, x: float, y: float) -> Optional[dict]:
     """Run PROBE_JS inside the cross-origin frame a click lands in, at frame viewport coordinates.
 
     Every coordinate here is a viewport coordinate: the click point, the
     frame's content box (``DOM.getBoxModel``) and ``elementFromPoint`` inside
     the frame, so page and frame scroll never shift the hit. A CSS-scaled frame
-    is mapped through its ``innerWidth`` / ``innerHeight``.
+    is mapped through its ``innerWidth`` / ``innerHeight``; a rotated or skewed
+    frame, or a hop through an in-process frame, cannot be mapped and returns None.
     """
     cdp_session = await session.get_or_create_cdp_session(session.agent_focus_target_id, focus=False)
     context_id: Optional[int] = None
     for _ in range(_FRAME_HOPS):
+        if context_id is not None:
+            # Inside an in-process frame, DOM.getBoxModel answers in the root
+            # viewport, not this frame's, so a further hop cannot be mapped.
+            return None
         send = cdp_session.cdp_client.send
         sid = cdp_session.session_id
         owner = await _evaluate_in(cdp_session, context_id, _probe_expression("frame_owner", x, y), by_value=False)
@@ -709,7 +720,7 @@ async def _probe_through_frames(session: Any, x: float, y: float) -> Optional[di
         finally:
             await send.Runtime.releaseObject(params={"objectId": object_id}, session_id=sid)
         box_width, box_height = quad[2] - quad[0], quad[5] - quad[1]
-        if not frame_id or box_width <= 0 or box_height <= 0:
+        if not frame_id or box_width <= 0 or box_height <= 0 or not _axis_aligned(quad):
             return None
         cdp_session, context_id = await _frame_context(session, cdp_session, frame_id)
         size = await _evaluate_in(cdp_session, context_id, "[innerWidth, innerHeight]")
