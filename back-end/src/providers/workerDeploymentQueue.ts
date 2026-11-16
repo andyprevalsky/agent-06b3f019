@@ -12,7 +12,7 @@ import {
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Prisma } from '@prisma/client';
-import { prisma, runTransactionWithRetry } from './database';
+import { prisma, runReadOnlyTransactionWithRetry, runTransactionWithRetry } from './database';
 import { lockQueueAdmission } from './workflowQueueAdmission';
 import { WORKFLOW_DEPLOYMENT_LEASE_KEY } from './workflowDeploymentLease';
 
@@ -523,7 +523,9 @@ export async function assertWorkerDeploymentOwned(
   jobId: string,
   ownerId: string
 ): Promise<WorkerDeploymentJob> {
-  return runTransactionWithRetry(async (tx) => {
+  // Read-only, so a connection dropped mid-check is replayed instead of
+  // failing a healthy cutover; a real ownership loss still throws.
+  return runReadOnlyTransactionWithRetry(async (tx) => {
     await requireWorkerDeploymentLease(tx, ownerId);
     const row = await tx.toolSideEffect.findUnique({ where: { operationKey: key(jobId) } });
     if (!row || row.operationType !== JOB) throw new Error('Deployment job does not exist');

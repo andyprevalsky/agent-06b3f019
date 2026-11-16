@@ -116,7 +116,7 @@ const iphoneControlUnit = 'iphone-control';
 quarantine(
   {
     since: '2026-11-16',
-    repair: 'pending-handoff:caa4e37997914a68b620f7100777c972',
+    repair: 'https://boxes.dev/thread/ph76kqk82ks6cx41scbxjf70698jb4fz',
     error: 'RERUN: iphone-control failed (173565ms); rerunning once',
     evidence:
       '.context/deploy-pipeline/attempts/2/initial/backend-coverage-blackbox/remote-artifact/files/back-end/coverage/shard-1.log (PR2230 FLAKY caa4e379; the 72 MB first-attempt iphone-control.log exceeded the result bundle and was not captured)',
