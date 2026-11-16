@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "no-reviewable-paths",
+      "head": "e5e0ae5cbffea5ed847509f6deaf43dc7f702efa",
+      "status": "completed",
+      "result": "clean",
+      "disposition": "no-reviewable-paths",
+      "compared_from": "5a96489acae6c406ef51385da9f77053d2ceca59",
+      "inherited_from": null,
+      "changed_paths": [
+        "docs/handoffs/pr-2420-closeout/README.md",
+        "docs/handoffs/pr-2420-closeout/config-archive-receipt.json",
+        "docs/handoffs/pr-2420-closeout/deletion-manifest.json",
+        "docs/handoffs/pr-2420-closeout/final-gate-report.txt",
+        "docs/handoffs/pr-2420-closeout/folder-verification.json",
+        "docs/handoffs/pr-2420-closeout/fresh-review.md",
+        "docs/handoffs/pr-2420-closeout/gate-archive-receipt.json",
+        "docs/handoffs/pr-2420-closeout/initial-archive-receipt.json",
+        "docs/handoffs/pr-2420-closeout/merge.json",
+        "docs/handoffs/pr-2420-closeout/production-lanes.json",
+        "docs/handoffs/pr-2420-closeout/production.json",
+        "docs/handoffs/pr-2420-closeout/readiness-preproduction.json",
+        "docs/handoffs/pr-2420-closeout/stale-versions-final.txt",
+        "docs/handoffs/pr-2420-closeout/supplemental-archive-receipt.json",
+        "docs/handoffs/pr-2420-closeout/validation-proof.json"
+      ],
+      "path_filters_sha256": "a0e26e864134d2eb616eefd1bcb8ded03d0a7234cf1f2fb7556c3a9643f3f0d6",
+      "report_row": "Code Review | \u2796 No reviewable paths | 15 changed path(s) since 5a96489ac on e5e0ae5cb are all excluded by .coderabbit.yaml path_filters; no CodeRabbit request spent",
+      "started_at": "2026-11-16T20:40:58.072201+00:00",
+      "finished_at": "2026-11-16T20:40:58.072220+00:00"
+    }
+  ]
+}
