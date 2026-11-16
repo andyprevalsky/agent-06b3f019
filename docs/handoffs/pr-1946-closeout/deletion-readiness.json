@@ -81,20 +81,9 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "tail -8",
-      "cwd": "/home/boxes/rose",
-      "pid": 2608273
-    }
-  ],
+  "live_processes": [],
   "manifest": "/var/tmp/bams-records/docs/handoffs/pr-1946-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /var/tmp/bams-records: docs/handoffs/pr-1946-closeout/closeout-manifest.json, docs/handoffs/pr-1946-closeout/private-archive-receipt.json",
-    "1 unpushed commit(s) in /var/tmp/bams-records",
-    "branch records/pr-1946-closeout has 1 commit(s) on no remote",
-    "live process 2608273 in this checkout: tail -8"
-  ],
+  "open_items": [],
   "pr": 1946,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -751,7 +740,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "detached",
@@ -766,13 +755,10 @@
       "branch": "refs/heads/records/pr-1946-closeout",
       "current": false,
       "locked": false,
-      "needs_integration": true,
+      "needs_integration": false,
       "path": "/var/tmp/bams-records",
-      "uncommitted": [
-        "docs/handoffs/pr-1946-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-1946-closeout/private-archive-receipt.json"
-      ],
-      "unpushed_commits": 1
+      "uncommitted": [],
+      "unpushed_commits": 0
     }
   ]
 }
