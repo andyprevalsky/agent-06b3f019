@@ -164,7 +164,15 @@ require_text "$PROD_VALIDATOR" "prisma.toolUsage.createMany" "production validat
 require_text "$PROD_VALIDATOR" "tokenCountCheckpoint: 950" "production validator must preserve the durable context checkpoint"
 require_text "$PROD_VALIDATOR" "tokensInCheckpoint: 680" "production validator must preserve the durable input-token checkpoint"
 require_text "$PROD_VALIDATOR" "tokensOutCheckpoint: 270" "production validator must preserve the durable output-token checkpoint"
-require_text "$PROD_VALIDATOR" "DEPLOYMENT_LEASE_WAIT_MS = 10 * 60_000" "production validator must bound deployment-lease contention"
+# Deploys never serialize on each other: the validator admits itself with a
+# run-scoped lease and never takes the production cutover lease, and its only
+# fleet-wide mutation (marker retirement) runs through a run-scoped client.
+if grep -Eq 'acquireWorkflowDeploymentLease|WORKFLOW_DEPLOYMENT_LEASE_KEY|cleanupSupersededWorkerActivationMarkers\(' "$PROD_VALIDATOR"; then
+  fail "production validator must not take the production cutover lease or retire markers fleet-wide"
+fi
+require_text "$PROD_VALIDATOR" "validationRunLease = await beginValidationRun(runId)" "production validator must admit itself with its run-scoped lease"
+require_text "$PROD_VALIDATOR" "cleanupSupersededWorkerActivationMarkersWithClient(scopedClient, currentMarkerId)" "production validator must retire only its own activation markers"
+require_text "$PROD_VALIDATOR" "liveConcurrentValidationUserIds(" "fleet stuck-state check must exclude only live concurrent validation runs"
 require_text "$PROD_VALIDATOR" 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"' "production validator must wait with the same visibility query used by marker cleanup"
 require_text "$CANDIDATE_VALIDATOR" "toolUsage.count" "candidate validator must prove no LLM/tool usage was billed"
 require_text "$CANDIDATE_VALIDATOR" "candidate_fixture_cleanup" "candidate validator must report fixture cleanup"
