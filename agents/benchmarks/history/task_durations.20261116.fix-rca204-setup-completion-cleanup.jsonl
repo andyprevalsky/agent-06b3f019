@@ -1,0 +1,2 @@
+{"task": "spawn-sub-agents", "duration_seconds": 179.6, "cost_cents": 0.0, "timestamp": "2026-11-16T08:21:00.580200+00:00", "agent_id": "c8bb2465-69a2-49e7-808d-fff30ed75af2"}
+{"task": "background-agent-message-smoke", "duration_seconds": 89.1, "cost_cents": 0.0, "timestamp": "2026-11-16T08:22:41.796566+00:00", "agent_id": "91497f06-75b9-47b6-927e-fe22d5552fa0"}
