@@ -78,7 +78,11 @@ custody. Foreign task observations never enter this task's cleanup set. An
 unconfirmed response retains the ID and logs the exception type. A separate
 phone receipt records confirmed/unconfirmed lease release and complete/pending/
 not_reported provider cleanup without changing the browser task outcome. The
-manager carries this factual receipt into parent-visible tool text. Browser
+manager carries this factual receipt into parent-visible tool text for returned
+results, including cancellation. Generic raised exceptions still carry the
+receipt only on the FE terminal row; their original exception is preserved.
+New active custody invalidates earlier release receipts before a resumable
+pause. Browser
 recording/CDP cleanup still runs. Repeating cleanup after confirmed release
 performs no additional request. Backend in-flight-operation fences remain
 unchanged: requesting release is not a claim of physical cleanup completion.
@@ -87,8 +91,9 @@ Owning focused command (from agents with venv active):
 `BLACKBOX_CASE_FUNCTIONS=test_terminal_browser_cleanup_releases_only_recorded_phone_custody python scripts/run_blackbox_tests.py spawn-browser-agent-v3`.
 Original source: exit 1. Candidate: exit 0. Additional negative controls and
 actual-cap checks run in the same normal suite. Test-map lane:
-`agents-blackbox spawn-browser-agent-v3`. Final same-source five-pass and full
-suite receipts are pending parent review; no production outcome is claimed.
+`agents-blackbox spawn-browser-agent-v3`. Integrated commit 093f1bb88b5f passed all eleven focused controls five times
+(11.0, 11.2, 9.9, 9.3, 10.8 seconds). The full owning suite and independent
+review are pending; no production outcome is claimed.
 
 Golden analogs inspected: OpenClaw
 `src/agents/session-placement-forced-terminal-settlement.ts:4` carries an exact
