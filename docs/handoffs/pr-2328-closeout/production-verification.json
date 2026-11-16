@@ -1,0 +1,169 @@
+{
+  "agent_cutover": {
+    "required": true,
+    "runtime_files": [
+      "agents/domains/spawn_browser_agent_v3/phone.py"
+    ],
+    "trigger_files": [],
+    "workflow_changed": false
+  },
+  "changed_files": 3,
+  "cutover_verify": {
+    "attempt": "43827845653-1",
+    "expected_hash": "4ef3faa76ce4",
+    "job_id": "d345a37ca8c8cab2a28658958b3cbfd889719d305cf578b4e7d3ffa12b2caf21",
+    "job_stage": "SUCCEEDED",
+    "live_job_id": "c6d0be4b47474127dc35536c9384096abcc1de9c04cf4682323e395bdac2c321",
+    "live_source_commit": "457cc757d706bad1360fe89876a1b4a79b820d3a",
+    "live_surface_hash": "844092b2a6c8",
+    "monitor_verify_exit": 0,
+    "queue_read": "ok",
+    "replaced_job_id": "d345a37ca8c8cab2a28658958b3cbfd889719d305cf578b4e7d3ffa12b2caf21",
+    "source_commit": "765eb3abe570a6b305d978ce588039c04c9ece18",
+    "verified_by": "live-successor-cutover"
+  },
+  "export_provenance": {
+    "native_receipt_sha256": "7e9aa7ff3fc053e0b4d60c55312b675a375dc79b81ae0a366f7b7f29439ad34e",
+    "omitted_field": "cutover_verify.monitor_tail (raw operational log archived privately)",
+    "original_merge": "765eb3abe570a6b305d978ce588039c04c9ece18"
+  },
+  "finished_at": "2026-11-16T19:00:59Z",
+  "fly": {
+    "attempt": "1",
+    "conclusion": "failure",
+    "deployment_token": "43827845653-1",
+    "job_id": "d345a37ca8c8cab2a28658958b3cbfd889719d305cf578b4e7d3ffa12b2caf21",
+    "job_stage": "SUCCEEDED",
+    "required": true,
+    "run_id": "43827845653",
+    "status": "completed",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43827845653",
+    "verified_by_live_successor": {
+      "live_job_id": "c6d0be4b47474127dc35536c9384096abcc1de9c04cf4682323e395bdac2c321",
+      "live_source_commit": "457cc757d706bad1360fe89876a1b4a79b820d3a",
+      "live_surface_hash": "844092b2a6c8",
+      "replaced_job_id": "d345a37ca8c8cab2a28658958b3cbfd889719d305cf578b4e7d3ffa12b2caf21"
+    }
+  },
+  "github_waits": [
+    {
+      "head": "765eb3abe570a6b305d978ce588039c04c9ece18",
+      "kind": "run-start",
+      "outcome": "found",
+      "polls": 1,
+      "run_id": "43827845653",
+      "waited_s": 1.4,
+      "workflow": "deploy-agents.yml"
+    },
+    {
+      "attempt": "1",
+      "conclusion": "failure",
+      "kind": "run-complete",
+      "outcome": "completed",
+      "polls": 1,
+      "run_id": "43827845653",
+      "status": "completed",
+      "waited_s": 0.9,
+      "workflow": "deploy-agents.yml"
+    },
+    {
+      "head": "765eb3abe570a6b305d978ce588039c04c9ece18",
+      "kind": "run-start",
+      "outcome": "found",
+      "polls": 2,
+      "run_id": "43934871586",
+      "waited_s": 12.4,
+      "workflow": "chat-lifecycle-ratchet.yml"
+    },
+    {
+      "attempt": 1,
+      "conclusion": "success",
+      "kind": "run-complete",
+      "outcome": "completed",
+      "polls": 22,
+      "run_id": "43934871586",
+      "status": "completed",
+      "waited_s": 659.0,
+      "workflow": "chat-lifecycle-ratchet.yml"
+    }
+  ],
+  "merged_sha": "765eb3abe570a6b305d978ce588039c04c9ece18",
+  "schema_version": 1,
+  "semantic": {
+    "attempt": 1,
+    "binding": {
+      "build_id": "2f71d8a69a8e-mwjmjejx",
+      "kind": "verified-by-descendant",
+      "live_frontend_commit": "2f71d8a69a8e613fe4d1ee0f6caf70c50664ad27",
+      "observed_at": "2026-11-16T19:00:59Z",
+      "polls": 1,
+      "version_url": "https://www.roselabs.ai/version.json"
+    },
+    "completed_at": "2026-11-16T19:12:03Z",
+    "conclusion": "success",
+    "created_at": "2026-11-16T19:01:01Z",
+    "dispatch": {
+      "at": "2026-11-16T19:00:59Z",
+      "inputs": {
+        "backend_url": "https://navi-j9a9.onrender.com",
+        "dispatch_id": "01cc8bee81dd49d2ba98d0086c82002d",
+        "frontend_url": "https://www.roselabs.ai",
+        "source_sha": "2f71d8a69a8e613fe4d1ee0f6caf70c50664ad27"
+      },
+      "ref": "main"
+    },
+    "display_title": "Production semantic gate source_sha=2f71d8a69a8e613fe4d1ee0f6caf70c50664ad27 dispatch=01cc8bee81dd49d2ba98d0086c82002d",
+    "finished_at": "2026-11-16T19:12:12Z",
+    "head_sha": "f14f0cc030f288d2212c8d76acdd63043a3ed679",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_execute)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43934871586/job/133536760142"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_plan)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43934871586/job/133536760383"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (web_search)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43934871586/job/133536760448"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (direct_answer)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43934871586/job/133536760586"
+      },
+      {
+        "conclusion": "success",
+        "name": "Semantic frontend flows",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43934871586/job/133536760754"
+      }
+    ],
+    "merged_sha": "765eb3abe570a6b305d978ce588039c04c9ece18",
+    "outcome": "passed",
+    "retry": null,
+    "run_id": "43934871586",
+    "source_sha": "2f71d8a69a8e613fe4d1ee0f6caf70c50664ad27",
+    "started_at": "2026-11-16T19:00:59Z",
+    "status": "completed",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43934871586",
+    "wall_s": 673.4,
+    "workflow": "chat-lifecycle-ratchet.yml"
+  },
+  "semantic_dispatch": {
+    "command": null,
+    "gate": "open"
+  },
+  "started_at": "2026-11-16T19:00:45Z",
+  "started_epoch": 1794855645.933205,
+  "status": "passed",
+  "wall_s": 13.3
+}

@@ -1,0 +1,28 @@
+{
+  "all_jobs_conclusion": "success",
+  "frontend_flows": {
+    "native_skipped_rows": [
+      "2026-11-16T19:02:59.1640563Z   -  12 [chromium] \u203a tests-e2e/browser-take-control.spec.ts:119:3 \u203a browser-take-control \u203a user can take and hand back control from the browser status chip",
+      "2026-11-16T19:03:09.6209326Z   -  24 [chromium] \u203a tests-e2e/login.spec.ts:32:3 \u203a login \u203a phone + OTP flow reaches authenticated state",
+      "2026-11-16T19:03:18.7046526Z   -  29 [chromium] \u203a tests-e2e/overlay-layers.spec.ts:5:3 \u203a select stays interactive inside a dialog above the composer",
+      "2026-11-16T19:03:18.9486770Z   -  30 [chromium] \u203a tests-e2e/overlay-layers.spec.ts:5:3 \u203a popover stays interactive inside a dialog above the composer",
+      "2026-11-16T19:03:19.1730422Z   -  31 [chromium] \u203a tests-e2e/overlay-layers.spec.ts:5:3 \u203a context stays interactive inside a dialog above the composer",
+      "2026-11-16T19:03:19.3999125Z   -  32 [chromium] \u203a tests-e2e/overlay-layers.spec.ts:5:3 \u203a sheet stays interactive inside a dialog above the composer"
+    ],
+    "passed": 70,
+    "skipped": 6,
+    "total": 76
+  },
+  "latency_ratchets": {
+    "jobs": 4,
+    "tests_passed_per_job": 2,
+    "total_tests_passed": 8
+  },
+  "notes": "Skipped outcomes remain SKIPPED, never converted to PASS. Counts read from the completed workflow log.",
+  "skip_reasons_from_executed_source": {
+    "browser_take_control": "IS_PROD: direct DB seed is local-only",
+    "login": "IS_PROD: magic OTP credentials require dev environment",
+    "overlay_layers_4_cases": "IS_PROD: fixture page exists only in local semantic stack"
+  },
+  "workflow_run_id": "43934871586"
+}
