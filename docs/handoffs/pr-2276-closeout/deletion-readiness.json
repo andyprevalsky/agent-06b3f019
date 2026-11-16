@@ -71,24 +71,9 @@
     "scripts/lib/__pycache__/": "reproducible",
     "scripts/tests/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "tail -12",
-      "cwd": "/home/boxes/rose",
-      "pid": 3202339
-    },
-    {
-      "argv": "cut -c1-220",
-      "cwd": "/home/boxes/rose",
-      "pid": 3202340
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-2276-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2276-closeout/closeout-manifest.json, docs/handoffs/pr-2276-closeout/fleet-custody-archive-receipt.json, docs/handoffs/pr-2276-closeout/private-archive-receipt.json",
-    "live process 3202339 in this checkout: tail -12",
-    "live process 3202340 in this checkout: cut -c1-220"
-  ],
+  "open_items": [],
   "pr": 2276,
   "preserved_refs": {
     "branch:backup/cerebras-chat-quota-prepush-20261002": {
@@ -111,19 +96,15 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr2276-closeout",
+      "branch": "detached",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-2276-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2276-closeout/fleet-custody-archive-receipt.json",
-        "docs/handoffs/pr-2276-closeout/private-archive-receipt.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
