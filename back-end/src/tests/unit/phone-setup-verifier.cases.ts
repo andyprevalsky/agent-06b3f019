@@ -183,6 +183,11 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
             'Never infer complete contact-history synchronization'
           )
         );
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'services line explicitly listing Contacts establishes iCloud Contacts synchronization On'
+          )
+        );
       }
       if (verificationTarget === 'portrait_lock') {
         assert.ok(
