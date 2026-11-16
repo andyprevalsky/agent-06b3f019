@@ -92,7 +92,7 @@ const quarantinedChipCount = (run: ChipCountTest): ChipCountTest =>
     { unit: `tests-e2e/browser-chip-count.spec.ts > browser-chip-count > ${chipCountTest}` },
   );
 
-const chipCountRun = quarantinedChipCount(async ({ page }) => {
+const chipCountRun: ChipCountTest = async ({ page }) => {
   const rec = attachRecorder(page);
   const agentId = await createAgent('Semantic test: browser chip count invariant (no real work).');
 
@@ -206,9 +206,30 @@ const chipCountRun = quarantinedChipCount(async ({ page }) => {
   } finally {
     await deleteAgent(agentId);
   }
-});
+};
 
 test.describe('browser-chip-count', () => {
   // Playwright resolves fixtures from a destructured first parameter.
-  test(chipCountTest, async ({ page }) => chipCountRun({ page }));
+  test(chipCountTest, async ({ page }) => quarantinedChipCount(chipCountRun)({ page }));
+
+  test('recovers a successor browser start whose realtime INSERT is lost', async ({ page }) => {
+    let dropped = 0;
+    await page.routeWebSocket(/\/realtime\/v1\/websocket/, (socket) => {
+      const upstream = socket.connectToServer();
+      upstream.onMessage((message) => {
+        // Drop only this committed start. Every other broker frame (including
+        // terminals and heartbeats) still uses the real transport unchanged.
+        if (typeof message === 'string' && message.includes('retry-task-old')) {
+          dropped += 1;
+          return;
+        }
+        socket.send(message);
+      });
+    });
+    await chipCountRun({ page });
+    expect(
+      dropped,
+      'the transport fault must actually withhold the successor start',
+    ).toBeGreaterThan(0);
+  });
 });
