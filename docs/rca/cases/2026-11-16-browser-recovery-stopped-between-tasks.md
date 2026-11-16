@@ -171,3 +171,14 @@ there is no provider waiver or delegated substitute for execution.
 The inherited local branch history is preserved in a complete-history Git
 bundle, encrypted and fully read back. Receipt:
 `docs/handoffs/browser-chip-count-repair/inherited-branches.json`.
+
+
+The subsequent control-command refresh initially failed before launching any
+worker because a direct cycle invocation and `scripts/deploy` used different
+PATH values. The controller's temporary credential wrapper also exported a
+rotating token value into the cycle environment. The invocation now uses the
+same canonical PATH on both sides and resolves the existing managed controller
+credential only when Git requests it, keeping the hashed runtime environment
+stable. This changes neither job permissions nor checked-in authentication
+behavior. The failed control invocations and original receipts remain retained;
+only an exact-source full passing cycle will authorize merge.
