@@ -49,8 +49,13 @@ def mac(changed: list[str], labels: list[str] | None = None, label_error: str | 
 
 def applicable(changed: list[str], labels: list[str] | None = None) -> set[str]:
     decision, error = mac(changed, labels or [])
-    plan = dp.plan_lanes(changed, classify(changed), decision, mac_error=error)
+    plan = dp.plan_lanes(changed, classify(changed), decision, mac_error=error, push_files=push(changed))
     return {name for name, lane in plan.items() if lane.applicable}
+
+
+def push(changed: list[str]) -> list[str]:
+    """The real deploy-agents.yml push filter on the merge diff."""
+    return dp.deploy_agents_push_matches(changed, (ROOT / dp.AGENTS_WORKFLOW_PATH).read_text())
 
 
 class Fake:
@@ -106,6 +111,8 @@ class Fake:
             return 0, SHA + '\n', ''
         if argv[:2] == ['git', 'diff']:
             return 0, ''.join(f'{p}\n' for p in self.changed), ''
+        if argv[:2] == ['git', 'show'] and argv[2].endswith(':' + dp.AGENTS_WORKFLOW_PATH):
+            return 0, (ROOT / dp.AGENTS_WORKFLOW_PATH).read_text(), ''
         if argv[:2] == ['git', 'show']:
             return 0, '2026-11-05T10:00:00-08:00\n', ''
         if argv[:2] in (['git', 'merge-base'], ['git', 'fetch']):
@@ -220,6 +227,26 @@ class ApplicabilityTest(unittest.TestCase):
         plan = dp.plan_lanes([dp.AGENTS_WORKFLOW_PATH], [], NO_MAC)
         self.assertTrue(plan['fly'].applicable and plan['workflow-migration'].applicable)
         self.assertIn('deploy-agents.yml changed', plan['fly'].reason)
+
+    def test_cutover_controller_paths_start_a_cutover(self) -> None:
+        """2026-11-16: #2147 changed only controller scripts; the lane said SKIPPED although deploy-agents.yml ran."""
+        controller = ['scripts/retained_agent_machine.py', 'scripts/worker_pool_cutover.py',
+                      'scripts/worker_pool_runtime.py', 'back-end/scripts/worker-deployment-queue.ts',
+                      'back-end/src/providers/workerDeploymentQueue.ts', 'scripts/deploy-agents-cooperative-cutover.sh',
+                      'scripts/agents-image-context.sh']
+        for path in controller:
+            plan = dp.plan_lanes([path], classify([path]), NO_MAC, push_files=push([path]))
+            self.assertTrue(plan['fly'].applicable and plan['workflow-migration'].applicable, path)
+            self.assertIn('deploy-agents.yml push paths: ' + path, plan['fly'].reason)
+        # Negative controls: excluded or unlisted paths stay non-applicable.
+        for path in ('agents/tests/test_x.py', 'agents/benchmarks/run.py', 'agents/tools/README.md',
+                     'agents/scripts/run-coverage.sh', 'scripts/worker_pool.md', 'back-end/src/providers/database.ts',
+                     'scripts/tests/worker-pool-cutover.test.py'):
+            self.assertEqual(push([path]), [], path)
+            self.assertFalse(dp.plan_lanes([path], classify([path]), NO_MAC, push_files=push([path]))['fly'].applicable,
+                             path)
+        self.assertEqual(push(['agents/tools/web_search.py', 'agents/a/b/c.py']),
+                         ['agents/tools/web_search.py', 'agents/a/b/c.py'])
 
     def test_agentcard_paths(self) -> None:
         self.assertEqual(applicable(['back-end/src/domains/agentcard/service.ts']),

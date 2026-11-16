@@ -1,3 +1,6 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 export interface CodexWsOutput {
   output: string;
   events: unknown[];
@@ -6,7 +9,8 @@ export interface CodexWsOutput {
 
 export async function waitForCodexOutput(
   wsUrl: string,
-  timeoutMs = 240_000
+  timeoutMs = 240_000,
+  waitForGoal = false
 ): Promise<CodexWsOutput> {
   const WebSocket = (await import('ws')).default;
   let output = '';
@@ -14,6 +18,7 @@ export async function waitForCodexOutput(
   let connected = false;
   let exitSeen = false;
   let turnCompleted = false;
+  let goalCompleted = false;
 
   return await new Promise<CodexWsOutput>((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
@@ -52,6 +57,7 @@ export async function waitForCodexOutput(
             raw_type?: string;
             text?: unknown;
             partial?: unknown;
+            status?: string;
           };
           if (
             typed.type === 'agent_message' &&
@@ -60,14 +66,29 @@ export async function waitForCodexOutput(
           ) {
             output += `${typed.text}\n`;
           }
+          if (
+            typed.type === 'goal' &&
+            ['complete', 'blocked', 'failed', 'cleared'].includes(typed.status ?? '')
+          ) {
+            goalCompleted = true;
+          }
+          if (typed.type === 'turn_started') turnCompleted = false;
           if (typed.type === 'turn_ended' && typed.raw_type === 'turn/completed') {
             turnCompleted = true;
           }
         }
-        if (msg.type === 'exit' || turnCompleted) {
+        if (msg.type === 'exit' || (turnCompleted && (!waitForGoal || goalCompleted))) {
           exitSeen = true;
           clearTimeout(timeout);
           ws.close();
+          const artifactDir = process.env.BLACKBOX_TEST_ARTIFACT_DIR;
+          if (artifactDir) {
+            const host = new URL(wsUrl).hostname;
+            writeFileSync(
+              join(artifactDir, `codex-events-${host}.json`),
+              JSON.stringify({ output, events }, null, 2)
+            );
+          }
           resolve({
             output,
             events,

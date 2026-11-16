@@ -219,4 +219,35 @@ while True: server.handle_request()
         self.assertTrue(retained)
         self.assertIn('cleanup unconfirmed',stderr)
 
+SLOW_PORT_ENV = 'CLOUDBENCH_TOKEN_TEST_SLOW_PORT_SECONDS'
+# Emulates a loaded runner descheduling a mock server between creating its port
+# file and writing the number (Path.write_text truncates first).
+SLOW_PORT_SITECUSTOMIZE = f"""import os, pathlib, time
+_write_text = pathlib.Path.write_text
+def _stalled_write_text(self, data, *args, **kwargs):
+    if self.name.startswith('port'):
+        open(self, 'w').close()
+        time.sleep(float(os.environ['{SLOW_PORT_ENV}']))
+    return _write_text(self, data, *args, **kwargs)
+pathlib.Path.write_text = _stalled_write_text
+"""
+
+# The suite runs this file, so its nested run under the stall must not recurse.
+@unittest.skipIf(SLOW_PORT_ENV in os.environ, 'nested run inside the stalled-port regression')
+class MockPortPublish(unittest.TestCase):
+    def test_suite_never_reads_a_partially_published_mock_port(self):
+        # PR #2338 deploy (2026-11-16): the rotation mock's empty port file made
+        # ROT_GIT portless, failing "machine-env: delivered token was not valid
+        # at delivery" on Blacksmith. Run the real suite with every port publish
+        # stalled mid-write; offline only, so no live DISPATCH token.
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / 'sitecustomize.py').write_text(SLOW_PORT_SITECUSTOMIZE)
+            env = {k: v for k, v in os.environ.items() if k != 'GITHUB_DISPATCH_TOKEN'}
+            env.update({'PYTHONPATH': temp, SLOW_PORT_ENV: '0.5'})
+            result = subprocess.run(['bash', str(root / 'scripts/tests/cloudbench-github-token.test.sh')],
+                                    cwd=root, env=env, text=True, capture_output=True, timeout=240)
+        self.assertEqual(0, result.returncode, result.stdout[-2000:] + result.stderr[-2000:])
+        self.assertIn('ALL CHECKS PASSED', result.stdout)
+
 if __name__ == '__main__': unittest.main()

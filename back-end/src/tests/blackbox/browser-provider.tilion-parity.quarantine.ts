@@ -6,7 +6,7 @@ const tilionParity = {
   run: quarantine(
     {
       since: '2026-11-16',
-      repair: 'pending-handoff:2666eabf9f154d02964e00114eac39ad',
+      repair: 'https://boxes.dev/thread/ph71waf8yk2knd7gsc0yy3sfh18jbfy2',
       error:
         'FAIL live Tilion provider parity: /resume 500: {"error":"page.goto: net::ERR_CONNECTION_CLOSED at https://example.com/',
       evidence:

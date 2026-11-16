@@ -327,6 +327,36 @@
       },
       "expect": "none",
       "grants": []
+    },
+    {
+      "id": "opaque-frame-click-reads-container-prose",
+      "kind": "false_positive",
+      "mistake": "A coordinate click into a cross-site payment-provider address frame left the page probe unresolved, so the gate fell back to every element under the point and read the checkout container's subtitle prose as a purchase commit, although the click landed in a text field.",
+      "url": "https://checkout.eventim.us/checkout/personal-details",
+      "label": "Secure address input frame",
+      "html": "<main>\n  <div style=\"height:1500px\">Event details</div>\n  <section class=\"personal-details\">\n    <h2>Personal details</h2>\n    <p class=\"subtitle\">Enter your personal information to complete your purchase.</p>\n    <iframe title=\"Secure address input frame\" data-wl-target style=\"width:480px;height:210px;border:0\" src=\"{cross_site_frame_origin}/frame/opaque-frame-click-reads-container-prose\"></iframe>\n  </section>\n  <button type=\"button\" class=\"buy\">Buy Now</button>\n</main>",
+      "frame_html": "<style>body{margin:0}input{display:block;box-sizing:border-box;width:100%;height:70px;margin:0}</style><form><input name=\"name\" autocomplete=\"name\" placeholder=\"Full name\"><input name=\"addressLine1\" autocomplete=\"address-line1\" placeholder=\"Address line 1\"><input name=\"postalCode\" autocomplete=\"postal-code\" placeholder=\"ZIP\"></form>",
+      "action": {
+        "action": "click",
+        "target": "coordinates"
+      },
+      "expect": "none",
+      "grants": []
+    },
+    {
+      "id": "same-site-frame-field-click-reads-page-prose",
+      "kind": "false_positive",
+      "mistake": "A coordinate click into a cardholder-name field hosted on the merchant's own checkout subdomain (cross-origin but same-site, so rendered in-process) was unresolvable by the page probe, so the order-review heading above the frame was read as the clicked control's label.",
+      "url": "https://shop.example-store.com/checkout/payment",
+      "label": "Cardholder name",
+      "html": "<main>\n  <h1>Review and place order</h1>\n  <iframe title=\"Payment details\" data-wl-target style=\"width:420px;height:140px;border:0\" src=\"{frame_origin}/frame/same-site-frame-field-click-reads-page-prose\"></iframe>\n</main>",
+      "frame_html": "<style>body{margin:0}input{display:block;box-sizing:border-box;width:100%;height:70px;margin:0}</style><form><input name=\"cardholder\" autocomplete=\"cc-name\" placeholder=\"Cardholder name\"><input name=\"email\" autocomplete=\"email\" placeholder=\"Receipt email\"></form>",
+      "action": {
+        "action": "click",
+        "target": "coordinates"
+      },
+      "expect": "none",
+      "grants": []
     }
   ]
 }

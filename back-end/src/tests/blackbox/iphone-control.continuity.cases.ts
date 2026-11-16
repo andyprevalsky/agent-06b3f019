@@ -135,6 +135,72 @@ async function setupChecks(h: Harness, f: { userId: string; taskId: string }) {
 }
 
 export const continuityCases: Case[] = [
+  [
+    'FIFO promotion binds successor custody before availability without relaxing revocation',
+    async (h) => {
+      const f = await fixture(h);
+      const original = setupState(
+        (await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } })).setupEncrypted
+      );
+      const context = await prisma.browserContext.findUniqueOrThrow({
+        where: { userId: f.userId },
+      });
+      const successor = await h.createAgent(f.userId);
+      const task = await prisma.browserSession.create({
+        data: { agentId: successor.id, contextId: context.id, sessionId: randomUUID() },
+      });
+      const queued = await h.request(f.userId, `/interactions/${task.id}`, {
+        method: 'POST',
+        body: { requestKey: randomUUID() },
+      });
+      assert.equal(queued.status, 200);
+      assert.equal(queued.data.lease?.status, 'WAITING');
+      const leaseId = queued.data.lease!.id;
+      const callsBefore = h.calls.length;
+      const operation = () =>
+        h.request(f.userId, `/leases/${leaseId}/operations`, {
+          method: 'POST',
+          body: { operationId: randomUUID(), operation: 'screen.text', args: {} },
+        });
+      assert.equal((await operation()).status, 409, 'A queued task cannot operate the phone');
+      assert.equal(h.calls.length, callsBefore, 'Queued input reached the provider');
+      assert.equal((await h.request(f.userId, `/availability/${task.id}`)).data.enabled, true);
+      assert.equal(
+        (await h.request(f.userId, `/leases/${f.leaseId}/release`, { method: 'POST' })).status,
+        200
+      );
+      const promoted = await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: leaseId } });
+      assert.equal(promoted.status, 'ACTIVE');
+      // Match the worker: availability is checked BEFORE the successor interaction is read.
+      assert.equal(
+        (await h.request(f.userId, `/availability/${task.id}`)).data.enabled,
+        true,
+        'FIFO promotion must bind successor custody before its availability preflight'
+      );
+      assert.equal(
+        (await h.request(f.userId, `/interactions/${task.id}`)).data.lease?.status,
+        'ACTIVE',
+        'The worker status observation can use the promoted lease'
+      );
+      const state = setupState(
+        (await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } })).setupEncrypted
+      );
+      assert.equal(state.attempt?.leaseId, leaseId);
+      assert.equal(state.attempt?.taskId, task.id);
+      assert.deepEqual(configurationState(state).verification, original.verification);
+      assert.equal(configurationState(state).attempt?.agentId, f.agentId);
+      assert.equal((await operation()).data.operation?.status, 'SUCCEEDED');
+      await prisma.agent.update({
+        where: { id: successor.id },
+        data: { temporalFirstExecutionRunId: randomUUID() },
+      });
+      assert.equal(
+        (await h.request(f.userId, `/availability/${task.id}`)).data.enabled,
+        false,
+        'Promotion cannot waive current borrower generation revocation'
+      );
+    },
+  ],
   // Prod 2026-11-14 lease c5b5d796: the 30-minute harness session expired mid first setup
   // (cursor 167 failed phone_connection_not_ready; epoch 14 -> 15 on the reconciler's confirmed
   // cleanup) and every verified step went current:false. Both stop paths reach confirmCleanup.

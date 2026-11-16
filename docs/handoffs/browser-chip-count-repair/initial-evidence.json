@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout/browser-chip-count-726b25a4/initial-forensics-20261116.bin",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "34bcfcd2a6c9a3a416c40eccabd3f4f9f7febb2c8d86a52f08a0d12726486900",
+  "gzip_sha256": "eaf1563487dfc45e52540f7a4800c91e94c3dbaa17d2d50b849c062b19fdd57b",
+  "stored_bytes": 57881889,
+  "frames": 7,
+  "files": 1192,
+  "original_bytes": 85634141,
+  "manifest_sha256": "8ff0badcdd1852c32a68dd4c3267af2ec68bdfb611e9779237d4836915ba6599",
+  "full_readback_verified": true
+}

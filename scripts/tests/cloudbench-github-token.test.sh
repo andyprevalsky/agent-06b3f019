@@ -48,7 +48,7 @@ POOL_TOKEN="ghs_test_pool_member_with_most_quota"
 POOL_NO_ACCESS_TOKEN="ghs_test_pool_member_without_repo_access"
 
 python3 - "$TMP" "$GOOD_TOKEN" "$POOL_TOKEN" "$POOL_NO_ACCESS_TOKEN" <<'PY' &
-import http.server, sys
+import http.server, os, sys
 from pathlib import Path
 root, good, pool, no_access = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 
@@ -71,7 +71,10 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 httpd = http.server.HTTPServer(("127.0.0.1", 0), H)
-Path(root, "port").write_text(str(httpd.server_address[1]))
+# Publish atomically: the shell polls for the file, and a truncate-then-write
+# lets a loaded runner read an empty port between the two steps.
+Path(root, "port.tmp").write_text(str(httpd.server_address[1]))
+os.replace(Path(root, "port.tmp"), Path(root, "port"))
 while True:
     httpd.handle_request()
 PY
@@ -82,6 +85,7 @@ for _ in $(seq 1 50); do
 done
 [ -f "$TMP/port" ] || fail "mock GitHub API did not start"
 PORT="$(cat "$TMP/port")"
+case "$PORT" in ''|*[!0-9]*) fail "mock GitHub API published a non-numeric port '$PORT'" ;; esac
 export CLOUDBENCH_GITHUB_REPO_API="http://127.0.0.1:${PORT}/repos/Rose-Ai-Labs/rose"
 
 mkdir -p "$TMP/repo/back-end" "$TMP/repo/agents" "$TMP/bin"
@@ -408,7 +412,7 @@ for envf in "$ROT/repo/back-end/.env" "$ROT/repo/agents/.env"; do
   printf 'GITHUB_TOKEN=%s\nGITHUB_DISPATCH_TOKEN=%s\n' "$DEVBOX_OLD" "$DEVBOX_OLD" >"$envf"
 done
 python3 - "$ROT" <<'PY2' &
-import base64, http.server, sys
+import base64, http.server, os, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 
@@ -441,7 +445,10 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 httpd = http.server.HTTPServer(("127.0.0.1", 0), H)
-(root / "port").write_text(str(httpd.server_address[1]))
+# Atomic publish (see the first mock): an empty port made ROT_GIT portless, so
+# the first delivery site failed "not valid at delivery" on a loaded runner.
+(root / "port.tmp").write_text(str(httpd.server_address[1]))
+os.replace(root / "port.tmp", root / "port")
 while True:
     httpd.handle_request()
 PY2
@@ -452,7 +459,9 @@ for _ in $(seq 1 50); do
   sleep 0.05
 done
 [ -f "$ROT/port" ] || fail "rotation mock GitHub API did not start"
-ROT_GIT="http://127.0.0.1:$(cat "$ROT/port")/rose.git"
+ROT_PORT="$(cat "$ROT/port")"
+case "$ROT_PORT" in ''|*[!0-9]*) fail "rotation mock published a non-numeric port '$ROT_PORT'" ;; esac
+ROT_GIT="http://127.0.0.1:${ROT_PORT}/rose.git"
 # The devbox's repository-scoped Git credential helper hands out the rotating
 # token as a complete credential: Git >= 2.46 with credential.interactive=false
 # discards a password-only answer instead of prompting for the username.

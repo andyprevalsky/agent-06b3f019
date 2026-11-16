@@ -20,6 +20,7 @@ tags:
   - recovery
   - cutover
 sources:
+  - PR #2215 (merged 85f05ea3f9527058cd54657e83297a36cf267e1d; production fly lane deploy-agents run 43822304711 PASS)
   - task https://github.com/Rose-Ai-Labs/Rose/actions/workflows/deploy-agents.yml schedule runs 43581876308, 43613997758, 43638808239, 43657839978
   - task https://github.com/Rose-Ai-Labs/Rose/actions/runs/43669103359 (failed head 7aab4aa1)
   - PR #2147 (case 2026-11-15-fly-cutover-connect-failed-write-and-orphaned-lease-recovery-409)

@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private-preservation/pr2403/final-metadata-20261116T162700Z-60976da6-2ba4-43e5-8db8-ffdb77d44e76.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "8e5d4e930db90ab0c27e801a714510c11693301eaee270dd24f03a843a6fa9d4",
+  "gzip_sha256": "f531891aea89e89ea031d80159b5e7062d258e39beabf2010843e0b542ac00b6",
+  "stored_bytes": 16509306,
+  "frames": 2,
+  "files": 58,
+  "original_bytes": 100097737,
+  "manifest_sha256": "caba9cfaa31819efa72f7394b1ac4f3e0baba2cc9b1a1ac8d27639546bf6a555",
+  "full_readback_verified": true
+}

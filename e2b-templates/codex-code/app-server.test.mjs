@@ -23,7 +23,7 @@ const FIXTURE_ACCESS_FINGERPRINT = createHash("sha256")
   .digest("hex")
   .slice(0, 16);
 import { createRequire } from "node:module";
-import { createServer } from "node:net";
+import { connect as netConnect, createServer } from "node:net";
 const require = createRequire(
   new URL("../../back-end/package.json", import.meta.url),
 );
@@ -51,10 +51,18 @@ const block = source.slice(
 const goalFiles = new Map();
 const sandbox = {
   log: () => {},
+  CODE_AGENT_HANDOFF_PATH: "/home/user/.rose/handoff.json",
+  HANDOFF_SCHEMA_MARKER:
+    "\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n",
   workDir: "/work",
   codexUsageLimit: () => null,
   mkdirSync: () => {},
-  writeFileSync: (path, data) => goalFiles.set(path, String(data)),
+  writeFileSync: (path, data) => {
+    if (path.startsWith("/home/user/")) goalFiles.set(path, String(data));
+    else writeFileSync(path, data);
+  },
+  dirname: (path) => path.slice(0, path.lastIndexOf("/")),
+  rmSync,
 };
 const {
   Native,
@@ -80,6 +88,7 @@ const {
 );
 function fixture(options = {}) {
   const handoffWrites = [];
+  const handoffResets = [];
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   const calls = [];
@@ -148,7 +157,14 @@ function fixture(options = {}) {
       options.handoffSchema
         ? {
             schema: options.handoffSchema,
-            write: (text) => handoffWrites.push(text),
+            write: (text) => {
+              handoffWrites.push(text);
+              options.write?.(text);
+            },
+            reset: () => {
+              handoffResets.push(true);
+              options.reset?.();
+            },
           }
         : null,
     ),
@@ -156,6 +172,7 @@ function fixture(options = {}) {
     calls,
     events,
     handoffWrites,
+    handoffResets,
   };
 }
 test("native initialization, active steer and idle start preserve settings and turn identity", async () => {
@@ -576,12 +593,43 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   child.stderr.on("data", (d) => (logs += d));
   let ws;
   const sockets = [];
+  const messages = [];
+  const isReady = (m) =>
+    (m.data || []).some?.(
+      (e) => e.type === "session" && e.status === "ready",
+    ) ||
+    (m.type === "code_agent_event" &&
+      m.data.type === "session" &&
+      m.data.status === "ready");
   try {
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
         port = listeningPort(logs);
-        ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        // Starve this client as a loaded host does: hold its reads until a
+        // viewer connected after it has seen `ready`. The server wrote all of
+        // that here first, so the upgrade, replay and `ready` share one read.
+        const connected = logs.split('"Client connected"').length;
+        ws = new WebSocket(`ws://127.0.0.1:${port}`, {
+          createConnection: (options) => {
+            const socket = netConnect(options.port, options.host).pause();
+            const observe = setInterval(() => {
+              if (logs.split('"Client connected"').length <= connected) return;
+              clearInterval(observe);
+              const observer = new WebSocket(`ws://127.0.0.1:${port}`);
+              sockets.push(observer);
+              observer.on("message", (d) => {
+                if (!isReady(JSON.parse(d))) return;
+                observer.terminate();
+                socket.resume();
+              });
+            }, 5);
+            socket.once("close", () => clearInterval(observe));
+            return socket;
+          },
+        });
         sockets.push(ws);
+        // Replayed events can arrive with the upgrade; listen before awaiting open.
+        ws.on("message", (d) => messages.push(JSON.parse(d)));
         await new Promise((resolve, reject) => {
           ws.once("open", resolve);
           ws.once("error", reject);
@@ -592,8 +640,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       }
     }
     assert.equal(ws.readyState, 1, logs);
-    const messages = [];
-    ws.on("message", (d) => messages.push(JSON.parse(d)));
     const wait = async (predicate) => {
       for (let i = 0; i < 200; i++) {
         if (predicate()) return;
@@ -601,20 +647,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       }
       assert.fail(logs + "\n" + JSON.stringify(messages));
     };
-    await wait(
-      () =>
-        messages.some((m) =>
-          (m.data || []).some?.(
-            (e) => e.type === "session" && e.status === "ready",
-          ),
-        ) ||
-        messages.some(
-          (m) =>
-            m.type === "code_agent_event" &&
-            m.data.type === "session" &&
-            m.data.status === "ready",
-        ),
-    );
+    await wait(() => messages.some(isReady));
     ws.send(
       JSON.stringify({
         type: "user_turn",
@@ -789,6 +822,585 @@ test("the handoff turn's final message is written as the handoff file", async ()
   await new Promise((resolve) => setImmediate(resolve));
   // Strict-mode nulls for optional fields are dropped: the file has the declared shape.
   assert.deepEqual(plain(handoffWrites), ['{\n  "sentinel": "OK"\n}\n']);
+});
+
+test("native handoff honors task constraints while preserving the thread goal", async () => {
+  const task =
+    process.env.ROSE_HANDOFF_TEST_TASK ||
+    `Run exactly one command: tool --json. Do not run any other commands.\n\nResult handoff instructions:\nEnd condition: write the file and validate it with a command.\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n${JSON.stringify(HANDOFF_SCHEMA)}`;
+  const schema = handoffSchemaFromGoal(task);
+  const { native, calls, child, handoffWrites } = fixture({
+    handoffSchema: schema,
+  });
+  await native.initialize(null, task, task);
+  const turn = calls.find((call) => call.method === "turn/start");
+  const goal = calls.find((call) => call.method === "thread/goal/set");
+  assert.ok(turn.params.outputSchema, "native output validation is preserved");
+  assert.ok(goal, "native thread goal is preserved");
+  for (const text of [turn.params.input[0].text, goal.params.objective]) {
+    assert.ok(
+      text.includes(task.split("\n\nResult handoff instructions:\n")[0]),
+    );
+    assert.ok(text.includes("Return your final response as one JSON object"));
+    assert.ok(!text.includes("validate it with a command"));
+    assert.ok(!text.includes("printing the written file"));
+  }
+  const result = { sentinel: "verified", note: null };
+  // Completion writes through the existing transport, with no shell RPC.
+  child.stdout.write(
+    JSON.stringify({
+      method: "item/completed",
+      params: {
+        threadId: "thread",
+        turnId: "turn-1",
+        item: {
+          type: "agentMessage",
+          id: "native-final",
+          text: JSON.stringify(result),
+        },
+      },
+    }) + "\n",
+  );
+  child.stdout.write(
+    JSON.stringify({
+      method: "turn/completed",
+      params: {
+        threadId: "thread",
+        turn: { id: "turn-1", status: "completed" },
+      },
+    }) + "\n",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(handoffWrites.length, 1);
+  assert.equal(
+    calls.filter((call) => /exec|command|shell/.test(call.method)).length,
+    0,
+  );
+
+  // A schema that native strict output cannot represent keeps the file contract.
+  const openSchema = {
+    type: "object",
+    properties: { data: { type: "object", additionalProperties: true } },
+    required: ["data"],
+    additionalProperties: false,
+  };
+  const openTask =
+    task.slice(0, task.lastIndexOf("\n\nResult JSON Schema for")) +
+    `\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n${JSON.stringify(openSchema)}`;
+  const unsupported = fixture({ handoffSchema: openSchema });
+  await unsupported.native.initialize(null, openTask, openTask);
+  assert.equal(
+    unsupported.calls.find((call) => call.method === "turn/start").params
+      .input[0].text,
+    openTask,
+  );
+  assert.equal(
+    unsupported.calls.find((call) => call.method === "turn/start").params
+      .outputSchema,
+    undefined,
+  );
+});
+
+test("native handoff persists fresh goal continuation results through the real reader", async () => {
+  require("tsx/cjs");
+  const {
+    readCodeAgentHandoff,
+  } = require("./src/providers/codeAgentHandoff.ts");
+  const dir = mkdtempSync(join(tmpdir(), "native-handoff-"));
+  const receipts = [];
+  const path = join(dir, "handoff.json");
+  const schema = {
+    type: "object",
+    properties: {
+      value: { type: "string" },
+      rose_handoff: {
+        type: "object",
+        properties: {
+          status: { type: "string" },
+          summary: { type: "string" },
+          branch: { type: ["string", "null"] },
+          commit: { type: ["string", "null"] },
+          pr_url: { type: ["string", "null"] },
+          merged: { type: ["boolean", "null"] },
+        },
+        required: ["status", "summary", "branch", "commit", "pr_url", "merged"],
+        additionalProperties: false,
+      },
+    },
+    required: ["value", "rose_handoff"],
+    additionalProperties: false,
+  };
+  const task = `Return the requested value.\n\nResult handoff instructions:\nWrite and validate the file.\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n${JSON.stringify(schema)}`;
+  const { native, child, calls, handoffResets } = fixture({
+    handoffSchema: schema,
+    write: (text) => writeFileSync(path, text),
+    reset: () => rmSync(path, { force: true }),
+  });
+  const send = (method, params) =>
+    child.stdout.write(JSON.stringify({ method, params }) + "\n");
+  const finish = async (id, value) => {
+    if (value !== undefined)
+      send("item/completed", {
+        threadId: "thread",
+        turnId: id,
+        item: {
+          type: "agentMessage",
+          id: `result-${id}`,
+          text: typeof value === "string" ? value : JSON.stringify(value),
+        },
+      });
+    send("turn/completed", {
+      threadId: "thread",
+      turn: { id, status: "completed" },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+  const read = async () => {
+    const receipt = await readCodeAgentHandoff(
+      {
+        exists: async (p) => existsSync(p),
+        read: async (p) => readFileSync(p, "utf8"),
+        remove: async (p) => rmSync(p),
+      },
+      path,
+    );
+    receipts.push(receipt);
+    return receipt;
+  };
+  try {
+    writeFileSync(path, "stale prior task");
+    await native.initialize(null, task);
+    assert.equal(existsSync(path), false, "new task clears stale result");
+    // Preserve a blocked first turn; no relabeling as success.
+    await finish("turn-1", {
+      value: "observed",
+      rose_handoff: {
+        status: "blocked",
+        summary: "Recorded fixture result",
+        branch: null,
+        commit: null,
+        pr_url: null,
+        merged: null,
+      },
+    });
+    assert.equal(
+      JSON.parse((await read()).content).rose_handoff.status,
+      "blocked",
+    );
+    send("thread/goal/updated", {
+      threadId: "thread",
+      goal: { status: "active" },
+    });
+    send("turn/started", { threadId: "thread", turn: { id: "continuation" } });
+    await finish("continuation", {
+      value: "verified",
+      rose_handoff: {
+        status: "complete",
+        summary: "Recorded fixture result",
+        branch: null,
+        commit: null,
+        pr_url: null,
+        merged: null,
+      },
+    });
+    assert.equal(JSON.parse((await read()).content).value, "verified");
+    send("thread/goal/updated", {
+      threadId: "thread",
+      goal: { status: "complete" },
+    });
+    assert.equal(native.goalStatus, "complete");
+    // Production starts a new CLI for a new schema; initialize owns freshness.
+    const next = fixture({
+      handoffSchema: schema,
+      write: (text) => writeFileSync(path, text),
+      reset: () => rmSync(path, { force: true }),
+    });
+    await next.native.initialize(null, task);
+    assert.equal(existsSync(path), false);
+    const freshResult = {
+      value: "fresh",
+      rose_handoff: {
+        status: "failed",
+        summary: "fixture",
+        branch: null,
+        commit: null,
+        pr_url: null,
+        merged: null,
+      },
+    };
+    next.child.stdout.write(
+      JSON.stringify({
+        method: "item/completed",
+        params: {
+          turnId: "turn-1",
+          item: {
+            type: "agentMessage",
+            id: "fresh",
+            text: JSON.stringify(freshResult),
+          },
+        },
+      }) + "\n",
+    );
+    next.child.stdout.write(
+      JSON.stringify({
+        method: "turn/completed",
+        params: { turn: { id: "turn-1", status: "completed" } },
+      }) + "\n",
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      JSON.parse((await read()).content).rose_handoff.status,
+      "failed",
+    );
+    assert.equal((await read()).status, "missing");
+    assert.equal(handoffResets.length, 1);
+    if (process.env.ROSE_HANDOFF_RECEIPTS)
+      writeFileSync(
+        process.env.ROSE_HANDOFF_RECEIPTS,
+        JSON.stringify(receipts),
+      );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("native handoff survives a commentary-only goal continuation until close", async () => {
+  require("tsx/cjs");
+  const {
+    readCodeAgentHandoff,
+  } = require("./src/providers/codeAgentHandoff.ts");
+  const dir = mkdtempSync(join(tmpdir(), "native-goal-result-"));
+  const path = join(dir, "handoff.json");
+  const result = {
+    account_name: null,
+    command_status: "missing",
+    exit_status: 127,
+    raw_output: "/bin/bash: line 1: yc: command not found\n",
+    rose_handoff: {
+      status: "complete",
+      summary: "Ran the requested command once; it is missing.",
+    },
+  };
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      account_name: { type: ["string", "null"] },
+      command_status: { type: "string" },
+      exit_status: { type: "integer" },
+      raw_output: { type: "string" },
+      rose_handoff: {
+        type: "object",
+        additionalProperties: false,
+        properties: { status: { type: "string" }, summary: { type: "string" } },
+        required: ["status", "summary"],
+      },
+    },
+    required: Object.keys(result),
+  };
+  const task = `Run yc me --json once.\n\nResult handoff instructions:\nWrite handoff.\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n${JSON.stringify(schema)}`;
+  const { native, child } = fixture({
+    handoffSchema: schema,
+    write: (text) => writeFileSync(path, text),
+    reset: () => rmSync(path, { force: true }),
+  });
+  const send = (method, params) =>
+    child.stdout.write(JSON.stringify({ method, params }) + "\n");
+  try {
+    await native.initialize(null, task);
+    send("item/completed", {
+      turnId: "turn-1",
+      item: {
+        type: "agentMessage",
+        id: "final",
+        phase: "final_answer",
+        text: JSON.stringify(result),
+      },
+    });
+    send("turn/completed", { turn: { id: "turn-1", status: "completed" } });
+    // Captured 0.169 sequence: continuation starts 17ms after final completion,
+    // emits commentary then completes the native goal without another JSON result.
+    send("turn/started", { turn: { id: "goal-continuation" } });
+    send("item/completed", {
+      turnId: "goal-continuation",
+      item: {
+        type: "agentMessage",
+        id: "commentary",
+        phase: "commentary",
+        text: "The single command returned exit 127. No retry is needed.",
+      },
+    });
+    send("thread/goal/updated", { goal: { status: "complete" } });
+    send("turn/completed", {
+      turn: { id: "goal-continuation", status: "completed" },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const handoff = await readCodeAgentHandoff(
+      {
+        exists: async (p) => existsSync(p),
+        read: async (p) => readFileSync(p, "utf8"),
+        remove: async (p) => rmSync(p),
+      },
+      path,
+    );
+    assert.equal(
+      handoff.status,
+      "present",
+      "goal continuation must not delete the completed task result",
+    );
+    assert.deepEqual(JSON.parse(handoff.content), result);
+    // A different task is still not allowed to inherit this result.
+    writeFileSync(path, JSON.stringify(result));
+    const next = fixture({
+      handoffSchema: schema,
+      reset: () => rmSync(path, { force: true }),
+    });
+    await next.native.initialize(null, task);
+    assert.equal(existsSync(path), false, "new task clears prior result");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("native handoff bounds result retention to completed commentary continuations", async (t) => {
+  require("tsx/cjs");
+  const {
+    readCodeAgentHandoff,
+  } = require("./src/providers/codeAgentHandoff.ts");
+  const result = {
+    value: "verified",
+    rose_handoff: {
+      status: "complete",
+      summary: "Recorded result",
+      branch: null,
+      commit: null,
+      pr_url: null,
+      merged: null,
+    },
+  };
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      value: { type: "string" },
+      rose_handoff: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          status: { type: "string", enum: ["complete", "blocked", "failed"] },
+          summary: { type: "string" },
+          branch: { type: ["string", "null"] },
+          commit: { type: ["string", "null"] },
+          pr_url: { type: ["string", "null"] },
+          merged: { type: ["boolean", "null"] },
+        },
+        required: Object.keys(result.rose_handoff),
+      },
+    },
+    required: Object.keys(result),
+  };
+  const cases = [
+    {
+      name: "JSON commentary",
+      phase: "commentary",
+      text: '{"note":"checking completion"}',
+      outcome: "completed",
+      expected: "retained",
+    },
+    {
+      name: "schema-shaped commentary",
+      phase: "commentary",
+      text: JSON.stringify({ ...result, value: "commentary" }),
+      outcome: "completed",
+      expected: "retained",
+    },
+    {
+      name: "failed continuation",
+      phase: "commentary",
+      text: "checking",
+      outcome: "failed",
+      expected: "missing",
+    },
+    {
+      name: "interrupted continuation",
+      phase: "commentary",
+      text: "checking",
+      outcome: "interrupted",
+      expected: "missing",
+    },
+    {
+      name: "invalid final JSON",
+      phase: "final_answer",
+      text: "not JSON",
+      outcome: "completed",
+      expected: "missing",
+    },
+    {
+      name: "null final",
+      phase: "final_answer",
+      text: "null",
+      outcome: "completed",
+      expected: "rejected",
+    },
+    {
+      name: "wrong-shape final",
+      phase: "final_answer",
+      text: '{"not_the_result":true}',
+      outcome: "completed",
+      expected: "rejected",
+    },
+    {
+      name: "invalid-enum final",
+      phase: "final_answer",
+      text: JSON.stringify({
+        ...result,
+        rose_handoff: { ...result.rose_handoff, status: "invented" },
+      }),
+      outcome: "completed",
+      expected: "rejected",
+    },
+  ];
+  const receipts = [];
+  for (const c of cases)
+    await t.test(c.name, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "native-result-retention-"));
+      const path = join(dir, "handoff.json");
+      const { native, child } = fixture({
+        handoffSchema: schema,
+        write: (text) => writeFileSync(path, text),
+        reset: () => rmSync(path, { force: true }),
+      });
+      const send = (method, params) =>
+        child.stdout.write(JSON.stringify({ method, params }) + "\n");
+      try {
+        await native.initialize(null, "Task");
+        send("item/completed", {
+          turnId: "turn-1",
+          item: {
+            type: "agentMessage",
+            id: "first",
+            phase: "final_answer",
+            text: JSON.stringify(result),
+          },
+        });
+        send("turn/completed", { turn: { id: "turn-1", status: "completed" } });
+        send("thread/goal/updated", { goal: { status: "active" } });
+        send("turn/started", { turn: { id: "next" } });
+        send("item/completed", {
+          turnId: "next",
+          item: {
+            type: "agentMessage",
+            id: "next-message",
+            phase: c.phase,
+            text: c.text,
+          },
+        });
+        send("turn/completed", { turn: { id: "next", status: c.outcome } });
+        await new Promise((resolve) => setImmediate(resolve));
+        const receipt = await readCodeAgentHandoff(
+          {
+            exists: async (p) => existsSync(p),
+            read: async (p) => readFileSync(p, "utf8"),
+            remove: async (p) => rmSync(p),
+          },
+          path,
+        );
+        receipts.push({ name: c.name, expected: c.expected, receipt });
+        if (c.expected === "retained")
+          assert.deepEqual(JSON.parse(receipt.content), result);
+        else if (c.expected === "missing")
+          assert.equal(
+            receipt.status,
+            "missing",
+            "an unsuccessful continuation must not return its prior success",
+          );
+        else {
+          assert.equal(receipt.status, "present");
+          assert.notDeepEqual(
+            JSON.parse(receipt.content),
+            result,
+            "an invalid new final must not fall back to the old result; the worker rejects it",
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  if (process.env.ROSE_HANDOFF_FAILURE_RECEIPTS)
+    writeFileSync(
+      process.env.ROSE_HANDOFF_FAILURE_RECEIPTS,
+      JSON.stringify(receipts),
+    );
+});
+
+test("native goal acknowledgments and rejected delivery preserve newer state", async () => {
+  const task = `Task.\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n${JSON.stringify(HANDOFF_SCHEMA)}`;
+  const f = fixture({ handoffSchema: HANDOFF_SCHEMA });
+  await f.native.initialize(null, task);
+  const write = f.child.stdin.write;
+  f.child.stdin.write = (line, cb) => {
+    const q = JSON.parse(line);
+    if (q.method !== "thread/goal/set") return write(line, cb);
+    cb?.();
+    queueMicrotask(() =>
+      f.child.stdout.write(
+        JSON.stringify({ id: q.id, result: { goal: { status: "active" } } }) +
+          "\n" +
+          JSON.stringify({
+            method: "thread/goal/updated",
+            params: { goal: { status: "active" } },
+          }) +
+          "\n" +
+          JSON.stringify({
+            method: "thread/goal/updated",
+            params: { goal: { status: "complete" } },
+          }) +
+          "\n",
+      ),
+    );
+  };
+  await f.native.setGoal(task);
+  assert.equal(f.native.goalStatus, "complete");
+  const beforeSchema = f.native.handoff.schema;
+  f.native.handoffText = "existing final";
+  const resets = f.handoffResets.length;
+  const changed = { ...HANDOFF_SCHEMA, required: ["note"] };
+  const next = `Task.\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n${JSON.stringify(changed)}`;
+  await assert.rejects(
+    f.native.deliver(
+      {
+        id: "bad-settings",
+        sender: "agent",
+        text: next,
+        settings: { speed: "fast" },
+      },
+      [{ type: "text", text: next }],
+    ),
+    /settings_change_requires_idle/,
+  );
+  assert.equal(f.native.handoff.schema, beforeSchema);
+  assert.equal(f.native.handoffText, "existing final");
+  assert.equal(f.handoffResets.length, resets);
+  await f.native.deliver(
+    { id: "same-task", sender: "agent", text: task, settings: {} },
+    [{ type: "text", text: task }],
+  );
+  assert.equal(f.native.handoff.schema, beforeSchema);
+  const request = f.native.request.bind(f.native);
+  f.native.request = (method, params) =>
+    method === "turn/steer"
+      ? Promise.reject(new Error("steer rejected"))
+      : request(method, params);
+  await assert.rejects(
+    f.native.deliver(
+      { id: "failed-steer", sender: "agent", text: task, settings: {} },
+      [{ type: "text", text: task }],
+    ),
+    /steer rejected/,
+  );
+  assert.equal(f.native.handoff.schema, beforeSchema);
+  assert.equal(f.native.handoffText, "existing final");
+  assert.equal(f.handoffResets.length, resets);
 });
 
 test("open-object schemas cannot be strict: no outputSchema, no written handoff", async () => {

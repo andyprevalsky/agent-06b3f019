@@ -1,0 +1,58 @@
+{
+  "merged_pr": 2403,
+  "merge_sha": "770611c7c2e3ad3e066c2ee703e87c28f0e50d4f",
+  "reviewed_head": "0e65e3c0747c71c6dc742994285771eda1462f45",
+  "status": "PASS",
+  "started_at": "2026-11-16T16:02:59Z",
+  "finished_at": "2026-11-16T16:21:23Z",
+  "lanes": {
+    "render": {
+      "status": "PASS",
+      "started_at": "2026-11-16T16:02:59Z",
+      "finished_at": "2026-11-16T16:09:35Z"
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable",
+      "started_at": null,
+      "finished_at": null
+    },
+    "vercel": {
+      "status": "SKIPPED-not-applicable",
+      "started_at": null,
+      "finished_at": null
+    },
+    "mac-release": {
+      "status": "SKIPPED-not-applicable",
+      "started_at": null,
+      "finished_at": null
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "started_at": null,
+      "finished_at": null
+    },
+    "backend-probes": {
+      "status": "PASS",
+      "started_at": "2026-11-16T16:09:35Z",
+      "finished_at": "2026-11-16T16:09:42Z"
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable",
+      "started_at": null,
+      "finished_at": null
+    },
+    "agentcard": {
+      "status": "SKIPPED-not-applicable",
+      "started_at": null,
+      "finished_at": null
+    },
+    "semantic": {
+      "status": "PASS",
+      "started_at": "2026-11-16T16:09:35Z",
+      "finished_at": "2026-11-16T16:21:23Z"
+    }
+  },
+  "native_receipt_sha256": "bd589ba3bd29c3a9fc465da3afe2c042fb1cfc8e68a6167e3474b6d209eef285",
+  "native_receipt_private_carrier": "primary-receipt.json",
+  "semantic_run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43904380212"
+}

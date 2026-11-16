@@ -22,6 +22,7 @@ sources:
   - PR #2104 deploy round 6 backend-coverage-blackbox FLAKY occurrence 27bccbe224b44535a662b172d1f728c3 (failed source 2d1c94c461, merged 31641a6709)
   - commit d7dbd7abc3 (connect-first order for unit files, RCA 2026-11-08-prisma-engine-tls-setenv-raced-second-client-env-read)
   - commit 98dbf6e190 (connectThenOpen in a blackbox, RCA 2026-11-13-demo-cache-offload-opened-prisma-clients-before-first-connect)
+  - PR #2327 (merged ceaad55dc8, 2026-11-16; production PASS: render and semantic verified by descendant, backend probes)
 repro: bash back-end/scripts/run-blackbox-tests.sh indexeddb-upload-memory (case "no other Prisma client starts before this file's first connect" is red when a static uploadService import is restored, green on the fix)
 status: mitigated
 ---
@@ -81,6 +82,9 @@ guard covers other blackbox entrypoints that import an app module next to their 
 - The control-OOM and treatment heap assertions, the 256 MB child heap and every other case are unchanged. The
   `pending-handoff:27bccbe2…` quarantine marker was removed after 5 consecutive passes of the original command on the
   fixed source.
+- Shipped in PR #2327 (merge `ceaad55dc8`). Deploy gates passed 17/17 on `1ece214fda`, including
+  `backend-coverage-blackbox` with this domain unquarantined (PASS in both the initial and final sweeps). Production
+  verification passed: Render and semantic were verified by a live descendant, and the backend probes passed.
 
 Sibling exposure, unchanged and outside this repair's assigned scope (found by the independent reviewer):
 `granola-mcp.blackbox.ts` imports `providers/database` and builds a second client in a helper (line 64), and

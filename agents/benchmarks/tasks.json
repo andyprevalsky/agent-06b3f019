@@ -4776,12 +4776,6 @@
   },
   {
     "name": "browser-auth-account-locked",
-    "quarantine": {
-      "since": "2026-11-11",
-      "repair": "https://boxes.dev/thread/thr_c71bb796ab6e4c7aa1f6543fae520280",
-      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2.",
-      "evidence": ".context/deploy-session/round23-flaky-account-locked/REPORT.md (Tilion closed CDP 1012/410 shutdown mid-run; rerun PASS)"
-    },
     "title": "Hosted Sign-In: Locked Account",
     "description": "The saved login's account is locked; the browser agent must stop trying and ask the user for sign-in help.",
     "prompt": "Tell me my member number for {auth_test_site_url}",
@@ -6195,12 +6189,6 @@
     ]
   },
   {
-    "quarantine": {
-      "since": "2026-11-13",
-      "repair": "https://boxes.dev/thread/thr_7ab578db49d2474cad54e3807e2c5220",
-      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2 (Tilion sess_993d70* worker 503 on CDP connect and DELETE; browser agent recorded 0 steps). First native attempt FAILED; one automatic retry PASS (FLAKY).",
-      "evidence": "PR1910 deploy v3 smoke .context/deploy-cloud/c96ccd4b4bc36d6c51f4e4f74f752ad8d0f0cab7ea264ca9b2651ce259996b0f; RCA: tilion.ts validation+cleanup AggregateError skips replacement retry"
-    },
     "name": "browser-auth-member-discount-purchase",
     "title": "Hosted Purchase: Account Chosen For The Member Price",
     "description": "The shop lets guests buy, but members pay 10% less; the browser agent creates an account with the minted identity instead of checking out as a guest, and pays the member price.",
@@ -9146,7 +9134,7 @@
     "name": "browser-biometrics-webdecoy",
     "quarantine": {
       "since": "2026-11-16",
-      "repair": "pending-handoff:de7a09b9a72047a4a25d7502027d2245",
+      "repair": "https://boxes.dev/thread/ph7dks458a5md98rqzhab8wafn8jaypb",
       "error": "Agent status: COST_LIMIT_REACHED (expected COMPLETED)",
       "evidence": "PR #2279 deploy 15ec855ebe smoke: first attempt (agent 51abff93-c92b-463a-8e60-0e2fc41af2fc) reached COST_LIMIT_REACHED at 147 cents / 229 s after 80 moonshotai/kimi-k3 browser-model calls (77 RoseInvalidRequest route fall-throughs); single rerun on the same source COMPLETED at 38 cents / 137 s with 26 calls (FLAKY). Not introduced: the diff only closes Rose archive records on exceptional exits and relabels a backend phone-verifier archive call_site."
     },

@@ -22,6 +22,7 @@ tags:
   - flaky
   - observability-gap
 sources:
+  - PR #2224 (fix shipped, merge b5db63a7eb11e9262c351066355343208db9f478)
   - PR #2005 (live-probes FLAKY occurrence ba2764a3; GitHub Actions run 43669374714, browser-provider.log lines 1793 and 1811, Tilion request 5d8f147e430e4130)
   - commit 47eeada6ba5180d76ca86c811a42e6beac80a05f (failed source)
 repro: back-end/src/tests/blackbox/browser-provider.tilion-file-fetch.support.ts
@@ -58,6 +59,8 @@ Regression: `browser-provider.tilion-file-fetch.support.ts`, registered in the h
   - `no_tab` gets one call and no navigate.
 
 Independent review agreed that the 285-byte challenge body is the first bad boundary and that the busy race did not cause this failure. Its requests (type the uncleared challenge, refetch only after an `ok` navigate, log the vendor body, frame the busy retry as a sibling) are applied. The tab move is kept deliberately: Tilion documents clearance as bound to the tab that earned it, so clearing in another tab is unproven.
+
+Shipped in PR #2224 (merge b5db63a7eb, 2026-11-16). `live Tilion provider parity` passed on the Blacksmith live-probes gate in gate rounds 4–7 (round 7: 17/17 on eb32cc46). Production render and semantic lanes PASS (verified by descendant); backend probes PASS.
 
 10k behavior: a challenge adds one navigate and at most one refetch per affected download; a busy refusal adds at most two retries in about 0.75 s per call. There is no shared state, fan-in or polling.
 
