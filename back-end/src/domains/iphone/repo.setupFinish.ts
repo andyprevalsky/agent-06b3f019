@@ -24,18 +24,17 @@ export async function billSetup(
         agentId: claim.lease.agentId,
         toolName,
         totalCostCents: Math.ceil(result.usage.totalCostCents),
-        usageItems: [
-          {
-            type: 'llm',
-            call_site: toolName,
-            provider: result.usage.model,
-            model: result.usage.model,
-            tokens_in: result.usage.promptTokens,
-            tokens_out: result.usage.completionTokens,
-            number_of_tokens: result.usage.totalTokens,
-            cost_cents: result.usage.totalCostCents,
-          },
-        ],
+        // One line per verifier sample, each at the model that actually served it.
+        usageItems: (result.usage.samples ?? [result.usage]).map((usage) => ({
+          type: 'llm',
+          call_site: toolName,
+          provider: usage.model,
+          model: usage.model,
+          tokens_in: usage.promptTokens,
+          tokens_out: usage.completionTokens,
+          number_of_tokens: usage.totalTokens,
+          cost_cents: usage.totalCostCents,
+        })),
       },
       update: {},
     })
