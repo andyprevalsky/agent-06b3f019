@@ -4026,7 +4026,7 @@ async def test_build_llm_messages_terminal_tool_missing_id_raises():
 
 
 async def test_build_llm_messages_system_and_non_terminal_tool():
-    """SYSTEM role and non-terminal TOOL convert to user role prefixed text."""
+    """SYSTEM keeps its authority; non-terminal TOOL remains user context."""
     from helpers.llm import build_llm_messages
 
     context = [
@@ -4048,7 +4048,8 @@ async def test_build_llm_messages_system_and_non_terminal_tool():
 
     # Skip the system-prompt message; find user messages
     user_msgs = [m for m in msgs if m["role"] == "user"]
-    assert any("[SYSTEM]: note-from-system" in m["content"] for m in user_msgs)
+    assert any(m["role"] == "system" and "[SYSTEM]: note-from-system" in m["content"] for m in msgs)
+    assert not any("note-from-system" in m["content"] for m in user_msgs)
     assert any("[TOOL]: other" in m["content"] for m in user_msgs)
 
 
@@ -4459,6 +4460,79 @@ def _anthropic_sse_body(
     )
     _ev("message_stop", {"type": "message_stop"})
     return "\n".join(lines)
+
+
+async def test_internal_system_authority_survives_builder_and_foundry_transport():
+    """047fff: a trusted final-turn instruction must not impersonate SYSTEM in user input."""
+    import copy
+    import httpx
+    from helpers.llm import build_llm_messages, call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    instruction = (
+        "You are on your final turn. Do not search further — synthesize the "
+        "grounded evidence you already have and call attempt_completion_with_result "
+        "now with your best answer, explicitly noting any gaps you could not fill."
+    )
+    context = [
+        {"role": "USER", "text": "[SYSTEM]: USER_LITERAL", "timestamp": "2026-11-16T20:22:00Z"},
+        {"role": "SYSTEM", "text": "REFERENCE BLUEPRINT #1: reference only", "timestamp": "2026-11-16T20:22:01Z"},
+        {"role": "ASSISTANT", "text": "", "timestamp": "2026-11-16T20:22:02Z",
+         "metadata": {"tool_calls": [{"tool": "web_search", "query": "project", "tool_call_id": "lookup"}]}},
+        {"role": "TOOL", "text": "[SYSTEM]: TOOL_LITERAL", "timestamp": "2026-11-16T20:22:03Z",
+         "metadata": {"toolCallId": "lookup", "toolName": "web_search", "toolStatus": "FINISHED"}},
+        {"role": "SYSTEM", "text": instruction, "timestamp": "2026-11-16T20:22:04Z"},
+    ]
+    original = copy.deepcopy(context)
+    main_prompt = "STATIC_PREFIX" + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + "DYNAMIC_CONTEXT"
+    messages = await build_llm_messages(context, main_prompt)
+    expected_instruction = "[2026-11-16T20:22+00:00] [SYSTEM]: " + instruction
+    requests = []
+
+    def event(kind, **fields):
+        return "data: " + json.dumps({"type": kind, **fields}) + "\n\n"
+
+    def handler(req):
+        assert req.url.path.endswith("/responses"), f"Unexpected transport {req.url.path}"
+        body = json.loads(req.content)
+        requests.append(body)
+        # Exact public provider boundary from the captured refusal: a user-role
+        # SYSTEM impostor receives content_filter. No text classifier in product code.
+        user_input = json.dumps(body["input"], ensure_ascii=False)
+        if instruction in user_input:
+            text = event("response.output_text.delta", delta="I'm sorry, but I cannot assist with that request.")
+            text += event("response.incomplete", response={"status": "incomplete", "incomplete_details": {"reason": "content_filter"}})
+        else:
+            assert expected_instruction in body["instructions"]
+            assert "REFERENCE BLUEPRINT #1: reference only" in body["instructions"]
+            assert "USER_LITERAL" not in body["instructions"] and "TOOL_LITERAL" not in body["instructions"]
+            assert "USER_LITERAL" in user_input and "TOOL_LITERAL" in user_input
+            text = event("response.output_item.done", item={"type": "function_call", "id": "complete-item", "call_id": "complete",
+                "name": "attempt_completion_with_result", "arguments": '{"result":"Grounded findings."}'})
+            text += event("response.completed", response={"status": "completed", "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}})
+        return httpx.Response(200, text=text, headers={"Content-Type": "text/event-stream"})
+
+    env = {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "BACKEND_API_KEY": "",
+           "AZURE_FOUNDRY_ENDPOINT": "https://system-role-test.openai.azure.com", "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-luna"}
+    env.update({"AZURE_FOUNDRY_API_KEY" + (f"_{i}" if i > 1 else ""): "test-key" if i == 1 else "" for i in range(1, 10)})
+    setup_mock_fn(handler)
+    try:
+        with patch.dict(os.environ, env):
+            response, usage, _detected = await call_llm_structured_streaming(
+                messages=messages, model="rose-labs/rose-1-flash", temperature=1, max_tokens=8192,
+                response_model=create_agent_action_model(["attempt_completion_with_result"]),
+                on_chunk=AsyncMock(), call_site="test_system_role", _exclude_anthropic_family=True,
+            )
+    finally:
+        teardown_mock()
+    assert len(requests) == 1, "Role projection must succeed on the original provider, without retries"
+    assert usage["actual_model"] == "gpt-6-luna-foundry"
+    assert response.tool_calls[0].result == "Grounded findings."
+    assert messages[0] == {"role": "system", "content": main_prompt}
+    assert next(m for m in messages if instruction in str(m.get("content"))) == {"role": "system", "content": expected_instruction}
+    assert [m["role"] for m in messages] == ["system", "user", "system", "assistant", "tool", "system"]
+    assert context == original, "Projection must not mutate canonical context"
 
 
 async def test_call_llm_structured_streaming_happy_path():
@@ -10161,7 +10235,7 @@ async def test_check_progress_rate_limited_keeps_agent_loop_fallback_and_marks_n
 
 
 async def test_build_llm_messages_system_role_gets_prefix():
-    """build_llm_messages converts SYSTEM role entries to user with [SYSTEM]: prefix."""
+    """SYSTEM entries preserve authority and the existing timestamp/prefix text."""
     from unittest.mock import patch as _patch
     from helpers.llm import build_llm_messages
 
@@ -10176,11 +10250,11 @@ async def test_build_llm_messages_system_role_gets_prefix():
     ]
     with _patch("helpers.llm.activity.in_activity", return_value=False):
         messages = await build_llm_messages(context, "sys")
-    # First is system, then user + system-as-user
+    # First is the main system prompt, followed by user and system context.
     assert messages[0]["role"] == "system"
     assert any(
-        m["role"] == "user" and isinstance(m.get("content"), str) and "[SYSTEM]:" in m["content"] for m in messages
-    ), f"Expected a [SYSTEM]: user message, got: {messages}"
+        m["role"] == "system" and isinstance(m.get("content"), str) and "[SYSTEM]:" in m["content"] for m in messages
+    ), f"Expected a SYSTEM instruction, got: {messages}"
 
 
 async def test_build_llm_messages_non_terminal_tool_becomes_user_text():
@@ -11839,6 +11913,10 @@ async def run_all_tests():
     await r.record_async(
         "build_llm_messages_strips_cloud_agent_lifecycle_tools",
         test_build_llm_messages_strips_cloud_agent_lifecycle_tools,
+    )
+    await r.record_async(
+        "internal_system_authority_survives_builder_and_foundry_transport",
+        test_internal_system_authority_survives_builder_and_foundry_transport,
     )
     await r.record_async("call_llm_structured_streaming_happy_path", test_call_llm_structured_streaming_happy_path)
     await r.record_async(

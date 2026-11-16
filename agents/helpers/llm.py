@@ -2428,7 +2428,7 @@ async def _render_llm_messages(
     - System prompt injection
     - USER messages with file attachments (images, PDFs, text files)
     - ASSISTANT messages
-    - TOOL/SYSTEM messages (converted to user role for context)
+    - SYSTEM instructions retain their role; non-terminal TOOL messages are user context
     - Filters TOOL messages: skips IN_PROGRESS, keeps only latest FINISHED per toolCallId
 
     For attachments:
@@ -2746,7 +2746,7 @@ async def _render_llm_messages(
             continue
 
         if role == "SYSTEM":
-            llm_role = "user"
+            llm_role = "system"
             full_text = f"{ts_prefix}[SYSTEM]: {text}"
         else:
             llm_role = "user"
