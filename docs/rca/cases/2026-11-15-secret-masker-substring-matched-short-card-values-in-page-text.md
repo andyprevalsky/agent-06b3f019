@@ -20,6 +20,8 @@ tags:
   - browser-observation
   - over-masking
 sources:
+  - PR #2265
+  - commit c678865ab9a3efd878efc642d87fff7b85942562
   - agent b4466499-8297-4782-891a-3f0798c845a0
 repro: agents/tests/blackbox/browser_credentials.blackbox.py::test_short_card_secrets_mask_filled_values_not_page_text_or_step_numbers
 status: fixed
