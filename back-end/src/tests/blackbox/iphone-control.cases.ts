@@ -8,6 +8,7 @@ import { savedCredentialCases } from './iphone-control.saved-credential.cases';
 import { rolloutCases } from './iphone-control.rollout.cases';
 import { setupCases } from './iphone-control.setup.cases';
 import { privacyCases } from './iphone-control.privacy.cases';
+import { privacyExpiryCases } from './iphone-control.privacy-expiry.cases';
 import { viewCases } from './iphone-control.view.cases';
 import { cleanupCases } from './iphone-control.cleanup.cases';
 import { deviceCases } from './iphone-control.device.cases';
@@ -84,6 +85,7 @@ export const cases: Case[] = [
   ...setupCases,
   ...portraitCases,
   ...privacyCases,
+  ...privacyExpiryCases,
   ...cleanupCases,
   ...viewCases,
   ...deviceCases,
