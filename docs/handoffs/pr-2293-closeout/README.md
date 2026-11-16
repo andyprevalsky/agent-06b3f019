@@ -51,3 +51,17 @@ Timeline gaps remain unrecorded waits rather than invented active work.
 Final private capture: 164,086 files / 6,263,158,292 uncompressed bytes,
 1,669,500,436 encrypted bytes. Authenticated full read-back verified every
 archive member; see `private-archive-receipt.json` and `capture-summary.json`.
+
+The inherited stash `0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2` is separately
+preserved as a verified self-contained Git bundle; see `stash-private-receipt.json`
+and its exact-ref manifest binding. The original stash remains untouched.
+The independent review accepted the public records and records-only test diff;
+its original pending preservation item is resolved by this verified stash receipt.
+The final native deletion check remains authoritative. Gate evidence stays bound
+to validated head `34b9ec25439dc6fd8cb7ea77d272ab444b096ab1`; exact-merge
+production evidence binds separately to `1ac75606167f7973aeb63f983eedfa8aed2c3775`.
+No whole-tree equivalence or exact-merge execution of all pre-merge gates is claimed.
+
+`late-evidence-private-receipt.json` preserves the exact independent review
+result, evidence, stash verification and later publication metadata after the
+large capture cutoff. Its authenticated full read-back also passed.

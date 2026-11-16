@@ -4240,5 +4240,12 @@
   "hub-poller-logs.log": "private archive: 1 captured files; see immutable inventory and archive receipt; later generated cache/control outputs are disposable after completion; preserved in trace-archive/devbox-closeout/browser-chip-count-726b25a4/final-closeout-1ac7560.bin ciphertext_sha256=6597dfcec9db2ec1cbac94f82ac42c68dfef876ef7acdf3fac9ce656d0c972df; inventory member rose/.context/browser-chip-repair/closeout-capture/inventory.json",
   "mac-app/.env": "private archive: 1 captured files; see immutable inventory and archive receipt; later generated cache/control outputs are disposable after completion; preserved in trace-archive/devbox-closeout/browser-chip-count-726b25a4/final-closeout-1ac7560.bin ciphertext_sha256=6597dfcec9db2ec1cbac94f82ac42c68dfef876ef7acdf3fac9ce656d0c972df; inventory member rose/.context/browser-chip-repair/closeout-capture/inventory.json",
   "package-lock.json": "private archive: 1 captured files; see immutable inventory and archive receipt; later generated cache/control outputs are disposable after completion; preserved in trace-archive/devbox-closeout/browser-chip-count-726b25a4/final-closeout-1ac7560.bin ciphertext_sha256=6597dfcec9db2ec1cbac94f82ac42c68dfef876ef7acdf3fac9ce656d0c972df; inventory member rose/.context/browser-chip-repair/closeout-capture/inventory.json",
-  "research/.env": "private archive: 1 captured files; see immutable inventory and archive receipt; later generated cache/control outputs are disposable after completion; preserved in trace-archive/devbox-closeout/browser-chip-count-726b25a4/final-closeout-1ac7560.bin ciphertext_sha256=6597dfcec9db2ec1cbac94f82ac42c68dfef876ef7acdf3fac9ce656d0c972df; inventory member rose/.context/browser-chip-repair/closeout-capture/inventory.json"
+  "research/.env": "private archive: 1 captured files; see immutable inventory and archive receipt; later generated cache/control outputs are disposable after completion; preserved in trace-archive/devbox-closeout/browser-chip-count-726b25a4/final-closeout-1ac7560.bin ciphertext_sha256=6597dfcec9db2ec1cbac94f82ac42c68dfef876ef7acdf3fac9ce656d0c972df; inventory member rose/.context/browser-chip-repair/closeout-capture/inventory.json",
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "disposition": "archived",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2",
+    "archive": "trace-archive/devbox-closeout/browser-chip-count-726b25a4/inherited-stash-0e2ffe95.bin",
+    "sha256": "4c126ac30ee5595da26534714925302fa7d7fb216911a546fbf5207d3c475f46",
+    "member": "rose/.context/browser-chip-repair/inherited-stash.bundle"
+  }
 }
