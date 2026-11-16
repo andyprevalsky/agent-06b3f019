@@ -37,7 +37,7 @@ async function verify(target: SetupTarget, ocr: Ocr) {
   return `${result.status}:${result.usage.model}`;
 }
 
-async function recordedProofScreensVerify(): Promise<void> {
+export async function recordedProofScreensVerify(): Promise<void> {
   const o = fixture.observations;
   const signInForm = rewrite(o.gmail_settings_cursor119.slice(0, 7), (text) =>
     text === 'Settings'
