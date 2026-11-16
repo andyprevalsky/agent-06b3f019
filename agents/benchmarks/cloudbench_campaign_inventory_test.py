@@ -1,7 +1,10 @@
 """Copy campaigns reuse the real inventory producer without borrowing ownership."""
 
+import hashlib
 import json
 import os
+import re
+import runpy
 import shlex
 import shutil
 import subprocess
@@ -227,10 +230,12 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
             assert previous['resources_released'] is True and previous['infra_failure'] is True
             assert previous['released_at_epoch'] > 0 and previous['retry_blocked'] is None
             assert current['controller_exit_code'] == 0 and current['resources_released'] is False
-            assert current['retry_blocked'] == (
-                'physical run handle unavailable' if failure == 'retry-handle-missing'
-                else 'terminal result or release remains unverified'
-            )
+            if failure == 'retry-handle-missing':
+                assert current['retry_blocked'] == 'physical run handle unavailable'
+            else:
+                # I-29 (84757cb295): the bounded reason names the unreadable receipt's error.
+                assert current['retry_blocked'].startswith('terminal result or release remains unverified ('), current
+                assert 'FileNotFoundError' in current['retry_blocked'] and len(current['retry_blocked']) <= 240, current
             for key in ('run_id', 'fleet_dir', 'fleet_owner_token', 'released_at_epoch'):
                 assert current[key] is None, f'current attempt inherited prior {key}'
                 assert broken.get(key) is None, f'current job inherited prior {key}'
@@ -297,6 +302,87 @@ def test_campaign_inventory_normal_cli_forwards_original_clock_and_bounded_retry
     assert f'--concurrency={1 if explicit_concurrency else 2}' in actual
     assert '--task=demo-fleet-alpha' in actual and '--task=demo-fleet-beta' in actual
     assert actual[-2:] == ['--forward-arg=--timeout', '--forward-arg=1200']
+
+
+def test_campaign_inventory_normal_cli_resolves_home_fly_client_for_shared_relay(tmp_path):
+    """An ordinary campaign finds the documented ~/.fly/bin client without a PATH patch.
+
+    descend I-30: ``scripts/run-bench <tasks> -k 3 --concurrency 9`` from a shell
+    without ~/.fly/bin aborted every job with "Campaign inventory did not
+    initialize ... (FileNotFoundError: ... 'flyctl')": the parent's shared relay
+    calls bare ``flyctl``. The campaign exec'd by the real CLI here runs the real
+    shared-relay startup against a HOME-installed fake client; nothing reaches Fly.
+    The App identity read is a direct Machines API request since R62, so the
+    fixture answers it in-process; the relay's bare ``flyctl proxy`` still runs.
+    """
+    checkout = tmp_path / 'checkout'
+    scripts = checkout / 'scripts'
+    scripts.mkdir(parents=True)
+    (checkout / 'agents').mkdir()
+    for name in ('run-bench', 'cloudbench_catalog.py', 'cloudbench-shard-coordinator.py'):
+        shutil.copyfile(ROOT / 'scripts' / name, scripts / name)
+    copy_timeout_policy(checkout)
+    report_contract = checkout / '.claude/shared/benchmark-report-format.txt'
+    report_contract.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / '.claude/shared/benchmark-report-format.txt', report_contract)
+    home = tmp_path / 'home'
+    client = home / '.fly/bin/flyctl'
+    client.parent.mkdir(parents=True)
+    calls = tmp_path / 'flyctl-calls.jsonl'
+    # proxy refuses, so no transport opens.
+    client.write_text(
+        f'#!{sys.executable}\n'
+        'import json, sys\n'
+        f'open({str(calls)!r}, "a").write(json.dumps(sys.argv) + "\\n")\n'
+        'raise SystemExit(9)\n')
+    client.chmod(0o700)
+    receipt = tmp_path / 'dispatch.json'
+    (scripts / 'run-bench-campaign.py').write_text(
+        'import json, os, runpy, sys\n'
+        'from pathlib import Path\n'
+        "campaign = runpy.run_path(str(Path(os.environ['FIXTURE_CAMPAIGN_ROOT']) / 'scripts/run-bench-campaign.py'))\n"
+        "base = Path(os.environ['FIXTURE_BASE'])\n"
+        "inventory = base / 'inventory'\n"
+        'inventory.mkdir()\n'
+        "(inventory / 'owner').write_text('app=navi-whisper-lux-bench\\n')\n"
+        "(base / 'campaign').mkdir()\n"
+        "metadata = json.dumps({'Name': 'navi-whisper-lux-bench', 'Organization': {'Slug': 'fixture'}, 'Network': ''})\n"
+        "campaign['start_shared_relay'].__globals__['read_relay_app_metadata'] = (\n"
+        "    lambda *args, **kwargs: __import__('subprocess').CompletedProcess(args, 0, metadata.encode(), b''))\n"
+        'try:\n'
+        "    campaign['start_shared_relay'](Path(os.environ['FIXTURE_CAMPAIGN_ROOT']), base / 'campaign', base, inventory, None)\n"
+        "    outcome = 'started'\n"
+        'except Exception as error:\n'
+        "    outcome = f'{type(error).__name__}: {error}'\n"
+        "json.dump({'argv': sys.argv[1:], 'outcome': outcome}, open(os.environ['FIXTURE_DISPATCH'], 'w'))\n")
+    # The launching shell has no Fly client on PATH, as in the reported launch.
+    path = os.pathsep.join(part for part in os.environ['PATH'].split(os.pathsep)
+                           if part and not os.access(os.path.join(part, 'flyctl'), os.X_OK))
+    assert shutil.which('flyctl', path=path) is None
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ('FLY_BENCH_API_TOKEN', 'FLY_AGENT_SOCKET_PATH', 'FLY_AGENT_ISOLATED')}
+    environment.update(PATH=path, HOME=str(home), FLY_API_TOKEN='offline-fixture',
+                       FIXTURE_DISPATCH=str(receipt), FIXTURE_BASE=str(tmp_path),
+                       FIXTURE_CAMPAIGN_ROOT=str(ROOT),
+                       RUN_BENCH_CATALOG_UNDER_TEST=str(ROOT / 'agents/benchmarks/tasks.json'))
+    try:
+        result = subprocess.run(['bash', str(scripts / 'run-bench'), 'demo-fleet-alpha', 'demo-fleet-beta',
+                                 '-k', '3', '--concurrency', '6'], capture_output=True, text=True,
+                                env=environment, timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        dispatched = json.loads(receipt.read_text())
+    finally:
+        location = tmp_path / 'campaign/shared-relay-location.json'
+        if location.is_file():
+            shutil.rmtree(json.loads(location.read_text())['directory'], ignore_errors=True)
+    # The ordinary campaign exec, not the full or sharded route.
+    assert '--runs=3' in dispatched['argv'] and '--concurrency=6' in dispatched['argv']
+    assert 'FileNotFoundError' not in dispatched['outcome'], dispatched['outcome']
+    invoked = [json.loads(line) for line in calls.read_text().splitlines()] if calls.is_file() else []
+    assert invoked == [
+        [str(client), 'proxy', '0:1', '::1', '-a', 'navi-whisper-lux-bench', '--bind-addr', '127.0.0.1', '-q'],
+    ], dispatched['outcome']
+    assert dispatched['outcome'] == 'ValueError: shared transport bootstrap did not initialize'
 
 
 @pytest.mark.parametrize("runner_mode", ("installed", "node", "npx", "missing"))
@@ -3138,7 +3224,11 @@ def test_configured_snapshot_inventory_uses_current_donor_proof(tmp_path, case):
     def function(name):
         start=source.index(name+'() {');return source[start:source.index('\n}\n',start)+3]
     start=source.index('if { [ -n "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ]')
-    end=source.index('\nelse\n    # `|| echo', start)
+    # Run the real pin/config check, the shared retried capture definition and the
+    # whole pinned branch, ending at that branch's unpinned `else`. A configured
+    # inventory must prove the donor without any native read (FLY is forbidden).
+    pinned=source.index('\nif [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; then\n', start)
+    end=source.index('\nelse\n', pinned)
     block=source[start:end]+'\nfi\n'
     node='1'*64;python='2'*64
     key='rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+python).encode()).hexdigest()[:32]
@@ -4321,3 +4411,182 @@ def test_worker_slot_admission_uses_the_startup_machine_ceiling_default(tmp_path
         'reserve_worker_machine_slot aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-worker-1', '']))
     result = subprocess.run(['bash', str(script)], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# Credential-shaped launch settings (unique fixture values only, so a value
+# search cannot collide with PIDs or clocks). Each must stay out of summary.json
+# and the banner, which a --durable unit appends to its log.
+OPERATOR_SETTING_SECRET_DECOYS = {
+    'CLOUDBENCH_FIXTURE_TOKEN': 'fixture-token-must-not-record',
+    'CLOUDBENCH_FIXTURE_API_KEY': 'fixture-api-key-must-not-record',
+    'CLOUDBENCH_FIXTURE_ENV_B64': 'Zml4dHVyZS1iNjQtbXVzdC1ub3QtcmVjb3Jk',
+    'CLOUDBENCH_WIRE_AUTH': 'FlyV1 fixture-wire-auth-must-not-record',
+    'CLOUDBENCH_FETCHABLE_AUTH_HEADER': 'Authorization: Basic fixture-header-must-not-record',
+    'CLOUDBENCH_FIXTURE_AUTHORIZATION': 'Bearer fixture-authorization-must-not-record',
+    'CLOUDBENCH_FIXTURE_SESSION_COOKIE': 'fixture-cookie-must-not-record',
+    'CLOUDBENCH_FIXTURE_CREDENTIAL_JSON': 'fixture-credential-must-not-record',
+    'CLOUDBENCH_FIXTURE_PRIVATE_PEM': 'fixture-private-must-not-record',
+    'CLOUDBENCH_FIXTURE_DB_PASSWD': 'fixture-passwd-must-not-record',
+    'CLOUDBENCH_FIXTURE_SENTRY_DSN': 'fixture-dsn-must-not-record',
+    'CLOUDBENCH_FIXTURE_GITHUB_PAT': 'fixture-pat-must-not-record',
+    'CLOUDBENCH_FIXTURE_LOGIN_OTP': 'fixture-otp-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_PAN': 'fixture-pan-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_CVV': 'fixture-cvv-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_CVC': 'fixture-cvc-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_PIN': 'fixture-pin-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_EXPIRY': 'fixture-expiry-must-not-record',
+    'CLOUDBENCH_GATE_REPO_URL': 'https://fixture-user:fixture-url-password@github.invalid/rose.git',
+    'CLOUDBENCH_FIXTURE_MIRROR': 'https://fixture-url-token-must-not-record@mirror.invalid/rose.git',
+    'CLOUDBENCH_FIXTURE_DB_PASS': 'fixture-pass-must-not-record',
+    'CLOUDBENCH_FIXTURE_DB_PWD': 'fixture-pwd-must-not-record',
+    'CLOUDBENCH_FIXTURE_SESSION_JWT': 'fixture-jwt-must-not-record',
+    'CLOUDBENCH_FIXTURE_REQUEST_SIGNATURE': 'fixture-signature-must-not-record',
+    'CLOUDBENCH_FIXTURE_HEADER_VALUE': 'Bearer fixture-bearer-must-not-record',
+    'CLOUDBENCH_FIXTURE_FLY_VALUE': 'FlyV1 fixture-flyv1-must-not-record',
+    'CLOUDBENCH_FIXTURE_PEM_VALUE': '-----BEGIN fixture-pem-must-not-record',
+    'CLOUDBENCH_FIXTURE_GH_VALUE': 'ghp_fixtureClassicMustNotRecord',
+    'CLOUDBENCH_FIXTURE_GH2_VALUE': 'github_pat_fixtureFineGrainedMustNotRecord',
+    'CLOUDBENCH_FIXTURE_PRESIGNED': 'https://bucket.invalid/o?X-Amz-Signature=fixture-presign-must-not-record',
+    # Well-known credential names no generic keyword covers (CodeRabbit PR #1865).
+    'CLOUDBENCH_FIXTURE_R2_ACCESS_KEY_ID': 'fixture-access-key-id-must-not-record',
+    'CLOUDBENCH_FIXTURE_DOCKER_AUTH_CONFIG': 'eyJmaXh0dXJlIjoiZG9ja2VyLWF1dGgtbXVzdC1ub3QtcmVjb3JkIn0=',
+    'CLOUDBENCH_FIXTURE_SSH_AUTH_SOCK': '/tmp/ssh-fixture/agent.must-not-record',
+}
+# Same name shapes or URLs without credentials: ordinary operator settings.
+OPERATOR_SETTING_NONSECRET_CONTROLS = {
+    'CLOUDBENCH_FIXTURE_REQUIRE_AUTH': '1',
+    'CLOUDBENCH_FIXTURE_ALLOW_OTP_LOGIN': 'true',
+    # Read like _benchmark_env_bool: case-insensitive, whitespace-trimmed.
+    'CLOUDBENCH_FIXTURE_PREFER_PHONE_AUTH': 'YES',
+    'CLOUDBENCH_FIXTURE_CLEAR_EXISTING_AUTH': 'On',
+    'CLOUDBENCH_FIXTURE_SPACED_AUTH': ' true ',
+    'CLOUDBENCH_FIXTURE_ORIGIN': 'https://origin.invalid:8443/path',
+    'CLOUDBENCH_FIXTURE_NOTE': 'queued\n✅ campaign passed\x1b[2K',
+}
+
+
+def test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_launch(tmp_path):
+    """The ordinary campaign records its effective CLOUDBENCH_* operator settings at launch.
+
+    descend I-31: a ``--durable`` campaign ran with
+    CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3600 and
+    CLOUDBENCH_WARM_STOP_ATTEMPTS=720, visible only in its systemd unit
+    environment. A successor reproducing it from summary.json launched with
+    the 300 s default; capacity admission timed out and the native infra stop
+    fired. The real CLI execs the real campaign here; an expired original
+    clock admits no controller, and a fake Fly client proves nothing reaches Fly.
+    """
+    checkout = tmp_path / 'checkout'
+    scripts = checkout / 'scripts'
+    scripts.mkdir(parents=True)
+    for name in ('run-bench', 'cloudbench_catalog.py', 'cloudbench-shard-coordinator.py'):
+        shutil.copyfile(ROOT / 'scripts' / name, scripts / name)
+    copy_timeout_policy(checkout)
+    report_contract = checkout / '.claude/shared/benchmark-report-format.txt'
+    report_contract.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / '.claude/shared/benchmark-report-format.txt', report_contract)
+    (checkout / 'agents/benchmarks/hub_upload.py').write_text(
+        "import hashlib, json, os, sys\n"
+        "args=sys.argv[1:]; record=json.load(open(args[1])); ack=args[args.index('--publication-ack')+1]\n"
+        "json.dump({'pid':os.getpid(),'token':args[args.index('--publication-token')+1],"
+        "'record_sha256':hashlib.sha256(json.dumps(record,sort_keys=True).encode()).hexdigest()},open(ack,'w'))\n")
+    # The exact reviewed campaign runs as __main__ for the checkout's --root.
+    (scripts / 'run-bench-campaign.py').write_text(
+        'import os, runpy\n'
+        "runpy.run_path(os.path.join(os.environ['FIXTURE_CAMPAIGN_ROOT'], 'scripts/run-bench-campaign.py'),"
+        " run_name='__main__')\n")
+    home = tmp_path / 'home'
+    calls = tmp_path / 'flyctl-calls.jsonl'
+    client = home / '.fly/bin/flyctl'
+    client.parent.mkdir(parents=True)
+    client.write_text(f'#!{sys.executable}\nimport json, sys\n'
+                      f'open({str(calls)!r}, "a").write(json.dumps(sys.argv) + "\\n")\nraise SystemExit(9)\n')
+    client.chmod(0o700)
+    secrets = OPERATOR_SETTING_SECRET_DECOYS
+    settings = {'CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS': '3600',
+                'CLOUDBENCH_WARM_STOP_ATTEMPTS': '720',
+                'CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE': 'performance-2x',
+                'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY': '0',
+                **OPERATOR_SETTING_NONSECRET_CONTROLS}
+    long_value = 'x' * 5000
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(('CLOUDBENCH_', 'RUN_BENCH_', 'BENCHMARK_HUB_'))}
+    environment.update(settings, **secrets, CLOUDBENCH_FIXTURE_LONG_SETTING=long_value, HOME=str(home),
+                       PATH=os.pathsep.join([str(client.parent), environment.get('PATH', '')]),
+                       FIXTURE_CAMPAIGN_ROOT=str(ROOT),
+                       RUN_BENCH_CATALOG_UNDER_TEST=str(ROOT / 'agents/benchmarks/tasks.json'))
+    started_at = int(time.time()) - 120
+    result = subprocess.run(['bash', str(scripts / 'run-bench'), 'demo-fleet-alpha', 'demo-fleet-beta',
+                             '-k', '2', '--concurrency', '2', '--e2e-timeout', '60',
+                             '--e2e-started-at', str(started_at)],
+                            capture_output=True, text=True, env=environment, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    summaries = list((checkout / '.context/benchmarks/campaigns').glob('*/summary.json'))
+    assert len(summaries) == 1, result.stdout + result.stderr
+    text = summaries[0].read_text()
+    summary = json.loads(text)
+    # The ordinary campaign exec, not the full or sharded route; no controller ran.
+    assert (summary['runs'], summary['concurrency'], summary['total_jobs']) == (2, 2, 4)
+    assert summary['e2e_timeout_exceeded'] is True, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    leaked = sorted(name for name, value in secrets.items() if name in text or value in text or value in output)
+    assert not leaked, f'credential-shaped settings recorded or printed: {leaked}'
+    recorded = dict(summary.get('operator_settings') or {})
+    # One bounded value keeps its prefix, original length and digest.
+    capped = recorded.pop('CLOUDBENCH_FIXTURE_LONG_SETTING', '')
+    digest = hashlib.sha256(long_value.encode()).hexdigest()
+    assert capped == 'x' * 1024 + f'…[truncated: 1024 of 5000 characters recorded; sha256={digest}]', capped[1000:]
+    assert recorded == settings, sorted(set(recorded) ^ set(settings))
+    # The campaign records its own controller identity for the scorecard (CodeRabbit PR #1865):
+    # a concurrency-1 campaign has no shared-inventory owner file to read it from.
+    controller = summary.get('controller') or {}
+    assert isinstance(controller.get('pid'), int) and controller['pid'] > 0, summary.get('controller')
+    assert str(controller.get('birth') or '').strip(), summary.get('controller')
+    banner = result.stdout
+    for name, value in settings.items():
+        if name != 'CLOUDBENCH_FIXTURE_NOTE':
+            assert f'{name}={shlex.quote(value)}' in banner, banner
+    # Control characters cannot forge a banner line or terminal escape.
+    assert "CLOUDBENCH_FIXTURE_NOTE='queued\\n✅ campaign passed\\x1b[2K'" in banner, banner
+    assert '\n✅ campaign passed' not in banner and '\x1b' not in banner
+    assert not calls.exists(), calls.read_text()
+
+
+def test_campaign_banner_escapes_invalid_utf8_setting_values():
+    """A CLOUDBENCH_* value holding invalid UTF-8 must not crash the startup banner (CodeRabbit PR #1865).
+
+    os.environ decodes such bytes as lone surrogates (surrogateescape); print() on a strict UTF-8
+    stdout raised UnicodeEncodeError after summary.json was written, leaving a "running" campaign.
+    """
+    campaign = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+    value = os.fsdecode(b'queued-\xff\xfe-tail')
+    rendered = campaign['banner_setting_value'](value)
+    rendered.encode('utf-8')  # strict: a lone surrogate would raise UnicodeEncodeError
+    assert '\\udcff' in rendered and '\\udcfe' in rendered, rendered
+    assert campaign['banner_setting_value']('plain-value') == 'plain-value'
+
+
+def test_campaign_inventory_operator_settings_python_filter_matches_run_bench(tmp_path):
+    """A recorded name list is untrusted: the campaign re-applies run-bench's exact filter."""
+    function = re.search(r'^run_bench_secret_like_setting\(\) \{\n.*?^\}\n',
+                         (ROOT / 'scripts/run-bench').read_text(), re.M | re.S)
+    assert function, 'scripts/run-bench lost run_bench_secret_like_setting'
+    campaign = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+    # Invalid UTF-8 reaches both readers as the same bytes (Python: surrogateescape).
+    raw_url = os.fsdecode(b'https://\xff\xfe:fixture-raw-password@host.invalid/x')
+    cases = {**OPERATOR_SETTING_SECRET_DECOYS, **OPERATOR_SETTING_NONSECRET_CONTROLS,
+             'CLOUDBENCH_FIXTURE_RAW_URL': raw_url, 'CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS': '3600'}
+    secret = set(OPERATOR_SETTING_SECRET_DECOYS) | {'CLOUDBENCH_FIXTURE_RAW_URL'}
+    probe = function.group(0) + ('for name in "$@"; do if run_bench_secret_like_setting "$name" "${!name}"; '
+                                 'then echo "$name"; fi; done\n')
+    for locale in ('C.UTF-8', 'C'):
+        environment = {name.encode(): os.fsencode(value) for name, value in cases.items()}
+        environment.update({b'PATH': os.fsencode(os.environ['PATH']), b'LC_ALL': locale.encode()})
+        shell = subprocess.run(['bash', '-c', probe, 'probe', *cases], env=environment,
+                               capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS, check=True)
+        assert set(shell.stdout.split()) == secret, (locale, sorted(set(shell.stdout.split()) ^ secret))
+    assert {name for name, value in cases.items() if campaign['secret_like_setting'](name, value)} == secret
+    environ = {**cases, 'RUN_BENCH_OPERATOR_SETTING_NAMES': ' '.join(cases)}
+    recorded = campaign['launch_operator_settings'](environ)
+    assert set(recorded) == set(cases) - secret
+    assert campaign['launch_operator_settings']({k: v for k, v in environ.items()
+                                                 if k != 'RUN_BENCH_OPERATOR_SETTING_NAMES'}) is None

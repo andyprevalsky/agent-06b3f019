@@ -136,7 +136,12 @@ def _sdk_streams(data: dict) -> list[list[dict]]:
             messages.extend(node.get("messages") or [])
     for node in ((data.get("_benchmark") or {}).get("tree") or {}).values():
         messages.extend(node.get("messages") or [])
-    streams = {}
+    # One session's evidence may span bounded rows; each row states the
+    # [start, end) slice it holds. A row without one must hold the whole session,
+    # and one session's rows are either all paged or all unpaged.
+    pages: dict[str, dict[int, list]] = {}
+    totals: dict[str, int] = {}
+    paged: dict[str, bool] = {}
     for row in messages:
         metadata = row.get("metadata") or {}
         if row.get("role", "").upper() != "TOOL" or metadata.get("toolName") != "code_agent_sdk_events":
@@ -148,13 +153,32 @@ def _sdk_streams(data: dict) -> list[list[dict]]:
         events = json.loads(text[len(prefix):])["code_agent_events"]
         _require(isinstance(events, list), "missing SDK event list")
         count = metadata.get("steps_taken")
-        _require(type(count) is int and count == len(events), "missing/truncated SDK evidence count")
+        _require(type(count) is int and count >= 0, "missing/truncated SDK evidence count")
+        if "sdk_event_range" in metadata:
+            span = metadata["sdk_event_range"]
+            _require(isinstance(span, list) and len(span) == 2 and all(type(v) is int for v in span)
+                     and 0 <= span[0] and span[1] - span[0] == len(events), "missing/truncated SDK evidence count")
+        else:
+            _require(count == len(events), "missing/truncated SDK evidence count")
+            span = [0, len(events)]
         identity = metadata.get("task_id")
         _require(isinstance(identity, str) and bool(identity), "missing code session identity")
-        if identity in streams:
-            _require(streams[identity] == events, "conflicting code evidence copies")
-        streams[identity] = events
-    return list(streams.values())
+        _require(paged.setdefault(identity, "sdk_event_range" in metadata) == ("sdk_event_range" in metadata),
+                 "mixed paged and unpaged SDK evidence")
+        _require(totals.setdefault(identity, count) == count, "conflicting code evidence copies")
+        stream = pages.setdefault(identity, {})
+        if span[0] in stream:
+            _require(stream[span[0]] == events, "conflicting code evidence copies")
+        stream[span[0]] = events
+    streams = []
+    for identity, stream in pages.items():
+        events = []
+        for start in sorted(stream):
+            _require(start == len(events), "missing/truncated SDK evidence count")
+            events.extend(stream[start])
+        _require(len(events) == totals[identity], "missing/truncated SDK evidence count")
+        streams.append(events)
+    return streams
 
 
 def process_evidence(data: dict) -> list[dict]:

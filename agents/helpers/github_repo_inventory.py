@@ -5,9 +5,11 @@
             deduplicated by canonical_ref, sorted by (owner, repo_name)
         ──▶ render_github_repos_section: one line per repo, "" when there are none
 
-Only the three public identifiers ever reach the model: a URL carrying
-userinfo (credentials), a non-GitHub URL or a malformed canonical ref drops
-the entry instead of being rendered. The canonical ref (``gh:<owner>/<repo>``,
+Only the three public identifiers ever reach the model, plus, for a
+teammate's repo shared with one of the user's teams, its owner's display name
+and the team name (sanitized, quoted): a URL carrying userinfo (credentials),
+a non-GitHub URL or a malformed canonical ref drops the entry instead of being
+rendered. The user's own connection of a repo always wins over a shared one. The canonical ref (``gh:<owner>/<repo>``,
 back-end/src/providers/githubRepos/refs.ts) is the value code-agent creation
 takes as ``github_repo_ref``.
 
@@ -24,6 +26,29 @@ GITHUB_REPOS_HEADING = "# Available GitHub repositories"
 MAX_GITHUB_REPOS = 25
 _CANONICAL_REF = re.compile(r"^gh:([a-z0-9_.-]+)/([a-z0-9_.-]+)$")
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+# Display names are user-chosen: keep letters, digits and plain punctuation only.
+_DISPLAY_UNSAFE = re.compile(r"[^\w .,&'()+-]")
+MAX_DISPLAY_NAME = 60
+
+
+def _display_name(value: Any) -> Optional[str]:
+    """A one-line, quote-free, bounded display name, or None."""
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(_DISPLAY_UNSAFE.sub(" ", value).split())[:MAX_DISPLAY_NAME].strip()
+    return cleaned or None
+
+
+def _sharing(entry: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """``shared_by`` / ``shared_team`` of a teammate's shared repo (backend or compacted form)."""
+    shared = entry.get("shared")
+    if isinstance(shared, dict):
+        owner, team = shared.get("owner_name"), shared.get("team_name")
+    elif "shared_team" in entry:
+        owner, team = entry.get("shared_by"), entry.get("shared_team")
+    else:
+        return None
+    return {"shared_by": _display_name(owner) or "a teammate", "shared_team": _display_name(team) or "your team"}
 
 
 def _repo_url(value: Any) -> Optional[str]:
@@ -61,6 +86,7 @@ def _compact(entry: Any) -> Optional[Dict[str, str]]:
         "repo_url": url,
         "canonical_ref": ref,
         "owner": owner,
+        **(_sharing(entry) or {}),
     }
 
 
@@ -70,9 +96,19 @@ def compact_github_repos(payload: Any) -> List[Dict[str, str]]:
     by_ref: Dict[str, Dict[str, str]] = {}
     for entry in entries if isinstance(entries, list) else []:
         repo = _compact(entry)
-        if repo is not None:
-            by_ref.setdefault(repo["canonical_ref"], repo)
+        if repo is None:
+            continue
+        known = by_ref.get(repo["canonical_ref"])
+        if known is None or ("shared_team" in known and "shared_team" not in repo):
+            by_ref[repo["canonical_ref"]] = repo
     return sorted(by_ref.values(), key=lambda r: (r["owner"].lower(), r["repo_name"].lower(), r["canonical_ref"]))
+
+
+def _line(repo: Dict[str, str]) -> str:
+    line = f"- {repo['repo_name']} — {repo['repo_url']} ({repo['canonical_ref']})"
+    if "shared_team" not in repo:
+        return line
+    return f'{line} — a teammate\'s repo, shared by "{repo["shared_by"]}" with team "{repo["shared_team"]}"'
 
 
 def render_github_repos_section(repos: Any) -> str:
@@ -86,7 +122,7 @@ def render_github_repos_section(repos: Any) -> str:
         "High-level info: the repositories you can use when creating a code agent "
         "(pass the gh:owner/repo ref in parentheses as github_repo_ref):",
     ]
-    lines.extend(f"- {r['repo_name']} — {r['repo_url']} ({r['canonical_ref']})" for r in shown[:MAX_GITHUB_REPOS])
+    lines.extend(_line(r) for r in shown[:MAX_GITHUB_REPOS])
     hidden = len(shown) - MAX_GITHUB_REPOS
     if hidden > 0:
         lines.append(f"+{hidden} more connected repositories")

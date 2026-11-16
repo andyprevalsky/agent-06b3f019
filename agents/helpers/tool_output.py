@@ -6,6 +6,7 @@ transport. This module never writes model previews back to the source record.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import re
@@ -62,21 +63,23 @@ def _storage_path(owner: tuple[str, str, str], output_id: str) -> str:
     return f"{owner[0]}/{file_id}_{_FILENAME}"
 
 
-def _safe_text(text: str) -> str:
+def _safe_text(text: str, *, value_scoped: bool = False) -> str:
     from browser_tools.secret_refs import current_secret_placeholders, redact_current_secret_values
 
     # Redact complete JSON as one value. Splitting around placeholders before
     # parsing can leave half a quoted field and produce malformed JSON.
+    # value_scoped is only for a browser-state observation (secret_refs).
     return redact_sensitive_text(
-        redact_current_secret_values(text), trusted_placeholders=current_secret_placeholders()
+        redact_current_secret_values(text, value_scoped=value_scoped),
+        trusted_placeholders=current_secret_placeholders(),
     )
 
 
-async def _safe_text_async(text: str) -> str:
+async def _safe_text_async(text: str, *, value_scoped: bool = False) -> str:
     # Retained bodies can be tens of MiB; redaction must not block the worker loop.
     if len(text) > DEFAULT_INLINE_CHARS:
-        return await asyncio.to_thread(_safe_text, text)
-    return _safe_text(text)
+        return await asyncio.to_thread(functools.partial(_safe_text, text, value_scoped=value_scoped))
+    return _safe_text(text, value_scoped=value_scoped)
 
 
 async def _persist(text: str, owner: tuple[str, str, str]) -> str:
@@ -237,11 +240,11 @@ async def _redact_retained_preview(text: str, owner: tuple[str, str, str]) -> st
     return await _safe_text_async(text[:start]) + preview + await _safe_text_async(text[marker.end():])
 
 
-async def preview_tool_text(text: str, *, user_id: str, agent_id: str, session_id: str = "", limit: int = DEFAULT_INLINE_CHARS) -> str:
+async def preview_tool_text(text: str, *, user_id: str, agent_id: str, session_id: str = "", limit: int = DEFAULT_INLINE_CHARS, value_scoped: bool = False) -> str:
     marker_match = (await asyncio.to_thread(_RETAINED_MARKER.search, text)
                     if len(text) > DEFAULT_INLINE_CHARS else _RETAINED_MARKER.search(text))
     text = (await _redact_retained_preview(text, _owner(user_id, agent_id, session_id))
-            if marker_match and user_id and agent_id else await _safe_text_async(text))
+            if marker_match and user_id and agent_id else await _safe_text_async(text, value_scoped=value_scoped))
     if len(text) <= limit:
         return text
     if limit < 512:
@@ -254,15 +257,17 @@ async def preview_tool_text(text: str, *, user_id: str, agent_id: str, session_i
     return _preview(text, output_id, limit)
 
 
-async def bound_tool_result(value: Any, *, user_id: str, agent_id: str, session_id: str = "", limit: int = DEFAULT_INLINE_CHARS) -> Any:
+async def bound_tool_result(value: Any, *, user_id: str, agent_id: str, session_id: str = "", limit: int = DEFAULT_INLINE_CHARS, value_scoped: bool = False) -> Any:
     """Keep small redacted native JSON values; retain oversized JSON in a valid envelope.
 
     Callers must remove binary/media fields before calling this helper.
     """
     if isinstance(value, str):
-        return await preview_tool_text(value, user_id=user_id, agent_id=agent_id, session_id=session_id, limit=limit)
+        return await preview_tool_text(
+            value, user_id=user_id, agent_id=agent_id, session_id=session_id, limit=limit, value_scoped=value_scoped
+        )
     serialized = await asyncio.to_thread(json.dumps, value, ensure_ascii=False, allow_nan=False)
-    text = await _safe_text_async(serialized)
+    text = await _safe_text_async(serialized, value_scoped=value_scoped)
     if len(serialized) <= limit:
         return value if text == serialized else json.loads(text)
     output_id = await _persist(text, _owner(user_id, agent_id, session_id))

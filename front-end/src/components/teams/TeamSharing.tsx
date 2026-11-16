@@ -4,20 +4,27 @@
  * [SAVING] → refetch authoritative shares → [READY]; failure → [ERROR + unchanged checkbox].
  * Membership never enables sharing. Only the resource owner can issue these writes.
  *
- * AccountTeamShare (one shareable account on its Integrations row: a Gmail address or iMessage):
+ * AccountTeamShare (one shareable account on its Integrations row: a Gmail address, iMessage,
+ * WhatsApp, LinkedIn, a Granola / Fireflies account, a Plaid institution, a GitHub repo, a
+ * Claude / ChatGPT subscription account or a CLI; never iPhone, browser cookies, passwords
+ * or Pebble Index 01):
  *   [PRIVATE] dashed "Share" button
  *   [SHARED]  "Shared with <team>" | "Shared with N teams" (hover → tooltip naming every team) + ⌄
- *   either --click--> [PICKER OPEN]: one checkbox per accepted team, even when there is only one
+ *   either --click--> [PICKER OPEN] "Share with teams" · the account's label (else the
+ *     integration's name) · one checkbox per accepted team, even when there is only one
+ *     · what teammates' agents get for this kind of account
  *     checkbox --toggle--> [SAVING] (same cycle as above) → caption follows the refetched shares
  *     escape / outside click → closed
  *   Not rendered while loading, signed out, with no accepted team, or for an account the backend
- *   does not list as shareable (damaged Gmail credential, ambiguous iMessage).
+ *   does not list as shareable (damaged Gmail credential, ambiguous single-row account,
+ *   disconnected or still-setting-up account).
  *   A failed teams/accounts load shows once, page-level (TeamShareLoadError).
  *
  * System context:
- *   Integrations page → TeamShareLoadError (top) and each Gmail / iMessage account
- *     (DesktopIntegrations → desktopSectionViews, or stock GmailRow / iMessage row)
- *     → useAccountShares().shareTarget(provider, email) → AccountTeamShare
+ *   Integrations page → TeamShareLoadError (top) and each shareable account row
+ *     (DesktopIntegrations → desktopSectionViews / DesktopComputeRow, the stock sections, and the
+ *     shared GitHub Repos / CLIs cards)
+ *     → useAccountShares().shareTarget(provider, account) → AccountTeamShare
  *     → GET /teams + GET /teams/shareable-integrations (one shared react-query cache)
  *     → PUT | DELETE /teams/:teamId/integrations/:accountId → refetch both
  */
@@ -26,6 +33,7 @@ import { ChevronDown, UserPlus, Users } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
+  accountLabel,
   setTeamIntegration,
   setTeamProject,
   isAccountShared,
@@ -86,8 +94,21 @@ const CAPTION_CLASSES =
   'inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-black/5 hover:text-foreground data-[state=open]:bg-black/5 data-[state=open]:text-foreground dark:hover:bg-white/[0.08] dark:data-[state=open]:bg-white/[0.08]';
 const PRIVATE_CLASSES = `${CAPTION_CLASSES} border border-dashed border-border hover:text-[#e8507f] data-[state=open]:text-[#e8507f] dark:hover:text-[#ff7aa2] dark:data-[state=open]:text-[#ff7aa2]`;
 
-const accountName = (account: ShareableIntegration) =>
-  account.accountEmail ?? (account.provider === 'imessage' ? 'iMessage' : account.name);
+const MEETING_NOTES = "Teammates' agents can read this account's meeting notes.";
+const SUBSCRIPTION = "Teammates' agents can use this subscription after their own.";
+/** What a teammate's agent gets from each kind of shared account (messages by default). */
+const SHARE_EFFECT = new Map<string, string>([
+  ['granola', MEETING_NOTES],
+  ['fireflies', MEETING_NOTES],
+  ['plaid', "Teammates' agents can read this institution's transactions."],
+  ['github_repo', "Teammates' code agents can use this repo."],
+  ['claude_code', SUBSCRIPTION],
+  ['gpt_code', SUBSCRIPTION],
+  ['cli', "Teammates' agents can run this CLI in your sandbox."],
+  ['mcp', "Teammates' code agents can use this server's tools through your connection."],
+]);
+const shareEffect = (account: ShareableIntegration) =>
+  SHARE_EFFECT.get(account.provider) ?? "Teammates' agents can read this account's messages.";
 
 function memberCount(team: Team): string {
   const count = team.members.filter((member) => member.status === 'ACCEPTED').length;
@@ -123,7 +144,7 @@ export function AccountTeamShare({
   teams: Team[];
 }) {
   const shared = teams.filter((team) => isAccountShared(team, account));
-  const name = accountName(account);
+  const name = accountLabel(account);
   const who = shared.length === 1 ? shared[0].name : `${shared.length} teams`;
   const trigger = (
     <PopoverTrigger asChild>
@@ -166,7 +187,7 @@ export function AccountTeamShare({
           />
         ))}
         <p className="mt-2 border-t border-border pt-2 text-[11px] leading-snug text-muted-foreground">
-          Teammates&apos; agents can read this account&apos;s messages. Credentials stay private.
+          {shareEffect(account)} Credentials stay private.
         </p>
       </PopoverContent>
     </Popover>

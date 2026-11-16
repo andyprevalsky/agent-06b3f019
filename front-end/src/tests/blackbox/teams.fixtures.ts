@@ -27,39 +27,73 @@ export function makeTeam(overrides: Partial<Team> = {}): Team {
     ...overrides,
   };
 }
-export const accounts: ShareableIntegration[] = [
-  {
-    id: 'mail-work',
-    integrationId: 'gmail-parent',
-    provider: 'gmail',
-    accountId: 'work@example.test',
-    accountEmail: 'work@example.test',
-    name: 'gmail',
-    status: 'CONNECTED',
-    teamIds: [],
-  },
-  {
-    id: 'mail-personal',
-    integrationId: 'gmail-parent',
-    provider: 'gmail',
-    accountId: 'private@example.test',
-    accountEmail: 'private@example.test',
-    name: 'gmail',
-    status: 'CONNECTED',
-    teamIds: [],
-  },
-  {
-    id: 'imessage-parent',
-    integrationId: 'imessage-parent',
-    provider: 'imessage',
-    accountId: '',
+/** A shareable account as GET /teams/shareable-integrations lists it. */
+function shareable(
+  id: string,
+  provider: string,
+  accountId: string,
+  extra: Partial<ShareableIntegration> = {},
+): ShareableIntegration {
+  return {
+    id,
+    integrationId: id,
+    provider,
+    accountId,
     accountEmail: null,
-    name: 'iMessage',
+    label: null,
+    name: provider,
     status: 'CONNECTED',
     teamIds: [],
-  },
+    ...extra,
+  };
+}
+const mail = (id: string, email: string) =>
+  shareable(id, 'gmail', email, {
+    integrationId: 'gmail-parent',
+    accountEmail: email,
+    label: email,
+  });
+const meetingNotes = (provider: string, email: string) =>
+  shareable(`int-${provider}`, provider, '', { accountEmail: email, label: email });
+const plaidItem = (itemId: string, institution: string) =>
+  shareable(itemId, 'plaid', itemId, { integrationId: 'int-plaid', label: institution });
+/**
+ * One exact account per shareable provider (two Gmail inboxes, two Plaid institutions).
+ * Selector ids follow the backend: credential id (gmail), PlaidItem.id (plaid), else the
+ * account's Integration id.
+ */
+export const accounts: ShareableIntegration[] = [
+  mail('mail-work', 'work@example.test'),
+  mail('mail-personal', 'private@example.test'),
+  shareable('imessage-parent', 'imessage', '', { name: 'iMessage' }),
+  shareable('int-whatsapp', 'whatsapp', ''),
+  shareable('int-linkedin', 'linkedin', ''),
+  meetingNotes('granola', 'andy@example.com'),
+  meetingNotes('fireflies', 'notes@example.test'),
+  plaidItem('item-uuid-1', 'First Platypus Bank'),
+  plaidItem('item-uuid-2', 'Second Bank'),
+  shareable('int-gh-rose', 'github_repo', 'gh:rose-ai-labs/rose', {
+    label: 'gh:rose-ai-labs/rose',
+  }),
+  shareable('int-claude-acct', 'claude_code', 'acct-claude-1', { label: 'claude@example.test' }),
+  shareable('int-codex-acct', 'gpt_code', 'acct-codex-1', { label: 'codex@example.test' }),
+  shareable('cli-yc', 'cli', 'req-yc', { label: 'YC CLI' }),
+  shareable('mcp-docs', 'mcp', 'mcp-docs', { label: 'Context7' }),
 ];
-export function mockTeams(initial: Team[] = [makeTeam()], invitations: Team[] = []) {
+/** Accounts the backend never lists; served only to prove their rows still ask for no caption. */
+export const unshareableAccounts: ShareableIntegration[] = [
+  shareable('int-chrome', 'chrome', '', { label: 'Default profile' }),
+  shareable('int-chrome-passwords', 'chrome_passwords', 'chrome:Default', { label: 'Chrome' }),
+  shareable('int-apple-passwords', 'apple_passwords', '', { label: 'Apple Passwords' }),
+  shareable('int-atlas-passwords', 'atlas_passwords', '', { label: 'ChatGPT Atlas' }),
+  shareable('int-iphone', 'iphone', '', { label: 'iPhone' }),
+  shareable('int-index01', 'index01', '', { label: 'Pebble Index 01' }),
+];
+export function mockTeams(
+  initial: Team[] = [makeTeam()],
+  invitations: Team[] = [],
+  listed: ShareableIntegration[] = accounts,
+) {
   const state: TeamsResponse & { contacts: TeamContact[] } = {
     teams: initial,
     invitations,
@@ -70,7 +104,7 @@ export function mockTeams(initial: Team[] = [makeTeam()], invitations: Team[] = 
     http.get(TEAM_API, () => HttpResponse.json(state)),
     http.get(`${TEAM_API}/contacts`, () => HttpResponse.json({ contacts: state.contacts })),
     http.get(`${TEAM_API}/shareable-integrations`, () =>
-      HttpResponse.json({ integrations: accounts }),
+      HttpResponse.json({ integrations: listed }),
     ),
     http.post(TEAM_API, async ({ request }) => {
       const body = (await request.json()) as { name: string };
@@ -136,7 +170,7 @@ export function mockTeams(initial: Team[] = [makeTeam()], invitations: Team[] = 
     }),
     http.all(`${TEAM_API}/:teamId/integrations/:accountId`, async ({ request, params }) => {
       const team = state.teams.find((item) => item.id === params.teamId)!;
-      const account = accounts.find((item) => item.id === params.accountId)!;
+      const account = listed.find((item) => item.id === params.accountId)!;
       writes.push({
         method: request.method,
         path: `/${team.id}/integrations/${account.id}`,
@@ -152,6 +186,7 @@ export function mockTeams(initial: Team[] = [makeTeam()], invitations: Team[] = 
           provider: account.provider,
           accountId: account.accountId,
           accountEmail: account.accountEmail,
+          label: account.label,
         });
       else
         team.integrationShares = team.integrationShares.filter(

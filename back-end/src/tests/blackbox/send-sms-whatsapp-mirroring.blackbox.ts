@@ -156,7 +156,7 @@ async function testKickoffUsesNotificationAndLink(): Promise<void> {
     });
     try {
       for (const override of [undefined, "I'll check pickup availability first."]) {
-        const expected = `${override ?? notification}\nhttps://roselabs.ai/?agent-id=${agent.id}`;
+        const expected = `${override ?? notification}\nhttps://roselabs.ai/a/${agent.id}`;
         const response = await request(`${BASE_URL}/api/send-sms/notify`, {
           method: 'POST',
           headers: { 'X-API-Key': API_KEY, 'X-Capture-Token': captureToken },

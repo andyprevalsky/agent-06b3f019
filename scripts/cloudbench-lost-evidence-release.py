@@ -102,7 +102,8 @@ def owned_resources(registry: Path, audit: Path) -> tuple[set[str], set[str]]:
     for record in registry.glob("disposable-delete-machine-*.json"):
         machines.add(record.name[len("disposable-delete-machine-"):-len(".json")])
     for record in registry.glob("disposable-delete-volume-*.json"):
-        volumes.add(record.name[len("disposable-delete-volume-"):-len(".json")])
+        # `<vol>.detach-observed.json` is a companion record of the same volume, not another id.
+        volumes.add(record.name[len("disposable-delete-volume-"):-len(".json")].removesuffix(".detach-observed"))
     machines.discard("")
     volumes.discard("")
     need(all(MACHINE_ID.match(m) for m in machines), "malformed owned Machine id")

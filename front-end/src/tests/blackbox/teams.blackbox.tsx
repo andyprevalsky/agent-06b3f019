@@ -152,8 +152,8 @@ describe('Teams', () => {
     const api = mockTeams();
     const user = userEvent.setup();
     renderWithProviders(<Teams />);
-    const work = await screen.findByRole('checkbox', { name: 'Share gmail · work@example.test' });
-    const personal = screen.getByRole('checkbox', { name: 'Share gmail · private@example.test' });
+    const work = await screen.findByRole('checkbox', { name: 'Share Gmail · work@example.test' });
+    const personal = screen.getByRole('checkbox', { name: 'Share Gmail · private@example.test' });
     expect(work).not.toBeChecked();
     expect(personal).not.toBeChecked();
     await user.click(work);
@@ -173,6 +173,14 @@ describe('Teams', () => {
       'DELETE /team-rose/integrations/mail-work',
     ]);
     expect(screen.queryByRole('checkbox', { name: /iPhone/i })).toBeNull();
+    expect(
+      screen.getByText(/Every connected integration can be shared except iPhone, browser cookies/),
+    ).toHaveTextContent('passwords, and Pebble Index 01. Credentials stay private.');
+    for (const name of ['iMessage', 'Plaid · Second Bank', 'CLI · YC CLI', 'WhatsApp'])
+      expect(screen.getByRole('checkbox', { name: `Share ${name}` })).not.toBeChecked();
+    expect(
+      screen.getByRole('checkbox', { name: 'Share Claude Subscription · claude@example.test' }),
+    ).toBeVisible();
   });
   it('shares and revokes projects independently', async () => {
     const api = mockTeams();
@@ -238,7 +246,7 @@ describe('Teams', () => {
     );
     const user = userEvent.setup();
     renderWithProviders(<Teams />);
-    const work = await screen.findByRole('checkbox', { name: 'Share gmail · work@example.test' });
+    const work = await screen.findByRole('checkbox', { name: 'Share Gmail · work@example.test' });
     await user.click(work);
     expect(await screen.findByRole('alert')).toHaveTextContent('Account disconnected');
     expect(work).not.toBeChecked();
@@ -411,7 +419,7 @@ describe('Teams', () => {
     ]);
     renderWithProviders(<Teams />);
     expect(
-      await screen.findByText('Teammate shares gmail · colleague@example.test'),
+      await screen.findByText('Teammate shares Gmail · colleague@example.test'),
     ).toBeInTheDocument();
     expect(screen.getByText('Team research')).toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: /colleague/ })).toBeNull();

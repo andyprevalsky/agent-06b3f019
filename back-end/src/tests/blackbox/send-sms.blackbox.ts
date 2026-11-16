@@ -123,6 +123,10 @@ import {
   testBoundary_notifyCostLimitIncludesTaskGoal,
 } from './send-sms.behavior-3';
 import {
+  testBoundary_startTextIsComposedWithTrailingShareLink,
+  testBoundary_finishTextIsComposedFromBoundedResults,
+} from './send-sms.behavior-7';
+import {
   testBoundary_notifyWriteLockNaturalLanguageOnly,
   testBoundary_notifyWriteLockSendsInitialOnly,
   testBoundary_notifyWriteLockStripsMarkdownAndKeepsFullDraft,
@@ -344,6 +348,14 @@ async function runAll() {
         {
           name: 'notify agent_started keeps long goal inside agent',
           fn: testBoundary_notifyAgentStartedKeepsLongGoalInsideAgent,
+        },
+        {
+          name: 'notify agent_started sends one composed sentence with the share link last',
+          fn: testBoundary_startTextIsComposedWithTrailingShareLink,
+        },
+        {
+          name: 'notify completion composes a short outcome from bounded results',
+          fn: testBoundary_finishTextIsComposedFromBoundedResults,
         },
         {
           name: 'notify feeds provider rejection to model and sends correction',

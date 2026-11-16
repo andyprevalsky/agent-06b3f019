@@ -6,6 +6,7 @@ import {
   publishCliIntegration,
   runCliIntegration,
 } from '../../providers/cliIntegrations';
+import { listSharedCliIntegrations } from '../../providers/cliTeamShares';
 import {
   acquireCliCredentials,
   heartbeatCliCredentials,
@@ -78,7 +79,12 @@ export function mountCliToolRoutes<T extends HybridAuthRequest>(
       if (caller === null) return;
       try {
         const context = await resolveContext(caller);
-        res.json(await listCliIntegrations(context.agent.userId));
+        // Own CLIs, then CLIs teammates share with this user's teams (marked `shared`).
+        const [own, shared] = await Promise.all([
+          listCliIntegrations(context.agent.userId),
+          listSharedCliIntegrations(context.agent.userId),
+        ]);
+        res.json({ integrations: [...own.integrations, ...shared] });
       } catch (err) {
         sendError(res, err);
       }

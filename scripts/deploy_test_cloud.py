@@ -387,12 +387,24 @@ def launch(request, root, base, campaign_id, checks, env, guidance=''):
 
 def execute(request, root):
     """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
+    from deploy_test_quarantine import catalog_deploy_quarantines, USER_DEPLOY_CASE, USER_DEPLOY_REASON
     checks, skipped = request['checks'], request.get('skips', {})
     if (not checks or len(set(checks)) != len(checks) or set(checks) & set(skipped)
             or any(not isinstance(n, str) or not NAME.fullmatch(n) or n.startswith('-')
                    or n in {'.','..'} for n in checks)):
         raise ValueError('invalid cloud case inventory')
     directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    excluded = catalog_deploy_quarantines(root, checks)
+    if USER_DEPLOY_CASE in checks:
+        # The verified user instruction cannot disappear with a missing/malformed catalog marker.
+        if excluded.get(USER_DEPLOY_CASE) != USER_DEPLOY_REASON:
+            if directory.exists() or directory.is_symlink():
+                raise ValueError('deploy quarantine refused with an existing request namespace')
+            raise SourceRefusal('named user deploy quarantine marker missing or changed')
+    if excluded:
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('deploy quarantine refused with an existing request namespace')
+        raise SourceRefusal('deploy-quarantined checks cannot be dispatched: ' + ', '.join(sorted(excluded)))
     if source(root) != request['source']:
         if directory.exists() or directory.is_symlink():
             raise ValueError('cloud source differs with an existing request namespace')

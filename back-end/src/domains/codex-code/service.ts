@@ -5,7 +5,10 @@ import {
   getClaudeCodeSession,
 } from '../../providers/e2b';
 import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
-import { resolveCodeSessionWorkspace } from '../../providers/githubRepos/resolve';
+import {
+  repoAccessUserFor,
+  resolveCodeSessionWorkspace,
+} from '../../providers/githubRepos/resolve';
 import { GithubRateLimitedError } from '../../providers/githubRateLimit';
 import { createLogger } from '../../providers/logger';
 import { codexSpeedFor } from '../../providers/codexSpeed';
@@ -126,7 +129,8 @@ export async function createSession(params: CreateSessionParams) {
   let effectiveUserId = user_id;
 
   // A project session restores the project's checkout; never also clone a repo.
-  const { projectWorkspace, repoOverrideUrl } = await sessionWorkspace(params, effectiveUserId);
+  const workspace = await sessionWorkspace(params, effectiveUserId);
+  const { projectWorkspace, repoOverrideUrl } = workspace;
   effectiveGithubRepoUrl = repoOverrideUrl ?? effectiveGithubRepoUrl;
   if (projectWorkspace !== null) effectiveGithubRepoUrl = undefined;
 
@@ -144,11 +148,13 @@ export async function createSession(params: CreateSessionParams) {
 
   let normalizedRepoUrl: string | undefined;
   if (effectiveGithubRepoUrl !== undefined && effectiveGithubRepoUrl !== '') {
-    const accessCheck = await checkGithubRepoAccess(effectiveUserId, effectiveGithubRepoUrl);
+    // A teammate's shared repo clones under its owner's grant; the session stays the caller's.
+    const accessUserId = repoAccessUserFor(workspace, effectiveGithubRepoUrl, effectiveUserId);
+    const accessCheck = await checkGithubRepoAccess(accessUserId, effectiveGithubRepoUrl);
     if (accessCheck.rateLimit !== undefined)
       throw new GithubRateLimitedError(accessCheck.rateLimit);
     if (!accessCheck.allowed) {
-      log.info(`GitHub access denied for user ${effectiveUserId}: ${accessCheck.error ?? ''}`);
+      log.info(`GitHub access denied for user ${accessUserId}: ${accessCheck.error ?? ''}`);
       throw new GitHubAccessDeniedError(accessCheck.error!);
     }
     normalizedRepoUrl = accessCheck.normalizedUrl!;

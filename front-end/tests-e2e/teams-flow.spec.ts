@@ -80,6 +80,7 @@ for (const width of widths) {
         provider: 'gmail',
         accountId: 'owner@roselabs.ai',
         accountEmail: 'owner@roselabs.ai',
+        label: 'owner@roselabs.ai',
         name: 'gmail',
         status: 'CONNECTED',
         teamIds: [],
@@ -90,6 +91,7 @@ for (const width of widths) {
         provider: 'gmail',
         accountId: 'private@example.test',
         accountEmail: 'private@example.test',
+        label: 'private@example.test',
         name: 'gmail',
         status: 'CONNECTED',
         teamIds: [],
@@ -100,6 +102,7 @@ for (const width of widths) {
         provider: 'imessage',
         accountId: '',
         accountEmail: null,
+        label: null,
         name: 'iMessage',
         status: 'CONNECTED',
         teamIds: [],
@@ -293,11 +296,11 @@ for (const width of widths) {
     await expect(page.getByText(/Invitation saved for tamara/)).toBeVisible();
     await expect(page.getByText(/Invited · awaiting acceptance/)).toBeVisible();
     const work = page.getByRole('checkbox', {
-      name: 'Share gmail · owner@roselabs.ai',
+      name: 'Share Gmail · owner@roselabs.ai',
       exact: true,
     });
     const personal = page.getByRole('checkbox', {
-      name: 'Share gmail · private@example.test',
+      name: 'Share Gmail · private@example.test',
       exact: true,
     });
     await work.click();

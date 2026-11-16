@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Actual canonical campaign producer -> child reserve/release -> next cohort."""
 
+import http.server
 import json
 import hashlib
 import os
@@ -12,6 +13,7 @@ import time
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +33,31 @@ def write_exclusive(path, value):
 
 
 class CampaignTickets(unittest.TestCase):
+    def app_metadata_endpoint(self):
+        """Loopback Machines API: the relay reads native App identity directly (R62), never `flyctl status`."""
+        requests = []
+        raw = json.dumps(dict(name="navi-whisper-lux-bench", organization=dict(slug="fixture"), network="")).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append(self.path)
+                self.send_response(200 if self.path == "/v1/apps/navi-whisper-lux-bench" else 404)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *unused):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.metadata_requests = requests
+        return "http://127.0.0.1:" + str(server.server_port)
+
     def campaign_fixture(self, mode="pass", old=False, old_mutation=False, old_relay=False, prepare_error=None, after_first=False):
         with tempfile.TemporaryDirectory(
             prefix="cleanup-ticket-campaign-"
@@ -432,7 +459,8 @@ print('bounded 99999999 0',free//1024,'0% /bounded')
                 env.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
                 env.update(CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="1", CLOUDBENCH_CAMPAIGN_SHARED_RELAY="0", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="1")
                 if mode.startswith("relay"):
-                    env.update(CLOUDBENCH_CAMPAIGN_SHARED_RELAY="1", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="0", FLY_API_TOKEN="offline-fixture", PATH=str(root / "bin") + os.pathsep + env["PATH"])
+                    env.update(CLOUDBENCH_CAMPAIGN_SHARED_RELAY="1", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="0", FLY_API_TOKEN="offline-fixture", PATH=str(root / "bin") + os.pathsep + env["PATH"],
+                               FLY_FLAPS_BASE_URL=self.app_metadata_endpoint())
                     # The relay claims its HOME's single WireGuard peer; never the operator's.
                     (root / "home").mkdir(mode=0o700, exist_ok=True)
                     env["HOME"] = str(root / "home")
@@ -455,6 +483,8 @@ print('bounded 99999999 0',free//1024,'0% /bounded')
                     row["limit"] *= 100
                 (root / "provider-limits.json").write_text(json.dumps(limits))
                 env["CLOUDBENCH_PROVIDER_LIMITS_FILE"] = str(root / "provider-limits.json")
+                # It also exceeds the app delegating-guest ceiling; use the fleet's own override.
+                env["CLOUDBENCH_DELEGATING_PRIMARY_CEILING"] = "600"
             if mode == "fresh":
                 stamp = root / ".context/fleet-infra-canary.last-pass"
                 stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -603,6 +633,7 @@ print('bounded 99999999 0',free//1024,'0% /bounded')
                         self.assertIn("CANARY_JOINED", events)
                     return
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr + details)
+                self.assertEqual(self.metadata_requests, ["/v1/apps/navi-whisper-lux-bench"])
                 self.assertNotIn("DEFAULT_AGENT_ROUTE", events)
                 self.assertEqual(events.count("SHARED_ROUTE:1"), 1)
                 self.assertEqual(events.count("SHARED_ROUTE:0"), 6)

@@ -524,6 +524,17 @@ def test_vendored_python_wheels_install_offline_from_every_image_context(tmp_pat
         req.specifier.contains(openai_pin.split("==", 1)[1], prereleases=True) for req in browser_use_openai
     ), (openai_pin, [str(req) for req in browser_use_openai])
 
+    # Playwright 1.65.0 rewrote its private client (no playwright._impl._connection), so a
+    # fresh image resolving the open range broke every browser agent at spawn (prod since
+    # 2026-11-10). Keep the exact SDK whose private API browser_tools/playwright_owner.py uses.
+    import importlib
+
+    playwright = [line.split("#")[0].replace(" ", "") for line in lines if line.startswith("playwright")]
+    assert playwright == ["playwright==1.63.0"], (playwright, "playwright pin")
+    owner = (ROOT / "agents/browser_tools/playwright_owner.py").read_text()
+    for module in sorted(set(re.findall(r"^from (playwright\._impl\.\w+) import", owner, re.M))):
+        importlib.import_module(module)
+
     vendor = ROOT / "agents/vendor"
     sources = (vendor / "SOURCES.txt").read_text()
     wheels = sorted(path.name for path in vendor.glob("*.whl"))

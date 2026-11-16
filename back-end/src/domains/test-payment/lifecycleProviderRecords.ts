@@ -1,6 +1,6 @@
 import { TestPaymentError } from './errors';
 import type { TestPaymentLifecycle } from './types';
-import type { LifecycleAttention } from './lifecycleDependencies';
+import type { LifecycleAttention, StripeHold } from './lifecycleDependencies';
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null
@@ -154,6 +154,32 @@ function createdDuringPurchase(value: unknown, purchaseCreatedAt: Date): boolean
   if (typeof value !== 'string') return false;
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) && timestamp >= purchaseCreatedAt.getTime() - 5_000;
+}
+
+export function mapStripeHold(hold: StripeHold | null): TestPaymentLifecycle['stripeHold'] {
+  if (hold === null) return null;
+  return {
+    id: hold.id,
+    livemode: hold.livemode,
+    status: hold.status,
+    amountCents: hold.amount,
+    amountCapturableCents: hold.amount_capturable,
+    amountReceivedCents: hold.amount_received,
+  };
+}
+
+/**
+ * Stripe Search is eventually consistent: a hold placed seconds earlier can be missing from
+ * `metadata['agentId']` results. The purchase's own payment intent is read directly (strongly
+ * consistent), so union it in; search still proves no additional intents exist.
+ */
+export function withKnownStripeIntent(
+  stripeResults: { data: Array<{ id: string }> },
+  knownIntent: { id: string } | null
+): { data: Array<{ id: string }> } {
+  return knownIntent === null
+    ? stripeResults
+    : { data: [...stripeResults.data, { id: knownIntent.id }] };
 }
 
 export function providerIntegrity(

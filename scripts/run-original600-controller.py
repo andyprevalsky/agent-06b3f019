@@ -2680,8 +2680,8 @@ def main():
             or args.resume_incomplete_admission or args.prepare_admission_request or args.prelaunch_failure):
         raise ValueError('archived reuse and continuations run the original 200-task manifest at its original timeouts only')
     # Every mode (--check, --run and continuations) admits all copies at once:
-    # refuse a width above the provider rate-limit cap before any credential,
-    # Fly CLI or provider read.
+    # refuse a width above the provider rate-limit cap or the app delegating-guest
+    # ceiling before any credential, Fly CLI or provider read.
     copies = simultaneous_copies(args, runner)
     if args.scheduled_total is not None or args.prior_infra:
         if args.archive_run or recovery or args.resume_bound_launch or args.resume_admission or manifest['original']:
@@ -2694,15 +2694,30 @@ def main():
     # falling through to CLOUDBENCH_BROWSER_PROVIDER or the repo back-end/.env.
     browser_provider = (capacity['dotenv_value'](Path(args.backend_env), 'BROWSER_PROVIDER')
                         or 'unset-in-backend-env')
+    # A measured per-group demand profile applies only when every manifest task is in
+    # its catalog group (as for fleets and campaigns); the original manifest keeps global peaks.
+    selection = None if manifest['original'] else json.loads(runner['read'](args.tasks))
     try:
-        refused = capacity['check'](copies, browser_provider=browser_provider)
+        refused = capacity['check'](copies, browser_provider=browser_provider, tasks=selection)
         registry = capacity['for_browser_provider'](
-            capacity['load_registry'](), capacity['resolve_browser_provider'](browser_provider))
+            capacity['for_selection'](capacity['load_registry'](), selection),
+            capacity['resolve_browser_provider'](browser_provider))
     except capacity['RegistryError'] as error:
         raise ValueError(str(error)) from None
     if refused:
         print(json.dumps(dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=args.source_ref, copies=copies,
                               max_concurrent_benches=registry['cap'], provider_calls=0)))
+        return refused
+    # Fleet admission also caps live REAL/SIM primaries app-wide (delegating ceiling);
+    # all copies start at once, so a manifest wider than it can never be admitted.
+    try:
+        refused = capacity['delegating_check'](copies, tasks=selection)
+        ceiling = capacity['delegating_ceiling']()
+    except capacity['RegistryError'] as error:
+        raise ValueError(str(error)) from None
+    if refused:
+        print(json.dumps(dict(status='REFUSED_DELEGATING_CEILING', source_ref=args.source_ref, copies=copies,
+                              delegating_ceiling=ceiling, provider_calls=0)))
         return refused
     if not discover:
         facts_from(runner['read'](args.facts))
