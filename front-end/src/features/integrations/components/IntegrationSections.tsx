@@ -4,9 +4,10 @@
  * [MOUNTED] --> renders each section card delegating to domain hooks.
  *
  * Meeting note taker: shared Granola/Fireflies provider cards and hooks.
- * Signed in, after File System, sharing integrationCardStyles: GitHub Repos
- * (useGithubRepos), CLIs (verified via a setup agent), MCP servers (URL + optional
- * API key header or OAuth via /integrations/mcp/callback; reconnect, remove).
+ * Signed in, after File System: GitHub Repositories (ProjectsSection: projects =
+ * repos, import from your computer, connect a GitHub repo); then, sharing
+ * integrationCardStyles, CLIs (verified via a setup agent) and MCP servers (URL +
+ * optional API key header or OAuth via /integrations/mcp/callback; reconnect, remove).
  * Pebble Index 01 (last) opens the guided setup modal owned by Integrations.
  *
  * File System is a FE-only stub: website shows Download for Mac; Mac app
@@ -24,8 +25,7 @@ import type { useIntegrationActions } from '../hooks/useIntegrationActions';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 import MeetingNotesSection from './MeetingNotesSection';
 import SearchGroup from './IntegrationSearchGroup';
-import GithubReposSection from './GithubReposSection';
-import type { useGithubRepos } from '../hooks/useGithubRepos';
+import ProjectsSection, { type ProjectsSectionProps } from './ProjectsSection';
 import type { MeetingNotesConnections } from '../types';
 
 import BrowserCookiesSection from './BrowserCookiesSection';
@@ -59,7 +59,7 @@ interface IntegrationSectionsProps {
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
   meetingNotes: MeetingNotesConnections;
-  github: ReturnType<typeof useGithubRepos>;
+  projectSettings?: ProjectsSectionProps['projectSettings'];
 }
 
 function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plaid'>) {
@@ -293,7 +293,7 @@ function SecondaryIntegrationSections({
   messages,
   actions,
   meetingNotes,
-  github,
+  projectSettings,
 }: IntegrationSectionsProps) {
   return (
     <>
@@ -311,8 +311,8 @@ function SecondaryIntegrationSections({
       </SearchGroup>
 
       {isFullySignedIn && (
-        <SearchGroup catalogKey="githubRepos" search={search}>
-          <GithubReposSection github={github} />
+        <SearchGroup catalogKey="projects" search={search}>
+          <ProjectsSection projectSettings={projectSettings} />
         </SearchGroup>
       )}
       {isFullySignedIn && <ToolIntegrationSections search={search} />}

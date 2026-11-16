@@ -140,7 +140,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Already-set environment variables beat `.env`; when config is wrong despite a correct `.env`, look for an injected variable first.
 - Outside `run.sh`, export the same unique `TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for backend and worker.
 - On a Linux devbox without `.cloud-env`, run `bash scripts/cloud-init.sh`; `agents/venv` uses Python 3.11, and keep `TMPDIR` outside the checkout.
-- `mac-app/` is macOS only: never install, run, test or commit it on Linux.
+- `mac-app/` changes may be made and committed from Linux; skip only the mac-app tests that cannot run there (Electron build, real-Mac runs) and record them as skipped, unverified, never PASS.
 - If a test fails on an invalid GPT or Claude auth token, retry with the local token or refetch it from the prod database before escalating.
 - GitHub writes acting as Andy use `GITHUB_TOKEN`; a rate-limited read-only call uses `python3 scripts/github_token_pool.py pick`, never for writes.
 - A 404 from any pool member other than `GITHUB_TOKEN` (machine accounts, the `rose-labs-agents` App, `GITHUB_DISPATCH_TOKEN`) is not authoritative; retry with `GITHUB_TOKEN`.

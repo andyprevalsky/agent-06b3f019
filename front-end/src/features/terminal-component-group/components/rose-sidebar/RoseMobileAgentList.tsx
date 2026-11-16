@@ -1,16 +1,15 @@
 /**
- * Mobile shares the desktop project's rows, inline creation, menus and settings.
+ * Mobile shares the desktop folder rows, inline creation and menus (folders have
+ * no settings: repositories live in Integrations › GitHub Repositories).
  *
  * STATE MACHINE: RoseMobileAgentList
- *   [DELETE CONFIRM] (deleteTarget) | [PROJECT SETTINGS] (openProject) | [LIST]
- *   [PROJECT SETTINGS] --"Connect / Switch repo in Integrations"--> menu closes
- *     (onClose), revealing the Integrations panel it opened
+ *   [DELETE CONFIRM] (deleteTarget) | [LIST]
  *   [LIST] shows a spinner only while there is nothing to show yet: the first
  *   agent load (the drawer passes isLoading only until that load settles) or a
  *   search with no rows. Background polls must keep the groups mounted so an
  *   inline project input, rename or open project menu survives them.
  */
-import { ArrowLeft, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { Agent } from '../../hooks';
 import type { AgentRowHandlers } from '../SidebarAgentList';
@@ -23,7 +22,6 @@ import { useRoseSidebarProjects } from './useRoseSidebarProjects';
 import { groupAgentsByProject } from './groupAgentsByProject';
 import { DeleteProjectDialog } from './DeleteProjectDialog';
 import RoseAgentGroups from './RoseAgentGroups';
-import RoseProjectSettingsPanel from './RoseProjectSettingsPanel';
 
 const NO_ATTENTION: ReadonlySet<string> = new Set();
 interface MobileAgentListProps {
@@ -69,7 +67,6 @@ function useMobileRows(props: MobileAgentListProps) {
       attentionAgentIds: attention,
       onSelectAgent: props.onSelectAgent,
       actionsFor,
-      settingsProjectId: projects.openProject?.id ?? null,
       renamingProjectId: projects.renamingProjectId,
       projectActions: projects.projectActions,
       onMenuOpenChange: () => {},
@@ -99,25 +96,6 @@ export function RoseMobileAgentList(props: MobileAgentListProps) {
             onCancel={projects.cancelDelete}
             onConfirm={projects.confirmDelete}
           />
-        ) : projects.openProject ? (
-          <div className="px-5 pb-5">
-            <button
-              type="button"
-              onClick={projects.closeProjectSettings}
-              className="mb-4 flex items-center gap-2 text-sm font-semibold"
-            >
-              <ArrowLeft size={16} />
-              Back to agents
-            </button>
-            <RoseProjectSettingsPanel
-              key={projects.openProject.id}
-              project={projects.openProject}
-              barExpanded={false}
-              onClose={projects.closeProjectSettings}
-              embedded
-              onOpenedIntegrations={props.onClose}
-            />
-          </div>
         ) : (
           <>
             {props.searchError && (

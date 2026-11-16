@@ -463,8 +463,8 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
 
 STOCK_SPAWN_CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
-    "Anthropic's Claude Code. After completion it syncs results to the current project's GitHub repo, or "
-    "outside a project to a repo created for this agent tree. The task should be tightly scoped and "
+    "Anthropic's Claude Code. After completion it syncs results to its project's repo (github_repo_ref), or "
+    "without one to a repo created for this agent tree. The task should be tightly scoped and "
     "self-sufficient. Send video generation or editing to a code agent; tell it to make real footage with "
     "`rose video` and edit with ffmpeg."
 )
@@ -605,17 +605,30 @@ def test_code_agent_repo_text_names_the_project_repo():
     """The static spawn text no longer says every code agent gets a fresh agent-tree repo.
 
     Backend project restore owns the checkout (claude-code/service.ts) and ignores
-    github_repo_link; the auto-created tree repo applies only outside a project.
+    github_repo_link; the auto-created tree repo applies only without a project. Agents
+    are no longer inside a project by default: the root picks one from its
+    `# Available projects` environment section and passes its id as github_repo_ref.
     """
     from tools.prompts.spawn_agent import CODE_LINE
-    from utils.tool_schemas import SpawnAgentRoseDesktopTool, SpawnAgentTool
+    from utils.tool_schemas import SpawnAgentRoseDesktopTool, SpawnAgentTool, SpawnAgentToolNoGP
 
     for model in (SpawnAgentTool, SpawnAgentRoseDesktopTool):
         description = model.model_fields["github_repo_link"].description
         assert "defaults to a repo automatically created for this agent tree" not in description
-        assert "current project's repo when the agent is in a project" in description, description
+        assert "current project's repo" not in description, description
+        assert "Prefer github_repo_ref with a ref from # Available projects" in description, description
+        assert "else the project you inherited, otherwise a repo created for this agent tree" in description
+    for model in (SpawnAgentTool, SpawnAgentRoseDesktopTool, SpawnAgentToolNoGP):
+        ref = model.model_fields["github_repo_ref"].description
+        assert "Normally the project id or 'gh:owner/repo' ref shown in # Available projects;" in ref, ref
+        assert "the project's repo" not in ref and "your repo," not in ref, ref
+        assert "repo checkout, env files and startup script" in ref, ref
     assert "initialized to this agent network" not in CODE_LINE
-    assert "the current project's GitHub repo, or outside a project to a repo" in CODE_LINE, CODE_LINE
+    assert "current project" not in CODE_LINE and "outside a project" not in CODE_LINE, CODE_LINE
+    assert (
+        "syncs results to its project's repo (github_repo_ref), or without one to a repo created for this "
+        "agent tree." in CODE_LINE
+    ), CODE_LINE
 
 
 async def test_set_plan_passes_the_workflow_project_context_to_the_planner():

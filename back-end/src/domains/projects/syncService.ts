@@ -15,6 +15,7 @@
  * 10k-agent behaviour: one push touches one project's rows (≤ MAX_ENV_FILES
  * file rows + one snapshot row); revision claims are per-project.
  */
+import { githubHttpsUrlOfSshRemote } from '../../providers/githubRepos/refs';
 import {
   dotenvVariableNames,
   isDotenvPath,
@@ -256,6 +257,19 @@ async function planPush(project: repo.ProjectRecord, body: SyncPushBody) {
   return { planned, bundle, patch, pruned, manifest };
 }
 
+/**
+ * The project.repoUrl a push records: the pushed remote when the project has
+ * none, and an SSH GitHub spelling (pushed or stored) as its https repo, so the
+ * project is that GitHub repo. Any other remote is kept verbatim.
+ */
+function recordedRepoUrl(current: string | null, remote: string | null): { repoUrl?: string } {
+  if (current !== null) {
+    const https = githubHttpsUrlOfSshRemote(current);
+    return https === null ? {} : { repoUrl: https };
+  }
+  return remote === null ? {} : { repoUrl: githubHttpsUrlOfSshRemote(remote) ?? remote };
+}
+
 export async function applySyncPush(userId: string, projectId: string, body: SyncPushBody) {
   const project = await requireProject(userId, projectId);
   if (body.keyId !== secretsOrThrow(projectSyncKeyId)) {
@@ -278,7 +292,7 @@ export async function applySyncPush(userId: string, projectId: string, body: Syn
     project.id,
     body.baseRevision,
     project.repoUrl,
-    project.repoUrl === null && remote !== null ? { repoUrl: remote } : {},
+    recordedRepoUrl(project.repoUrl, remote),
     planned.map((item) => item.write),
     pruned,
     {

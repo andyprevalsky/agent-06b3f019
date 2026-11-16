@@ -19,11 +19,17 @@
  *
  * The identity is the account whose token pushes: the commits are that
  * account's work as far as GitHub, Vercel and branch protection can tell.
+ * When the session's user has their own GitHub credential that can push the
+ * repo (githubUserCredentials.ts), that token clones, pushes and runs `gh`
+ * (GH_TOKEN) and the commits are theirs; otherwise the platform GITHUB_TOKEN.
+ * Only the session's own user's credential is ever considered.
  * 10k agents: one GitHub call per token per backend process, then a cached
  * promise; no per-agent request.
  */
 import { createHash } from 'node:crypto';
 
+import { parseGithubUrl } from './github';
+import { userGithubSessionToken } from './githubUserCredentials';
 import { createLogger } from './logger';
 
 const log = createLogger('CodeAgentGitIdentity');
@@ -216,31 +222,52 @@ export function isGithubRepoUrl(repoUrl: string | null | undefined): boolean {
   }
 }
 
+/** `userId`'s own token when it can push the session's GitHub repo; else null. */
+async function userSessionToken(
+  userId: string | undefined,
+  repoUrl: string | null | undefined,
+  fetchImpl: typeof fetch
+): Promise<{ token: string; login: string | null } | null> {
+  if (!isGithubRepoUrl(repoUrl)) return null;
+  const parsed = parseGithubUrl((repoUrl ?? '').replace(/^git@github\.com:/i, 'github.com/'));
+  return parsed === null
+    ? null
+    : userGithubSessionToken(userId, parsed.owner, parsed.repo, fetchImpl);
+}
+
 /**
  * Every GitHub env a cloud code sandbox gets: the clone/push credential for a
- * `github_repo_url` session, and the pushing account's commit identity for any
- * session with a repository (a project's repo is cloned with the same token).
+ * `github_repo_url` session, `GH_TOKEN` when the session's user's own
+ * credential is used (both modes; a project's clone URL carries the same token),
+ * and the pushing account's commit identity for any session with a repository.
  */
 export async function codeSandboxGithubEnvs(
   githubRepoUrl: string | null | undefined,
   projectRepoUrl: string | null | undefined,
   label: '' | 'Codex',
+  userId?: string,
   fetchImpl: typeof fetch = fetch
 ): Promise<Record<string, string>> {
   const envs: Record<string, string> = {};
+  const repoUrl = githubRepoUrl || projectRepoUrl;
+  const own = await userSessionToken(userId, repoUrl, fetchImpl);
+  const token = own?.token ?? process.env.GITHUB_TOKEN;
   if (githubRepoUrl) {
-    if (!process.env.GITHUB_TOKEN) {
+    if (!token) {
       throw new Error('GITHUB_TOKEN not configured - cannot clone repositories');
     }
     envs.GITHUB_REPO_URL = githubRepoUrl;
-    envs.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+    envs.GITHUB_TOKEN = token;
     log.info(`GitHub repo configured${label ? ` for ${label}` : ''}: ${githubRepoUrl}`);
   }
-  const identity = await codeSandboxGitIdentityEnvs(
-    githubRepoUrl || projectRepoUrl,
-    process.env.GITHUB_TOKEN,
-    fetchImpl
-  );
+  if (own !== null) {
+    envs.GH_TOKEN = own.token;
+    log.info(`Code sandbox uses the user's own GitHub credential${label ? ` for ${label}` : ''}`, {
+      userId,
+      login: own.login,
+    });
+  }
+  const identity = await codeSandboxGitIdentityEnvs(repoUrl, token, fetchImpl);
   return { ...envs, ...identity };
 }
 

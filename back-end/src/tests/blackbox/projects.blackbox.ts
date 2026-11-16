@@ -23,6 +23,16 @@
  *     in once, idempotent, never overwriting later edits; other accounts are
  *     untouched. Runs on a synthetic owner; never on a real account's rows
  *   - the harness refuses a non-local DATABASE_URL before any query
+ *   - projects are repos (projects-repos.cases.ts): connecting a repo creates or
+ *     links its project, a list links legacy connections once, deleting a
+ *     project disconnects its repo, and github_repo_ref=<project id> places the
+ *     agent in (and restores) exactly that project
+ *   - folders vs repositories (projects-folder-roles.cases.ts): creation sets
+ *     isFolder / isRepository, GET /api/folders lists folders only, and each
+ *     delete route removes one role of a row that is both
+ *   - shared repositories (projects-shared.cases.ts): a teammate's list carries
+ *     repositories shared through a team (read-only, no owner secrets, valid
+ *     only while both memberships are accepted); every write route stays 404
  *
  * Usage: bash scripts/run-blackbox-tests.sh projects
  */
@@ -36,6 +46,9 @@ import {
   type Session,
 } from './projects-harness';
 import './projects-folders.cases';
+import './projects-folder-roles.cases';
+import './projects-repos.cases';
+import './projects-shared.cases';
 import { randomBytes } from 'crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -628,6 +641,7 @@ test('Rose out of the box: an owner without a Rose project gets one; concurrent 
     await Promise.all([owner.list(), owner.list()]);
     const rows = await prisma.project.findMany({ where: { userId: owner.userId, name: 'Rose' } });
     assert(rows.length === 1, `one Rose row, got ${rows.length}`);
+    assert(rows[0].isFolder === false, 'created as a repository, not a left-bar folder');
     const rose = await owner.rose();
     assert(rose.repoUrl === ROSE_REPO && rose.startupScript === ROSE_STARTUP, 'configured');
     assert(rose.githubConnected === true && rose.envFileCount === 6, 'connected, six files');

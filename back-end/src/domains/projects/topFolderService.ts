@@ -1,14 +1,16 @@
 /**
- * Folders: the user-facing name of a Project row, organizational only.
+ * Folders: the user-facing name of a Project row with isFolder, organizational only.
  *
- *   folder (this API)   = Project row (same id: legacy_project_id === id)
+ *   folder (this API)   = Project row with isFolder (same id: legacy_project_id === id)
  *   subfolder           = ProjectFolder (one level, unchanged)
  *   folder's GitHub repo → read-only summary of the "github_repo" integration;
  *                          connecting one happens on the integrations panel
  *
  * Nothing is migrated or copied: /api/projects, Agent.projectId/folderId and
  * every project setting keep working, so this is a pure alias layer. Creating
- * a folder never sets a repository.
+ * a folder never sets a repository. Repositories that are not folders (GitHub
+ * connect, CLI import) are not listed; deleting a folder that is also a
+ * repository keeps the repository (service.deleteFolderProject).
  */
 import * as service from './service';
 
@@ -40,7 +42,7 @@ export function toTopFolderDto(project: service.ProjectDto): TopFolderDto {
 }
 
 export async function listTopFolders(userId: string): Promise<{ folders: TopFolderDto[] }> {
-  const { projects } = await service.listProjects(userId);
+  const { projects } = await service.listFolderProjects(userId);
   return { folders: projects.map(toTopFolderDto) };
 }
 
@@ -50,7 +52,7 @@ export async function getTopFolder(userId: string, id: string): Promise<TopFolde
 
 /** A new folder is a repo-less project: name only. */
 export async function createTopFolder(userId: string, name: string): Promise<TopFolderDto> {
-  return toTopFolderDto(await service.createProject(userId, { name }));
+  return toTopFolderDto(await service.createProject(userId, { name }, { isFolder: true }));
 }
 
 export async function renameTopFolder(
@@ -62,5 +64,5 @@ export async function renameTopFolder(
 }
 
 export async function deleteTopFolder(userId: string, id: string): Promise<void> {
-  await service.deleteProject(userId, id);
+  await service.deleteFolderProject(userId, id);
 }
