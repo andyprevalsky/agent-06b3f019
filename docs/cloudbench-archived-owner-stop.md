@@ -74,6 +74,24 @@ authorize reuse, release claims or certify guest cleanup. The default command
 continues to skip incomplete records. Keep these IDs excluded from subsequent
 reuse unless a separate supported protocol establishes that authority.
 
+### Known gap: retiring stopped archived owners (open)
+
+After an aborted sharded admission (for example a global start-barrier abort
+before release), this command is the only supported action for guests whose
+owners are retained in a deleted controller's export. It stops their compute
+billing. Their Machines and volumes stay allocated and the admission's
+`native-release-audit.json` stays `released: false`. The forensic closure below
+only observes resources that already reached a terminal state under their
+original delete authority. No supported command yet captures each stopped
+original volume and then destroys the Machine and volume for an archived owner.
+The local `--recover-stale-owner`, original-volume capture and archive builder
+need the owner registry in this host's git common directory. Do not destroy
+these Machines or volumes with app-wide tools such as `cloudbench-reclaim-stopped.py`
+or `stop-all`: that discards the retained guest evidence. Record the stopped
+state, then leave the release to a reviewed archived-owner capture-and-retire
+command. Observed on admission `original600-1794798140032347224` (42 guests,
+2026-11-16).
+
 ## Forensic current resource reconciliation after a deleted controller
 
 An immutable exported owner can retain failed runtime evidence after its exact
