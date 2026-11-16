@@ -85,6 +85,18 @@ async function connectEverything(owner: User) {
       type: 'TOOL_SETUP',
       config: { kind: 'cli-template-v1', request: 'vercel', name: 'Vercel CLI', agent_id: 'agent' },
     }),
+    mcp: await integration(owner, 'mcp', {
+      accountId: 'https://mcp.example.test/mcp',
+      type: 'TOOL_SETUP',
+      config: {
+        kind: 'mcp-server-v1',
+        name: 'Docs MCP',
+        slug: 'docs-mcp',
+        url: 'https://mcp.example.test/mcp',
+        auth: 'none',
+        tools: [],
+      },
+    }),
   };
   // Never shareable, even when connected.
   for (const name of ['iphone', 'chrome', 'apple_passwords', 'pebble_index'])
@@ -97,7 +109,7 @@ async function connectEverything(owner: User) {
 
 test('every provider except iPhone, browser cookies, passwords and Pebble lists exact shareable accounts', async () => {
   const owner = await user('Owner');
-  const { chase, amex, stale } = await connectEverything(owner);
+  const { rows, chase, amex, stale } = await connectEverything(owner);
   const listed = (await request(owner, '/shareable-integrations')).integrations as Listed[];
   const byKey = new Map(listed.map((row) => [`${row.provider}:${row.accountId}`, row]));
   assert.deepEqual([...new Set(listed.map((row) => row.provider))].sort(), [
@@ -108,6 +120,7 @@ test('every provider except iPhone, browser cookies, passwords and Pebble lists 
     'gpt_code',
     'granola',
     'linkedin',
+    'mcp',
     'plaid',
     'whatsapp',
   ]);
@@ -126,6 +139,9 @@ test('every provider except iPhone, browser cookies, passwords and Pebble lists 
   assert.equal(byKey.get('github_repo:gh:acme/app')?.label, 'gh:acme/app');
   assert.equal(byKey.get('claude_code:claude-acct')?.label, 'claude@example.test');
   assert.equal(listed.find((row) => row.provider === 'cli')?.label, 'Vercel CLI');
+  // Keyed by the integration id: the server URL (which may carry a credential) is never shared.
+  assert.equal(byKey.get(`mcp:${rows.mcp.id}`)?.label, 'Docs MCP');
+  assert.ok(!JSON.stringify(listed).includes('mcp.example.test'), 'no MCP URL in the listing');
 });
 
 test('shares bind one exact account and are revalidated at read time for every provider', async () => {
@@ -166,6 +182,10 @@ test('shares bind one exact account and are revalidated at read time for every p
     data: { status: 'NOT_CONNECTED' },
   });
   await prisma.integration.update({ where: { id: rows.repo.id }, data: { isActive: false } });
+  await prisma.integration.update({
+    where: { id: rows.mcp.id },
+    data: { status: 'EXPIRED', isActive: false },
+  });
   const remaining = (await service.resolveTeamDataAccess(member.userId))
     .map((grant) => grant.provider)
     .sort();
