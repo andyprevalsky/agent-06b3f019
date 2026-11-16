@@ -42,9 +42,16 @@ jobs:
               effective = subprocess.run(command + ['config', '--get-urlmatch', 'http.extraheader', url], env=env, text=True, capture_output=True)
               headers = [line for line in effective.stdout.splitlines() if line.lower().startswith('authorization:')]
               env.update(GIT_TRACE_CURL='1', GIT_TRACE_CURL_NO_DATA='1', GIT_TRACE_REDACT='1', GIT_TERMINAL_PROMPT='0')
-              read = subprocess.run(command + ['ls-remote', url, 'HEAD'], env=env, text=True, capture_output=True, timeout=45)
-              response_headers = [line.split('<= Recv header:', 1)[1].strip() for line in read.stderr.splitlines() if '<= Recv header:' in line and re.search(r'(HTTP/|x-github-request-id:)', line, re.I)]
-              report['reads'].append({'context': name, 'effective_authorization_count': len(headers), 'effective_authorization_is_current': headers == [auth], 'exit': read.returncode, 'response_headers': response_headers, 'repository_answered': bool(read.stdout.strip())})
+              try:
+                  read = subprocess.run(command + ['ls-remote', url, 'HEAD'], env=env, text=True, capture_output=True, timeout=45)
+                  code, stdout, stderr = read.returncode, read.stdout, read.stderr
+              except subprocess.TimeoutExpired as error:
+                  code, stdout = 124, ''
+                  stderr = error.stderr or ''
+                  if isinstance(stderr, bytes):
+                      stderr = stderr.decode('utf-8', errors='replace')
+              response_headers = [line.split('<= Recv header:', 1)[1].strip() for line in stderr.splitlines() if '<= Recv header:' in line and re.search(r'(HTTP/|x-github-request-id:)', line, re.I)]
+              report['reads'].append({'context': name, 'effective_authorization_count': len(headers), 'effective_authorization_is_current': headers == [auth], 'config_exit': effective.returncode, 'exit': code, 'response_headers': response_headers, 'repository_answered': bool(stdout.strip())})
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'checkout-probe'
           output.mkdir(exist_ok=True)
           (output / 'report.json').write_text(json.dumps(report, indent=2))
