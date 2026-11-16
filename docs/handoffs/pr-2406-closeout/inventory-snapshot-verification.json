@@ -1,0 +1,43 @@
+{
+  "scope": "inventory snapshot only; no final deploy evidence coverage claimed",
+  "full_readback_verified": true,
+  "restored_to": ".context/pr2406-recovery/closeout/inventory-restore",
+  "member_checks": [
+    {
+      "member": "rose/.context/pr2406-recovery/closeout/environment-metadata.json",
+      "size": 1298,
+      "sha256": "bee7e9267f02995ee34cc8a6959906a9cd1023b377e897f741c9253b78c1fb3e",
+      "restore_hash_matches": true
+    },
+    {
+      "member": "rose/.context/pr2406-recovery/closeout/git-state.json",
+      "size": 611,
+      "sha256": "0f0a202bb6858b045edd50a2e4b7e07c520ab65609a8fbbcab72d79962b3add3",
+      "restore_hash_matches": true
+    },
+    {
+      "member": "rose/.context/pr2406-recovery/closeout/ignored-paths.json",
+      "size": 2894,
+      "sha256": "5959aa7eecae424cc7cd129540821e75ff63adb58288f1514047bd7b824c0115",
+      "restore_hash_matches": true
+    },
+    {
+      "member": "rose/.context/pr2406-recovery/closeout/processes.json",
+      "size": 859,
+      "sha256": "5dfd4a384e76d9b468a81e93de0c70cb24fda7efe1ef1dc413b925275c9db5da",
+      "restore_hash_matches": true
+    },
+    {
+      "member": "rose/.context/pr2406-recovery/closeout/record-inventory.json",
+      "size": 10535946,
+      "sha256": "c193fb48b5baffad332c7bddea2155a80027310fbd55fbfc32d23154cb6f3fd5",
+      "restore_hash_matches": true
+    },
+    {
+      "member": "rose/.context/pr2406-recovery/closeout/refs.json",
+      "size": 1100678,
+      "sha256": "3ff020e156b514a2c4e347f5da2082a0218ab46cc780d5205e592d4770fe5b6d",
+      "restore_hash_matches": true
+    }
+  ]
+}
