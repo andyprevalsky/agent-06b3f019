@@ -1728,7 +1728,14 @@ def _browser_resume_continuity_state(
     durable_runtime_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Serialize exact task continuity for inline or encrypted storage."""
+    owners = get_browser_cleanup_owners()
+    phone_cleanup_leases = [
+        {"user_id": user, "task_id": task, "lease_id": lease}
+        for (user, task), leases in (owners.phone_leases.items() if owners else [])
+        for lease in sorted(leases)
+    ]
     state = {
+        **({"phone_cleanup_leases": phone_cleanup_leases} if phone_cleanup_leases else {}),
         "action_history": action_history.get_entries(),
         "visited_urls": list(visited_urls),
         "verifier_checkpoints": list(verifier_checkpoints),
@@ -1772,6 +1779,7 @@ def _browser_resume_continuity_state(
                     "user_message_cursor_is_task_start": user_message_cursor_is_task_start,
                     "user_instruction_message_ids": list(user_instruction_message_ids or []),
                     "schema_user_instruction_count": schema_user_instruction_count,
+                    **({"phone_cleanup_leases": phone_cleanup_leases} if phone_cleanup_leases else {}),
                 }
             )
             state.update(privacy_state)
@@ -6063,6 +6071,20 @@ def _suppress_browser_cleanup_errors():
         pass
 
 
+def _with_phone_cleanup_receipt(message: str, result: Dict[str, Any]) -> str:
+    """Carry factual cleanup evidence through the parent's model-visible tool text."""
+    cleanup = result.get("browser_cleanup")
+    phone = cleanup.get("phone") if isinstance(cleanup, dict) else None
+    if not isinstance(phone, dict):
+        return message
+    release = phone.get("lease_release")
+    provider = phone.get("provider_cleanup")
+    if release not in {"confirmed", "unconfirmed"} or provider not in {"complete", "pending", "not_reported"}:
+        return message
+    receipt = f"Phone cleanup receipt: lease release {release}; provider cleanup {provider}."
+    return f"{message}\n\n{receipt}" if message else receipt
+
+
 async def _emit_browser_task_terminal_for_fe(
     *,
     agent_id: str,
@@ -6073,6 +6095,7 @@ async def _emit_browser_task_terminal_for_fe(
     message: str = "Browser session closed",
     preparation_cancellation: Optional[Dict[str, Any]] = None,
     cleanup_failure: Optional[Dict[str, Any]] = None,
+    phone_cleanup: Optional[Dict[str, str]] = None,
     session_id: Optional[str] = None,
 ) -> None:
     """Close the FE live browser chip after recording/session teardown.
@@ -6105,7 +6128,7 @@ async def _emit_browser_task_terminal_for_fe(
             is_completion_message=True,
             extra_metadata={
                 "excludeFromModel": True,
-                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+                **({"browser_cleanup": {**(cleanup_failure or {}), **({"phone": phone_cleanup} if phone_cleanup else {})}} if cleanup_failure or phone_cleanup else {}),
                 **({"browser_preparation_cancellation": preparation_cancellation} if preparation_cancellation else {}),
                 **({"session_id": session_id} if session_id and not cleanup_failure else {}),
             },
@@ -6331,6 +6354,7 @@ def _schedule_browser_cleanup(
         return confirmed and setup_settled and empty
 
     async def _cleanup() -> None:
+        nonlocal cleanup_failure
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
         resolved_network_recorder = browser_network_recorder
 
@@ -6379,6 +6403,15 @@ def _schedule_browser_cleanup(
             if local_only:
                 await dispose_local()
                 return
+            if emit_task_terminal and not paused_session_id and task_id:
+                from .phone import release_retained_phone_leases
+                try:
+                    await release_retained_phone_leases(load_config(), user_id, task_id)
+                except WorkflowGenerationSealed:
+                    raise
+                except Exception as error:
+                    logger.warning("Recorded phone custody cleanup failed", agent_id=agent_id,
+                                   task_id=task_id, error_type=type(error).__name__)
             if owners is not None and owners.setup_tasks:
                 for task in tuple(owners.setup_tasks):
                     if not task.done() and not task.cancelling():
@@ -6458,6 +6491,7 @@ def _schedule_browser_cleanup(
                     ),
                     preparation_cancellation=preparation_cancellation,
                     cleanup_failure=cleanup_failure,
+                    phone_cleanup=(owners.phone_cleanup.get((user_id, task_id)) if owners else None),
                     session_id=paused_session_id,
                 )
             if await drain_connections():
@@ -7092,6 +7126,7 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "browser_output_schema",
     "agent_inbox_state",
     "provider_session_recoveries",
+    "phone_cleanup_leases",
 )
 
 
@@ -8710,11 +8745,14 @@ async def _spawn_browser_agent_activity_v3_real(
         except Exception as read_error:
             logger.warning("[BrowserAgent] Final user-input read failed", task_id=task_id, error=str(read_error))
 
+    returned_activity_result: Optional[Dict[str, Any]] = None
+
     def _visible_activity_result(
         result: Dict[str, Any],
         *,
         operational_sources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        nonlocal returned_activity_result
         if credential_tasks.status:
             # The terminal result is serialized after finally closes this owner;
             # keep its status map so cancelled uploads finish as error, not pending.
@@ -8800,6 +8838,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     # the persisted copy carries it redacted.
                     if "liveViewUrl" in original:
                         visible_auth[key]["liveViewUrl"] = redact_url_secrets(original["liveViewUrl"])
+        returned_activity_result = result
         return result
 
     browser_url = None
@@ -8809,6 +8848,9 @@ async def _spawn_browser_agent_activity_v3_real(
     provider_session_recoveries = int((write_lock_resume_state or {}).get("provider_session_recoveries") or 0)
     latest_structured_response: Optional[Dict[str, Any]] = None
     config = load_config()
+    owners = get_browser_cleanup_owners()
+    from .phone import restore_phone_cleanup_leases
+    restore_phone_cleanup_leases(write_lock_resume_state or {}, user_id, task_id)
     start_time = safe_time()
 
     browser_use_mode = "gpt" if gpt_token else ("claude" if use_claude_mode else None)
@@ -13905,7 +13947,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if not return_cancelled_result:
             raise
 
-        return {
+        return _visible_activity_result({
             "status": "cancelled",
             "task_id": task_id,
             "session_id": session_id,
@@ -13913,7 +13955,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "message": "Browser activity cancelled",
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
             **({"unread_user_messages": list(unread_user_instructions)} if unread_user_instructions else {}),
-        }
+        })
 
     except WorkflowGenerationSealed:
         generation_sealed = True
@@ -14164,8 +14206,17 @@ Based on this feedback, I need to continue working on the task and address the i
                 local_only_recorders=locally_owned_recorders,
                 local_only_setup_tasks=(download_persister_task,),
             )
-            if await_owner_cleanup:
+            phone_key = (user_id, task_id)
+            phone_owned = owners is not None and (
+                owners.phone_leases.get(phone_key) or owners.phone_cleanup.get(phone_key)
+            )
+            if await_owner_cleanup or (phone_owned and not browser_task_paused_for_resume and not paused_session_id):
                 await await_owned_browser_cleanup(owned_cleanup)
+            if returned_activity_result is not None and owners is not None and owners.phone_cleanup.get(phone_key):
+                returned_activity_result["browser_cleanup"] = {
+                    **(returned_activity_result.get("browser_cleanup") or {}),
+                    "phone": dict(owners.phone_cleanup[phone_key]),
+                }
             playwright_browser = None
             playwright_instance = None
             input_page = None
@@ -14615,7 +14666,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         type=EventType.POST_MESSAGE,
                         title="Browser Session Paused" if user_pause_requested else "Browser Session Cancelled",
                         message=_with_unread_user_messages(
-                            "User paused the browser agent" if user_pause_requested else "Browser activity cancelled",
+                            _with_phone_cleanup_receipt(
+                                "User paused the browser agent" if user_pause_requested else "Browser activity cancelled",
+                                result or {},
+                            ),
                             (result or {}).get("unread_user_messages"),
                         ),
                         status=MessageStatus.ERROR,
@@ -15606,6 +15660,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     final_message = (
                         f"{final_message}\n\n{best_effort_response}" if final_message else best_effort_response
                     )
+            final_message = _with_phone_cleanup_receipt(final_message, result)
             final_message = _with_unread_user_messages(final_message, result.get("unread_user_messages"))
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,

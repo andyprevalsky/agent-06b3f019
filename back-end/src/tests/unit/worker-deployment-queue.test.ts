@@ -1,6 +1,10 @@
 import { emptyRetentionCases } from './worker-empty-retention.cases';
 import { retainedRouteMismatchCases } from './worker-route-retention.cases';
-import { coalesceCases, coalesceCliCases } from './worker-deployment-coalesce.cases';
+import {
+  coalesceCases,
+  coalesceCliCases,
+  newerReleaseControllerCases,
+} from './worker-deployment-coalesce.cases';
 import { transientAssertionCase } from './worker-deployment-transient.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -477,6 +481,8 @@ async function main() {
     );
     await test('queue CLI coalesces into proven descendants and never rolls the live release back', () =>
       coalesceCliCases({ api, appFor, identity }));
+    await test('an older release controller leaves a coalesced newer head to its own run', () =>
+      newerReleaseControllerCases({ api, appFor, identity }));
     lease = await acquireWorkflowDeploymentLease({ leaseMs: 60000, heartbeatMs: 59000 });
     await test('expired and replaced global owners cannot mutate', async () => {
       const app = appFor('expiry');
