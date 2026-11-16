@@ -387,13 +387,13 @@ describe('App wiring', () => {
     });
 
     it('TooltipProvider is present (components that use tooltips do not crash)', async () => {
-      // The Terminal page uses Tooltip from radix (the legal footer's About
-      // description). If TooltipProvider was missing, rendering would throw.
+      // The default desktop exposes Radix tooltips on its app icons for guests too.
       await renderAppRoutes('/');
       await waitFor(() => expect(screen.queryByTestId('route-loading')).not.toBeInTheDocument());
-      const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(within(legalLinks).getAllByRole('button', { name: 'About' }).length).toBeGreaterThan(
-        0,
+      const toggle = await screen.findByTestId('rose-app-dark-mode');
+      await userEvent.setup().hover(toggle);
+      expect(await screen.findByRole('tooltip')).toHaveTextContent(
+        toggle.getAttribute('aria-label')!,
       );
     });
 

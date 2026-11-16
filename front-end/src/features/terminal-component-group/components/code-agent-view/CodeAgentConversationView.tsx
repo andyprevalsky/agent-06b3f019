@@ -16,6 +16,8 @@
  *                 with the session's context usage, direct delivery)
  *   read-only views (shared recording / inspection / loading) → a notice
  *                 replaces the query box.
+ *   navigation  → owner breadcrumb above the scroll area, using the resolved
+ *                 session title; the transcript leaves room below that trail.
  * Escape closes the view (back to the owner's chat).
  */
 
@@ -56,12 +58,14 @@ export function CodeAgentConversationView({
   codeAgent,
   readOnlyMessage,
   backdrop,
+  navigation,
 }: {
   codeAgent: OpenCodeAgent;
   /** Shared recording / inspection / loading: a notice replaces the query box. */
   readOnlyMessage: string | null;
   /** The root transcript's blur overlay (AgentChatArea passes BlurOverlay). */
   backdrop?: ReactNode;
+  navigation?: (title: string) => ReactNode;
 }) {
   const { taskId } = codeAgent;
   const c = useCodeAgentConversation(codeAgent);
@@ -74,9 +78,16 @@ export function CodeAgentConversationView({
   useEscapeToClose(useCodeAgentView()?.close ?? NOOP);
   return (
     <>
+      {navigation?.(c.title)}
       <ScrollArea className="relative flex-1 px-2 md:px-6">
         {backdrop}
-        <div className="h-[var(--mobile-terminal-header-height)] md:h-24" />
+        <div
+          className={
+            navigation
+              ? 'h-[calc(var(--mobile-terminal-header-height)+3.5rem)] md:h-36'
+              : 'h-[var(--mobile-terminal-header-height)] md:h-24'
+          }
+        />
         <section
           data-testid="code-agent-view"
           data-code-agent-id={taskId}

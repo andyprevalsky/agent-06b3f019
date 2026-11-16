@@ -1,0 +1,22 @@
+{
+  "scope": "seven exact merged native smoke attempts; two uncached timeout durations, five cached measurements retained in attempts only",
+  "counts": {
+    "attempts": {
+      "planned": 7,
+      "already_present": 0,
+      "appended": 7,
+      "verified_exactly_once": 7
+    },
+    "durations": {
+      "planned": 2,
+      "already_present": 0,
+      "appended": 2,
+      "verified_exactly_once": 2
+    }
+  },
+  "files": {
+    "agents/benchmarks/history/task_attempts.20261116.records-pr-2411-closeout.jsonl": "5ae454e66f9c3516bf1aa1c2b986a0604e39d5100c4934d5f578c8aa2228a34f",
+    "agents/benchmarks/history/task_durations.20261116.records-pr-2411-closeout.jsonl": "900982583486bbc410941a83e77a77be22188e2039ae5841cba244241cbbe77c"
+  },
+  "plan_sha256": "cc5f8053ab893e2ea390b961cccf0edce3231863b820007660157094e19c7d79"
+}

@@ -2216,6 +2216,153 @@ class Cycle(unittest.TestCase):
         patcher.start();self.addCleanup(patcher.stop)
         return refusal,state,receipt,proof
 
+    def catalog_refusal_fixture(self):
+        refusal,state,receipt,proof=self.legacy_custody_refusal_fixture()
+        folder=Path(receipt['log']).parent
+        catalog_head='c04bacf96b8293782ec8810fed66561448f6a289'
+        policies={}
+        names=(*refusal.LEGACY_CUSTODY_POLICIES, 'scripts/deploy_test_interrupted_cleanup.py',
+               'scripts/deploy_test_native_cleanup.py', 'scripts/deploy_test_quarantine.py', 'agents/benchmarks/tasks.json')
+        for name in names:
+            raw=subprocess.check_output(['git','show',catalog_head+':'+name],cwd=ROOT)
+            path=self.root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
+            policies[name]=(hashlib.sha256(raw).hexdigest(),)
+        subprocess.run(['git','-C',str(self.root),'add','scripts','agents'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com',
+                        'commit','-qm','original catalog refusal producer'],check=True)
+        receipt['source']=c.source(self.root)
+        state['source']=receipt['source'];state['plan']['source']=receipt['source'];state['plan_digest']=c.digest(state['plan'])
+        request=c.read(folder/'request.json');request['source']=receipt['source']
+        import deploy_test_historical_custody as h
+        request['custody_state_sha256']=h.state_identity(state)
+        c.write(folder/'request.json',request);c.write(folder/'receipt.json',receipt)
+        message=b"DEPLOY_CLOUD BLOCKED: browser-biometrics-webdecoy: duplicate JSON key 'quarantine' in agents/benchmarks/tasks.json\n"
+        (folder/'output.log').write_bytes(message)
+        c.write(Path(request['custody_state']),state);c.write(Path(proof['legacy_state_snapshot']),state)
+        proof['files']={p:c.sha_file(p) for p in proof['files']}
+        capture=dict(source=receipt['source'],token=receipt['token'],locator=request['custody_state'],
+                     request_sha256=c.sha_file(folder/'request.json'),receipt_sha256=c.sha_file(folder/'receipt.json'))
+        for name,value in [('CATALOG_REFUSAL_HEAD',receipt['source']['head']),('CATALOG_REFUSAL_POLICIES',policies),
+                           ('CATALOG_REFUSAL_CAPTURE',capture),('CATALOG_REFUSAL_MESSAGE',message),
+                           ('CATALOG_REFUSAL_UID',os.geteuid()),('CATALOG_REFUSAL_OWNER_UID',os.geteuid())]:
+            patcher=patch.object(refusal,name,value,create=True);patcher.start();self.addCleanup(patcher.stop)
+        return refusal,state,receipt,proof
+
+    def test_catalog_refusal_preserves_outcomes_and_retires_only_launch_custody(self):
+        refusal,state,receipt,proof=self.catalog_refusal_fixture()
+        before=copy.deepcopy(state);raw={p:Path(p).read_bytes() for p in proof['files']}
+        self.assertEqual(c.retained_owners(state,['smoke']),['smoke'])
+        c.reconcile(state,receipt['token'],proof)
+        self.assertEqual(c.retained_owners(state,['smoke']),[])
+        entry,=state['reconciled_owners'].values()
+        self.assertFalse(entry['credit_granted']);self.assertFalse(entry['financial_cleanup_credit'])
+        self.assertEqual({k:v for k,v in state.items() if k!='reconciled_owners'},before)
+        self.assertEqual(raw,{p:Path(p).read_bytes() for p in proof['files']})
+        accepted=copy.deepcopy(state);c.reconcile(state,receipt['token'],proof);self.assertEqual(state,accepted)
+
+    def test_catalog_refusal_rejects_changed_source_request_output_reader_and_contract(self):
+        refusal,state,receipt,proof=self.catalog_refusal_fixture()
+        folder=Path(receipt['log']).parent
+        raw={p:Path(p).read_bytes() for p in proof['files']}
+        with patch.object(refusal.os, 'geteuid', return_value=os.geteuid()+1):
+            with self.assertRaisesRegex(ValueError, 'root visibility required'):
+                c.reconcile(copy.deepcopy(state),receipt['token'],proof)
+        for field,value in [('request_token','b'*32),('confirmed_at',float('nan')),('confirmed_at',True)]:
+            claim=copy.deepcopy(proof);claim[field]=value
+            with self.assertRaises(ValueError):c.reconcile(copy.deepcopy(state),receipt['token'],claim)
+        for field,value in [('source',{'head':'0'*40,'digest':'0'*64}),('timed_out',True),('cancelled',True)]:
+            candidate=copy.deepcopy(state);candidate['attempts'][-1]['results'][0][field]=value
+            with self.assertRaises(ValueError):c.reconcile(candidate,receipt['token'],proof)
+        candidate=copy.deepcopy(state);candidate['plan']['gates'][-1]['command'].append('--extra')
+        with self.assertRaises(ValueError):c.reconcile(candidate,receipt['token'],proof)
+        for leaf in ['request.json','output.log']:
+            path=folder/leaf;path.write_bytes(b'changed')
+            claim=copy.deepcopy(proof);claim['files'][str(path)]=c.sha_file(path)
+            with self.assertRaises(ValueError):c.reconcile(copy.deepcopy(state),receipt['token'],claim)
+            path.write_bytes(raw[str(path)])
+        for name in ['scripts/deploy_test_quarantine.py','agents/benchmarks/tasks.json']:
+            with patch.dict(refusal.CATALOG_REFUSAL_POLICIES,{name:('0'*64,)}):
+                with self.assertRaises(ValueError):c.reconcile(copy.deepcopy(state),receipt['token'],proof)
+
+    def test_catalog_refusal_rejects_namespace_result_and_live_holder(self):
+        refusal,state,receipt,proof=self.catalog_refusal_fixture()
+        namespace=self.root/'.context/deploy-cloud'/hashlib.sha256(receipt['token'].encode()).hexdigest()
+        namespace.mkdir(parents=True)
+        with self.assertRaises(ValueError):c.reconcile(state,receipt['token'],proof)
+        namespace.rmdir();result=Path(receipt['log']).parent/'result.json';result.write_text('{}')
+        with self.assertRaises(ValueError):c.reconcile(state,receipt['token'],proof)
+        result.unlink()
+        holder=subprocess.Popen([sys.executable,'-c',
+            'import sys;f=open(sys.argv[1]);print("ready",flush=True);sys.stdin.read()',receipt['log']],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(),'ready')
+            with self.assertRaisesRegex(ValueError,'holder|writer'):c.reconcile(state,receipt['token'],proof)
+        finally:
+            holder.stdin.close();holder.wait(timeout=10);holder.stdout.close()
+
+    def test_catalog_namespace_observes_original_checkout_uid(self):
+        if os.geteuid() != 0:
+            self.skipTest('real cross-UID /proc visibility requires root')
+        import pwd
+        import deploy_test_cloud_refusal as refusal
+        owner=pwd.getpwnam('boxes')
+        namespace=self.root/'.context/foreign-catalog-namespace'
+        with patch.object(refusal,'CATALOG_REFUSAL_UID',0), \
+             patch.object(refusal,'CATALOG_REFUSAL_OWNER_UID',owner.pw_uid):
+            original_owner=self.root.stat().st_uid
+            os.chown(self.root,owner.pw_uid,owner.pw_gid)
+            self.addCleanup(lambda: os.chown(self.root,original_owner,os.getgid()) if self.root.exists() else None)
+            real_run=refusal.subprocess.run
+            def observed_run(argv,**kwargs):
+                argv=list(argv);argv[4]=str(ROOT/'scripts')
+                return real_run(argv,**kwargs)
+            with patch.object(refusal.subprocess,'run',side_effect=observed_run):
+                refusal.catalog_namespace_quiet(self.root,namespace)
+                with patch.object(refusal.subprocess,'run',return_value=subprocess.CompletedProcess([],1)):
+                    with self.assertRaisesRegex(ValueError,'visibility failure'):
+                        refusal.catalog_namespace_quiet(self.root,namespace)
+                child=subprocess.Popen([sys.executable,'-B','-c',
+                    'import sys;print("ready",flush=True);sys.stdin.read()',str(namespace)],
+                    user=owner.pw_uid,group=owner.pw_gid,extra_groups=[],
+                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+                try:
+                    self.assertEqual(child.stdout.readline().strip(),'ready')
+                    with self.assertRaisesRegex(ValueError,'checkout-owner namespace consumer'):
+                        refusal.catalog_namespace_quiet(self.root,namespace)
+                finally:
+                    child.stdin.close();child.wait(timeout=10);child.stdout.close()
+                evidence=self.root/'original-evidence.log'
+                evidence.write_text('original immutable capture')
+                evidence.chmod(0o644)
+                holder=subprocess.Popen([sys.executable,'-B','-c',
+                    'import sys;f=open(sys.argv[1]);print("ready",flush=True);sys.stdin.read()',str(evidence)],
+                    user=owner.pw_uid,group=owner.pw_gid,extra_groups=[],
+                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+                try:
+                    self.assertEqual(holder.stdout.readline().strip(),'ready')
+                    with self.assertRaisesRegex(ValueError,'checkout-owner namespace consumer or visibility failure'):
+                        refusal.catalog_namespace_quiet(self.root,namespace,[evidence])
+                finally:
+                    holder.stdin.close();holder.wait(timeout=10);holder.stdout.close()
+                refusal.catalog_namespace_quiet(self.root,namespace,[evidence])
+
+
+    def test_catalog_refusal_survives_refresh_and_revalidates_original_capture(self):
+        refusal,state,receipt,proof=self.catalog_refusal_fixture()
+        c.reconcile(state,receipt['token'],proof)
+        old=copy.deepcopy(state['plan']);original=copy.deepcopy(receipt)
+        (self.root/'code').write_text('new product source')
+        subprocess.run(['git','-C',str(self.root),'add','code'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com',
+                        'commit','-qm','new product source'],check=True)
+        new=copy.deepcopy(old);new['source']=c.source(self.root)
+        new['gates'][-1]['selection_evidence']=['new source']
+        c.refresh(state,old,new,self.root)
+        c.write(Path(receipt['log']).parent.parents[3]/'cycle.json',state)
+        self.assertEqual(c.retained_owners(state,['smoke']),[])
+        self.assertEqual(c.latest_receipts(state)['smoke'],original)
+
     def test_legacy_custody_refusal_retirement_preserves_receipt_and_is_idempotent(self):
         refusal,state,receipt,proof=self.legacy_custody_refusal_fixture()
         before=copy.deepcopy(state); raw={p:Path(p).read_bytes() for p in proof['files']}

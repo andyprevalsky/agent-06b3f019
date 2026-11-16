@@ -101,7 +101,7 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   {
     file: 'providers/database.ts',
     scope: 'runReadOnlyTransactionWithRetry',
-    fingerprint: 'c3fdc39db28f7b2d',
+    fingerprint: '6ab338c564136993',
     reason:
       'canonical read-only wrapper: SET TRANSACTION READ ONLY makes a mid-body replay write-free, so it retries Prisma DB errors after body entry, which runTransactionWithRetry deliberately refuses',
   },

@@ -1,0 +1,10 @@
+{
+  "branch": "perf/phone-observe-renewal",
+  "finished_at": "2026-11-16T19:13:44Z",
+  "finished_epoch": 1794856424.3903723,
+  "git_sha": "c3bb4a40da56eefc5fa9aee4764c4f91f551ef24",
+  "run_id": "20261116-051120-2348970",
+  "started_at": "2026-11-16T05:11:20Z",
+  "started_epoch": 1794805880.87695,
+  "status": "completed"
+}

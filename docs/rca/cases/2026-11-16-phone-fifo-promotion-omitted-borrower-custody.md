@@ -134,9 +134,24 @@ normal invocation on the workspace database then exited 0:
 1 domain passed in 2678 ms with no quarantine. Final TypeScript and targeted
 ESLint checks passed. The first independent review confirmed the original
 boundary and low flakiness risk, and prompted the now-tested consistent-reader
-and blocking-gate improvements; follow-up review is pending. This status denotes
-the locally verified repair, not a deployed or re-run production outcome. No deployment has
-been performed by this delegated investigator.
+and blocking-gate improvements. Follow-up independent review also completed clean.
+The parent shipped the repair in PR #2347, merged as
+26a6deac6accc2f7b82420926ff0d4e739b5153c. Final source
+c470ba27145ce59f3574532e79efadb653d179c1 passed all 17 selected deployment gates,
+including full backend coverage of the non-quarantined FIFO regression, new-test
+stability and seven cloud smoke tasks with verified resource release. Ten existing
+quarantined units ran and passed; their repair owners retain marker retirement.
+CodeRabbit reached its organization spending cap; the native quota skip was
+carried through the verified main sync. The release merged unreviewed by
+CodeRabbit; the two independent reviews are separate evidence.
+
+Production Render verification passed by live strict descendant
+521432070b659416d644072c58d5f6b3afb25e4e, which contains the merge and both runtime
+changes. All 16 production endpoint checks passed and the Render error scan was
+clean. The initial Render timeout from repeated deployment supersession is
+preserved, as is the later GitHub quota failure before semantic dispatch.
+Production semantics passed all five jobs in run 43836518429 against live frontend descendant 12b77e3e7a7a8f525eb896892cc7795454de964c. An unnecessary second semantic sweep started while closing the native aggregate also passed (run 43837969497); both are retained in the deployment history. The final production aggregate passed. No original
+DoorDash sign-out or Google sign-in was re-run or claimed complete.
 
 Golden reference: not applicable to the current ordinary backend transaction fix
 (no prompt, Zod schema or worker trajectory hunk); parent deploy scope check remains

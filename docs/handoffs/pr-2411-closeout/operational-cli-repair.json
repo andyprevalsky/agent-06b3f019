@@ -1,0 +1,14 @@
+{
+  "sha": "6e2496487add55f3416737566873573528474fd3",
+  "mode": "/push",
+  "scope": "scripts/deploy_prod.py and owning test only",
+  "validated_tests": 91,
+  "independent_review": "prod-auth-independent-review.md R1 follow-up PASS",
+  "recorded_at": "2026-11-16T20:36:16.040091+00:00",
+  "files": {
+    "scripts/deploy_prod.py": "add5d38b0371698963fcbb23632987a883eb58f69229d11ad91077cf17bd5271",
+    "scripts/tests/deploy-prod.test.py": "70d0e28579b7028a99bd5c4f6ea25842700b525126584ba4988bd7755627e05a"
+  },
+  "review": "Independent review R1 follow-up PASS; selection RED5assertions, redaction RED2branches, unchanged GREEN, each5stable, canonical91PASS",
+  "source_validation_scope": "Operational CLI /push only; original product17gate validation applies to4a9 separately"
+}

@@ -1,0 +1,11 @@
+{
+  "base": "f14f0cc030f288d2212c8d76acdd63043a3ed679",
+  "strict_native_duplicate_key_loading": "PASS",
+  "tasks": 220,
+  "catalog_sha256": "cca6eaea5c73f67e506dd7cac0abf582859304d026adb20824e8ed609a1583a6",
+  "only_change": "One matching quarantine repair URL, pending-handoff -> actual independent repair thread",
+  "all_definitions_prompts_evaluators_timeouts_assertions_and_other_incident_fields_identical": true,
+  "changed_tasks": [
+    "background-agent-message-smoke"
+  ]
+}

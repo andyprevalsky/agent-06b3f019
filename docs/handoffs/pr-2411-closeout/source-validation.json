@@ -1,0 +1,215 @@
+{
+  "source": {
+    "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+    "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+  },
+  "ready": true,
+  "phase": "ready",
+  "gate_count": 17,
+  "gates": {
+    "format": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/6/quick/format/output.log",
+      "worker_result": null
+    },
+    "eslint": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/6/quick/eslint/output.log",
+      "worker_result": null
+    },
+    "typescript": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/6/quick/typescript/output.log",
+      "worker_result": null
+    },
+    "backend-structural": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/6/quick/backend-structural/output.log",
+      "worker_result": null
+    },
+    "cloudbench-controller": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/focused/cloudbench-controller/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/focused/cloudbench-controller/result.json"
+    },
+    "agents-coverage-blackbox": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/focused/agents-coverage-blackbox/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/focused/agents-coverage-blackbox/result.json"
+    },
+    "frontend-coverage-blackbox": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/focused/frontend-coverage-blackbox/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/focused/frontend-coverage-blackbox/result.json"
+    },
+    "smoke": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/focused/smoke/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/focused/smoke/result.json"
+    },
+    "seed-cache-decision": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/seed-cache-decision/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/seed-cache-decision/result.json"
+    },
+    "canonical-seed-whatsapp-content": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/canonical-seed-whatsapp-content/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/canonical-seed-whatsapp-content/result.json"
+    },
+    "e2b-smoke": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/e2b-smoke/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/e2b-smoke/result.json"
+    },
+    "seed-memory-ratchet": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/seed-memory-ratchet/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/seed-memory-ratchet/result.json"
+    },
+    "live-probes": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/live-probes/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/live-probes/result.json"
+    },
+    "deploy-command-structural": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/deploy-command-structural/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/deploy-command-structural/result.json"
+    },
+    "backend-coverage-blackbox": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/backend-coverage-blackbox/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/backend-coverage-blackbox/result.json"
+    },
+    "new-test-stability": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/new-test-stability/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/new-test-stability/result.json"
+    },
+    "semantic-stack": {
+      "status": "PASS",
+      "native_exit": 0,
+      "executed": true,
+      "complete": true,
+      "source": {
+        "head": "4a9d224abd5bf5ab1770237f2a8097762938a876",
+        "digest": "882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0"
+      },
+      "log": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/semantic-stack/output.log",
+      "worker_result": "/home/boxes/rose/.context/deploy-pipeline/attempts/7/final/semantic-stack/result.json"
+    }
+  }
+}

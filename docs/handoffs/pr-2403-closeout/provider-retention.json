@@ -1,0 +1,71 @@
+{
+  "observed_at": "2026-11-16T16:13:02.404444+00:00",
+  "native_cleanup_verified": true,
+  "machine_count_destroyed": 9,
+  "volume_observations": [
+    {
+      "id": "vol_491e9g2ego5xwl5r",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    },
+    {
+      "id": "vol_4m3o2ymd9w0q051v",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    },
+    {
+      "id": "vol_4y81qezl0o3zyq3r",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    },
+    {
+      "id": "vol_r68xwzq61zym2ej4",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    },
+    {
+      "id": "vol_r7y8jz0j303q2w9r",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    },
+    {
+      "id": "vol_r7y8jzmn6mqdnlyr",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    },
+    {
+      "id": "vol_vlyg0od9xm8678o4",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    },
+    {
+      "id": "vol_vxmeg5zp5x97y5z4",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    },
+    {
+      "id": "vol_vz86m1zoq5wmd5ev",
+      "native_exit": 0,
+      "state": "pending_destroy",
+      "attached_machine_id": null,
+      "attached_alloc_id": null
+    }
+  ],
+  "followup": "Provider-side asynchronous removal of detached pending_destroy volumes remains; no repeated DELETE. Physical absence and final storage charges are not certified."
+}

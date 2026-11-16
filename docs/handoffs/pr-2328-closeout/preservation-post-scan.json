@@ -1,0 +1,12 @@
+{
+  "observed_at": "2026-11-16T19:22:05.668414+00:00",
+  "archive": "devbox-closeout-private/pr2328/20261116T1918Z-final-delta.tar.gz.aesgcm",
+  "authenticated_archive_files": 83,
+  "post_upload_rehash_matches": 83,
+  "changed_or_missing": [],
+  "qualified_absences": [
+    ".context/deploy-runs/current",
+    ".context/deploy-runs/factory-current"
+  ],
+  "absence_evidence": "Native deploy finish metadata completed19:13:44; original pointers retained in base archive."
+}

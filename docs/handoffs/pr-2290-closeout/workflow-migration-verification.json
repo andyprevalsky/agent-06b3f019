@@ -1,0 +1,202 @@
+{
+  "source_sha": "780ec1dc547dcca4cf9aabd09634c9c4a4c4ac7e",
+  "release_sha": "cc7a39b2846aa385320386bbb1374e74c989e6a4",
+  "run_id": "85a9cf0c-38cf-4b34-acce-6feeedecff8e",
+  "command": "npx tsx scripts/validate-prod-workflow-migration.ts --execute",
+  "cwd": "back-end",
+  "environment": {
+    "PRODUCTION_WORKFLOW_MIGRATION_VALIDATION": "1",
+    "TEMPORAL_TASK_QUEUE": "navi-agent-tasks",
+    "TEMPORAL_WORKER_BUILD_ID": "cc7a39b2846aa385320386bbb1374e74c989e6a4",
+    "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "43840732781-1"
+  },
+  "exit_code": 0,
+  "passed": 45,
+  "failed": 0,
+  "fixture_cleanup": "PASS",
+  "results": [
+    {
+      "test": "paused_state_snapshot",
+      "status": "PASS"
+    },
+    {
+      "test": "in_progress_tool_terminalized_once",
+      "status": "PASS"
+    },
+    {
+      "test": "success_before_seal_wins",
+      "status": "PASS"
+    },
+    {
+      "test": "late_stale_success_becomes_deployment_error",
+      "status": "PASS"
+    },
+    {
+      "test": "approval_wait_closed_for_llm_retry",
+      "status": "PASS"
+    },
+    {
+      "test": "late_approval_cannot_overwrite_deployment_terminal",
+      "status": "PASS"
+    },
+    {
+      "test": "descendant_terminated_and_failed",
+      "status": "PASS"
+    },
+    {
+      "test": "sql_trigger_rejects_spawn_after_parent_seal",
+      "status": "PASS"
+    },
+    {
+      "test": "pending_start_tombstone_wins_and_is_terminated",
+      "status": "PASS"
+    },
+    {
+      "test": "accepted_start_lost_response_is_resolved_and_terminated",
+      "status": "PASS"
+    },
+    {
+      "test": "current_parent_is_never_tombstoned",
+      "status": "PASS"
+    },
+    {
+      "test": "nested_pending_child_and_grandchild_are_quiesced",
+      "status": "PASS"
+    },
+    {
+      "test": "termination_failure_retains_pending_for_retry",
+      "status": "PASS"
+    },
+    {
+      "test": "post_termination_db_failure_retries_idempotently",
+      "status": "PASS"
+    },
+    {
+      "test": "active_start_lease_blocks_activation_until_released",
+      "status": "PASS"
+    },
+    {
+      "test": "accepted_child_completed_before_postvalidation",
+      "status": "PASS"
+    },
+    {
+      "test": "accepted_child_failed_before_postvalidation",
+      "status": "PASS"
+    },
+    {
+      "test": "concurrent_duplicate_descendant_finalization_is_idempotent",
+      "status": "PASS"
+    },
+    {
+      "test": "pause_after_fetch_before_atomic_finalize_wins",
+      "status": "PASS"
+    },
+    {
+      "test": "resume_during_replacement_claim_wins",
+      "status": "PASS"
+    },
+    {
+      "test": "credit_restoration_during_replacement_claim_wins",
+      "status": "PASS"
+    },
+    {
+      "test": "cost_limit_raise_during_replacement_claim_wins",
+      "status": "PASS"
+    },
+    {
+      "test": "legacy_usage_restores_exact_durable_billed_ledger",
+      "status": "PASS"
+    },
+    {
+      "test": "concurrent_keyed_accounting_checkpoint_is_exact_once",
+      "status": "PASS"
+    },
+    {
+      "test": "provider_attempt_retries_do_not_inflate_iteration_offset",
+      "status": "PASS"
+    },
+    {
+      "test": "terminal_db_live_temporal_root_is_cleaned_exactly_once",
+      "status": "PASS"
+    },
+    {
+      "test": "soft_deleted_live_temporal_workflow_is_not_invisible",
+      "status": "PASS"
+    },
+    {
+      "test": "terminal_db_live_temporal_descendant_is_cleaned_exactly_once",
+      "status": "PASS"
+    },
+    {
+      "test": "rapid_terminal_generations_each_keep_exact_cleanup_obligation",
+      "status": "PASS"
+    },
+    {
+      "test": "candidate_bootstrap_durable_ready",
+      "status": "PASS"
+    },
+    {
+      "test": "cold_workflow_uses_no_resources_while_waiting",
+      "status": "PASS"
+    },
+    {
+      "test": "fresh_history_has_no_patch_or_nondeterminism",
+      "status": "PASS"
+    },
+    {
+      "test": "failed_candidate_next_deploy_rotates_generation",
+      "status": "PASS"
+    },
+    {
+      "test": "late_stale_replacement_start_is_compensated",
+      "status": "PASS"
+    },
+    {
+      "test": "cost_limit_reached_preserved",
+      "status": "PASS"
+    },
+    {
+      "test": "out_of_credits_preserved",
+      "status": "PASS"
+    },
+    {
+      "test": "pause_race_after_active_snapshot_wins",
+      "status": "PASS"
+    },
+    {
+      "test": "malformed_root_preflight_leaves_healthy_peer_untouched",
+      "status": "PASS"
+    },
+    {
+      "test": "http_single_lost_201_retry_reuses_exact_child",
+      "status": "PASS"
+    },
+    {
+      "test": "http_batch_changed_payload_is_rejected",
+      "status": "PASS"
+    },
+    {
+      "test": "http_batch_mixed_retry_reconciles_each_child_once",
+      "status": "PASS"
+    },
+    {
+      "test": "known_massive_zombie_generations_are_not_running",
+      "status": "PASS"
+    },
+    {
+      "test": "production_fleet_has_no_stuck_cutover_state",
+      "status": "PASS"
+    },
+    {
+      "test": "same_sha_old_marker_is_retired_without_retiring_current_attempt",
+      "status": "PASS"
+    },
+    {
+      "test": "fixture_cleanup",
+      "status": "PASS"
+    }
+  ],
+  "log_sha256": "3c2d7a5bb588d979bcc0a31f868b095810c190ecb78c7e870c6cbe04cf41bf9f",
+  "test_file_sha256": "17b2eeefd8d6518b1f914079da5810cc6e297994e9204442ce92917db3162564",
+  "qualification": "Existing production lane entrypoint run directly with the exact native release environment after the umbrella dependency block. Original umbrella BLOCKED and Fly FAIL receipts preserved; not overwritten as PASS."
+}

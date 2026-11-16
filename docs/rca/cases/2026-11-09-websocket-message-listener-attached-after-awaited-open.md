@@ -27,7 +27,7 @@ sources:
   - commit 15a52d6ea2dfa176892b21c40592101de9e8a1c4 failed source (NOT_INTRODUCED)
   - commit 1cc49114d fixed the same pattern in the sibling cursor-replay test only
 repro: e2b-templates/codex-code/app-server.test.mjs (production default app-server test holds the viewer's reads until a later viewer sees ready)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -101,6 +101,14 @@ The native failure log was retrieved and verified against its artifact manifest.
 This is NOT_INTRODUCED relative to the handoff repair. The existing PR1874 fix
 was inspected rather than independently reimplemented. Integration and current
 final-source verification remain pending; this record is open until they finish.
+
+### Landed qualification (2026-11-16)
+
+The inspected PR #1874 listener-order repair was integrated into PR #2290,
+merge cc7a39b2846aa385320386bbb1374e74c989e6a4. The final 96d12280 source passed
+all 17 native gates, including new-test stability. This closes this captured
+recurrence with test-only listener ordering; no production client change or
+full deployment-completion claim is implied.
 
 ## Human feedback
 

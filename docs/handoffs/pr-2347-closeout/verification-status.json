@@ -1,0 +1,9 @@
+{
+  "optimized_verifier": "PASS",
+  "restored_members_verified": 5404,
+  "selected_originals_unchanged": 36233,
+  "redundant_verifier": "CANCELLED",
+  "redundant_verifier_pid": 3420119,
+  "owner_shell_exit_code": 143,
+  "owned_preservation_processes_remaining": 0
+}

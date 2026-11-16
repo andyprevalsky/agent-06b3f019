@@ -197,6 +197,27 @@ for (const provider of ['claude', 'codex'] as const) {
     const entries = history.getByTestId('trajectory-history-entry');
     const pageOf = (position: string) => history.getByText(position, { exact: true });
     await expect(slot).toHaveCount(1);
+    const trail = page.getByRole('navigation', { name: 'Agent breadcrumb' });
+    await expect(trail.getByText('Speed control', { exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    for (const viewport of [
+      { width: 1280, height: 900 },
+      { width: 430, height: 932 },
+      { width: 320, height: 780 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await expect(trail).toBeVisible();
+      const breadcrumb = await trail.boundingBox();
+      const transcript = await view.boundingBox();
+      expect(breadcrumb).not.toBeNull();
+      expect(transcript).not.toBeNull();
+      expect(breadcrumb!.y + breadcrumb!.height).toBeLessThanOrEqual(transcript!.y);
+      expect(breadcrumb!.x).toBeGreaterThanOrEqual(0);
+      expect(breadcrumb!.x + breadcrumb!.width).toBeLessThanOrEqual(viewport.width);
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
     await expect(slot).toHaveAttribute('data-state', 'running');
     // A running turn is one row: its latest activity and elapsed time. Its steps
     // (thoughts included) appear only once the row is expanded.

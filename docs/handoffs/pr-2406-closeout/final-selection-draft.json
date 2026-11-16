@@ -1,0 +1,25 @@
+{
+  "status": "VERIFIED TERMINAL SELECTION",
+  "selected_file_count": 34297,
+  "selected_file_list": ".context/pr2406-recovery/closeout/final-evidence-files.json",
+  "selection_metadata": ".context/pr2406-recovery/closeout/final-evidence-metadata.json",
+  "excluded_secret_configuration": [
+    {
+      "path": ".context/pr1634-archive-recovery.env",
+      "disposition": "retain; parent-managed environment redelivery, not independently tested here"
+    }
+  ],
+  "symlinks": [
+    {
+      "path": ".context/deploy-cloud/659233082b701e32535352da96c39c81a9afa0368144e531a2dda1086e2f6283/campaigns/deploy-659233082b701e32535352da96c39c81a9afa0368144e531a2dda1086e2f6283/shared-inventory/inventory/current",
+      "literal_target": ".generation-hwl0ch2j",
+      "resolved_target": ".context/deploy-cloud/659233082b701e32535352da96c39c81a9afa0368144e531a2dda1086e2f6283/campaigns/deploy-659233082b701e32535352da96c39c81a9afa0368144e531a2dda1086e2f6283/shared-inventory/inventory/.generation-hwl0ch2j",
+      "target_regular_files_selected": 311,
+      "status": "provisional; repeat after terminal signal"
+    }
+  ],
+  "archive_recipe": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+  "final_archive": "devbox-closeout-private/pr2406/20261116T1953Z-terminal-evidence-v1.tar.gz.aesgcm",
+  "finish": "Original failure and successful retry both selected",
+  "verification": "final-archive-verification.json"
+}

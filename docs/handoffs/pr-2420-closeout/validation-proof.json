@@ -1,0 +1,69 @@
+{
+  "observed_at": "2026-11-16T19:42:00.126265+00:00",
+  "head": "30558b794e25845d77a1b2b8537ea146d491c948",
+  "test_sha256": "128a2859a3f02f7d03e60ffe8b19943b24b7eecfd9c9bb56e8191d68e4617c5e",
+  "baseline_sha256": "54c31dc62cfa3a31408a076063493cc6b173958b52a63c2ff56491fbef3ae337",
+  "baseline_matches_main": true,
+  "before": {
+    "command": "source agents/venv/bin/activate && IFRAME_TEST_SOURCE=/tmp/iframe-rca/main_sbav3.py python /tmp/iframe-rca/source-viz-stall.py 8",
+    "failures": 8,
+    "trials": 8,
+    "native_exit": 1
+  },
+  "after": {
+    "command": "source agents/venv/bin/activate && IFRAME_TEST_SOURCE=agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py python /tmp/iframe-rca/source-viz-stall.py 8",
+    "failures": 0,
+    "trials": 8,
+    "native_exit": 0
+  },
+  "negative_control": {
+    "failures": 1,
+    "trials": 1,
+    "assertion": "AssertionError: (115, 136)",
+    "harness_exit": 0,
+    "note": "Legacy harness printed failure count but returned0; verdict read from native assertion, not process exit."
+  },
+  "stress": {
+    "head": "30558b794e25845d77a1b2b8537ea146d491c948",
+    "test_sha256": "128a2859a3f02f7d03e60ffe8b19943b24b7eecfd9c9bb56e8191d68e4617c5e",
+    "parallel": 12,
+    "load_workers": 12,
+    "passed": 36,
+    "failed": 0,
+    "process_exits": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "archive_searches": [
+    "iframe pointer hit-test",
+    "dom_service_cross_origin_iframe_coordinates_include_frame_offset"
+  ],
+  "classification": "recurrence of existing test race, relative of runtime iframe-offset case",
+  "golden_reference": "not applicable (no approval-gated hunk)",
+  "gate_attribution": "NOT_INTRODUCED relative to PR2289 head71f2cd2668 backend-only diff; assigned repair remains owned",
+  "native_source_harness": "Legacy loop.py returns0 on caught assertions; source-loop.py was corrected to return1 if any assertion failed. Both native assertion logs retained.",
+  "original_command": {
+    "command": "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py spawn-browser-agent-v3",
+    "native_exit": 0,
+    "summary": "Results: 1 passed, 0 failed (277.0s)",
+    "source": "30558b794e25845d77a1b2b8537ea146d491c948"
+  },
+  "log_hashes": {
+    "verified-baseline.log": "c2c6354770348d9006437dfae08b56798aff0fd8ffb6f3620b03991776ad7336",
+    "verified-fixed.log": "fc2bc868fd67a761891a2abc3d6bc300b5f0548e2a7e584686fa41fab61d4534",
+    "finalsource-original-command.log": "50755e9352ac55d5cf8352266f44a354b6e7cb8658759ed641093601f25732bb",
+    "finalsource-negative-control.log": "659130c2bff073a171a3ece49fcced65dee300317f22d9e9298e74ec3a621e8d",
+    "finalsource-stress.log": "7f5c1a500c4821f079acaedb5885bf269e0b7b0f5fb9a419bb978604b9e60af3"
+  }
+}

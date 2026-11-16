@@ -1,0 +1,11 @@
+{
+  "directory_count": 4675,
+  "files": 22412,
+  "marker_sha256": "f108fee15b40adf01a84e2dfc19a4795f6ec7a7d66cbeafc7461c9b84dde1c4c",
+  "namespace_hash_size_mode_and_identity_equal_after_stage": true,
+  "no_source_writer_scan_passed": true,
+  "original_bytes": 986007850,
+  "source_inventory_sha256": "87df389d5886c73e3d6c2164fd81b4ca69fe465ba0e3ba22361883cb2bb0516b",
+  "symlinks": 1,
+  "whole_filesystem_claim": false
+}

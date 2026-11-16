@@ -1,0 +1,38 @@
+{
+  "coderabbit": {
+    "status": "SKIPPED",
+    "reason": "organization usage spending cap",
+    "evidence": "https://github.com/Rose-Ai-Labs/rose/pull/2411#issuecomment-6924345035",
+    "merged_unreviewed_by_coderabbit": true
+  },
+  "independent_reviews": {
+    "death-independent-review.md": {
+      "sha256": "3d26e7baeba4885c90562d00fc931a664a47f9055f5adab700d6297a067e00bd",
+      "scope": "exact report retained in authenticated private archive; draft report retains findings resolved by final review where applicable"
+    },
+    "fe-independent-review.md": {
+      "sha256": "f2b165bfc957406d46c510ff062967d5f7b5aad9e388805c0cd80572f477a8e9",
+      "scope": "exact report retained in authenticated private archive; draft report retains findings resolved by final review where applicable"
+    },
+    "import-independent-review.md": {
+      "sha256": "6da790375417285ca0c2c5f3fb10709dc157a2e7650f4899dd85343bcee30af3",
+      "scope": "exact report retained in authenticated private archive; draft report retains findings resolved by final review where applicable"
+    },
+    "catalog-independent-review.md": {
+      "sha256": "0ee715355d11d921f30c4920f6a388b421e3ca6cfc9caac7cc544981c962365c",
+      "scope": "exact report retained in authenticated private archive; draft report retains findings resolved by final review where applicable"
+    },
+    "custody-independent-review.md": {
+      "sha256": "95c073d7df319c4e729b613dd8d123f977c1ee5a7ab81c9564424fd35523e838",
+      "scope": "exact report retained in authenticated private archive; draft report retains findings resolved by final review where applicable"
+    },
+    "prod-auth-independent-review.md": {
+      "sha256": "802e587a3e727abecef30ffe0db8932658272de2ebbbbcd5fce158ae6beb14a2",
+      "scope": "exact report retained in authenticated private archive; draft report retains findings resolved by final review where applicable"
+    },
+    "records-draft-independent-review.md": {
+      "sha256": "c2cf183d4b4a8c8121e1d4dfd9037ee0e302acebdddddfef02de576af5abe836",
+      "scope": "exact report retained in authenticated private archive; draft report retains findings resolved by final review where applicable"
+    }
+  }
+}

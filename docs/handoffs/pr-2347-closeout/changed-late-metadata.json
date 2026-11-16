@@ -1,0 +1,29 @@
+[
+  {
+    "path": "/tmp/phone2347-preservation/final/HANDOFF.md",
+    "sha256": "e84c547864d290de1469560ecb4eb89d6ea3fb24991fa7b7506c5215e40abc24",
+    "bytes": 6624,
+    "embedded_final_version": false,
+    "private": false
+  },
+  {
+    "path": "/tmp/phone2347-preservation/final/redundant-verifier-cancellation.json",
+    "sha256": "750ec0e6054737b2116926cab8c2e774f32050d919c385a1faaacfb37253c4eb",
+    "bytes": 633,
+    "embedded_final_version": false,
+    "private": false
+  },
+  {
+    "path": "/tmp/phone2347-preservation/final/verification-status.json",
+    "sha256": "ad43c0ae3dcce6cba9c87520250ab0f954013fb96a2984889bf613fb76ad00d2",
+    "bytes": 266,
+    "embedded_final_version": false,
+    "private": false
+  },
+  {
+    "path": "/tmp/phone2347-preservation/final/late-proof-artifacts.json",
+    "sha256": "209502fc753c92ac3b029126cc89e712c2648cd3771eb25ca063a8c7265179bb",
+    "bytes": 7641,
+    "reason": "updated late artifact index"
+  }
+]

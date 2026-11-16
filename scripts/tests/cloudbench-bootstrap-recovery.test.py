@@ -25,6 +25,8 @@ OWNER, MACHINE, VOLUME = "a" * 32, "b" * 14, "vol_bootstrap123"
 RUN, BENCH, APP = "20261006-bootstrap", "browser-event-ticket", "navi-whisper-lux-bench"
 TOKEN, CLONE = OWNER + "-0", "cloudbench-bootstrap123"
 REPO = Path(os.environ.get("ROSE_BOOTSTRAP_TEST_REPO", str(ROOT.parent))).resolve()
+sys.path.insert(0, str(REPO / "agents"))
+from benchmarks.fixture_controller_checkout import isolated_controller_checkout
 REF = subprocess.check_output(
     ["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True
 ).strip()
@@ -64,7 +66,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=self.base) as temporary:
             directory = Path(temporary)
             ready, release = directory / "entry-ready", directory / "entry-release"
-            environment = os.environ.copy()
+            environment = dict(self.controller_environment)
             for key in tuple(environment):
                 if key.startswith("CLOUDBENCH_SCRIPT_SNAPSHOT"):
                     environment.pop(key)
@@ -77,7 +79,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
             )
             with tempfile.TemporaryFile() as output:
                 controller = subprocess.Popen(
-                    ["bash", str(ROOT / "run-bench-fleet"), "--help"],
+                    ["bash", str(self.controller_entry), "--help"],
                     env=environment,
                     stdout=output,
                     stderr=subprocess.STDOUT,
@@ -109,6 +111,9 @@ class BootstrapRecoveryTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
+        self.controller_entry, self.controller_environment = self.enterContext(
+            isolated_controller_checkout(REPO, self.base / "controller-checkout")
+        )
         self.registry, self.audit = (
             self.base / "owners" / OWNER,
             self.base / "audit" / OWNER,
@@ -667,7 +672,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
         """The real sealed entrypoint must carry the recovery consumer's reader."""
         snapshot_temp=self.base/'native-reader-snapshot';snapshot_temp.mkdir()
         ready,release=self.base/'reader-ready',self.base/'reader-release'
-        environment=os.environ.copy()
+        environment=dict(self.controller_environment)
         for key in tuple(environment):
             if key.startswith('CLOUDBENCH_SCRIPT_SNAPSHOT'):
                 environment.pop(key)
@@ -676,7 +681,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
             CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_READY=str(ready),
             CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_RELEASE=str(release))
         with tempfile.TemporaryFile() as output:
-            controller=subprocess.Popen(['bash',str(ROOT/'run-bench-fleet'),'--recover-stale-owner','invalid-token'],env=environment,stdout=output,stderr=subprocess.STDOUT)
+            controller=subprocess.Popen(['bash',str(self.controller_entry),'--recover-stale-owner','invalid-token'],env=environment,stdout=output,stderr=subprocess.STDOUT)
             try:
                 deadline=time.monotonic()+30
                 while not ready.exists() and controller.poll() is None and time.monotonic()<deadline:
@@ -712,7 +717,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
         snapshot_temp = self.base / "native-snapshot-temp"
         snapshot_temp.mkdir()
         ready, release = self.base / "entry-ready", self.base / "entry-release"
-        environment = os.environ.copy()
+        environment = dict(self.controller_environment)
         for key in tuple(environment):
             if key.startswith("CLOUDBENCH_SCRIPT_SNAPSHOT"):
                 environment.pop(key)
@@ -725,7 +730,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
         )
         with tempfile.TemporaryFile() as output:
             controller = subprocess.Popen(
-                ["bash", str(ROOT / "run-bench-fleet"), "--help"],
+                ["bash", str(self.controller_entry), "--help"],
                 env=environment,
                 stdout=output,
                 stderr=subprocess.STDOUT,

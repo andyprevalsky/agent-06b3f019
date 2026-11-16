@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "access": "create",
+  "target": {
+    "kind": "current"
+  },
+  "membership": {
+    "placementId": "p176e8etpg9khvztt9ep42ee858jasxz",
+    "primaryInstanceId": "0f8c2d78-3043-4af0-89bd-eb53f8500a5c",
+    "executionInstanceId": "8d2c39ec-8711-4858-aeeb-c78e403a5e89",
+    "folderId": "z57k17gzz4egv17ag6qqtasexs8h273j",
+    "folderRevision": 1
+  }
+}

@@ -2742,6 +2742,25 @@ async def purge_owner_lifecycle_records(base_url: str, agent_id: str) -> None:
     print(f"    🧹 Purged {resp.json().get('purged')} settled probe purchase record(s) from the owner account")
 
 
+async def purge_owner_purchase_probe_records(base_url: str, agent_id: str, task: BenchmarkTask) -> None:
+    """Clear the owner purchase probe's settled records before agent deletion, whatever the grade.
+
+    The abandon probe purges in ensure_payment_lifecycle_cleanup. Deleting the agent first would
+    orphan the purchase (agentId SET NULL) beyond the agent-scoped purge route. The backend keeps
+    any record whose money is still in flight, and the run JSON already holds the lifecycle.
+    """
+    if (
+        not agent_id
+        or task.name not in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES
+        or task.payment_card_request_action == "abandon"
+    ):
+        return
+    try:
+        await purge_owner_lifecycle_records(base_url, agent_id)
+    except httpx.HTTPError as exc:
+        print(f"    ⚠ Owner lifecycle probe records NOT purged: {exc}")
+
+
 async def _preflight_close_purchase_reuse_gate(base_url: str) -> None:
     """Close leftover HELD $1 lifecycle-probe cards so this run must request payment_approval.
 
@@ -16712,6 +16731,8 @@ async def _run_single_task_as_run_user(
                 f"routes={','.join(result.prompt_cache_routes) or 'none'} "
                 f"floor={route_cache_floor(task.name, result.prompt_cache_routes)}"
             )
+
+        await purge_owner_purchase_probe_records(base_url, agent_id, task)
 
         # Clean up: delete the agent now that we've collected all data, unless
         # the caller explicitly wants failed agents kept alive for diagnostics.

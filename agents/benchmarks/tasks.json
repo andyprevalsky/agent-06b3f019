@@ -958,9 +958,9 @@
     "name": "background-agent-message-smoke",
     "quarantine": {
       "since": "2026-11-16",
-      "repair": "pending-handoff:3824b0e2c79a485885f6d2ab5998244b",
-      "error": "Timeout after 183s (task timeout=180s) | Agent status: ACTIVE (expected COMPLETED); first native attempt FAILED, single same-source automatic rerun PASS (FLAKY).",
-      "evidence": "PR2404 source6694 original root7de4c80d; exact baseline770611/current6694 schema-getter/client/verifier/routing/180s poll replay; .context/schema-repair/background-smoke-rca/investigation/REPORT.md; private-preservation/pr2404/background-smoke-attribution-20261116T2043Z.tar.gz.gcm"
+      "repair": "https://boxes.dev/thread/ph726rz537t23hzq6ec6e0ye018jbmh6",
+      "error": "Timeout after 183s (task timeout=180s) | Agent status: ACTIVE (expected COMPLETED); additional PR2404 first native FAIL followed by single same-source automatic PASS (FLAKY), occurrence3824b0e2c79a485885f6d2ab5998244b.",
+      "evidence": "PR #2358 deploy smoke agent 4bdfc1f6-0c74-4042-9931-d5010b657d48: 18 live rose-1-ultra LLM spans totalled 191 s (execute_loop iteration 8 call cancelled at 45 s by the task deadline); 0 Prisma errors; the PR's only changed path (runReadOnlyTransactionWithRetry) never executed. Rerun on the same source passed. Additional retained occurrence: PR2404 source6694 original root7de4c80d; exact baseline770611/current6694 schema-getter/client/verifier/routing/180s poll replay; .context/schema-repair/background-smoke-rca/investigation/REPORT.md; private-preservation/pr2404/background-smoke-attribution-20261116T2043Z.tar.gz.gcm; exact new packet delivery remains pending until confirmed PR2404 merge."
     },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
@@ -7788,6 +7788,12 @@
   },
   {
     "name": "claude-code-agent",
+    "quarantine": {
+      "since": "2026-11-16",
+      "repair": "https://boxes.dev/thread/ph7dx37apma4a6zctsmff7snvn8jbhy7",
+      "error": "Timeout after 304s (task timeout=300s) | Investigate: python agents/benchmarks/agent_latency.py b1ca94e7-83aa-4358-9768-204b5748aabd | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR #2407 native smoke FLAKY 0cfdb15f797a4ff59d817905cf623e23; original .context/deploy-pipeline/attempts/2/initial/smoke; RCA https://boxes.dev/thread/ph709m01dn2cyaj9tr19rgwq4d8jbcb8"
+    },
     "title": "Claude Code Sandbox",
     "prompt": "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27. Print every number in the sequence until it reaches 1, and print the total count of steps.",
     "timeout_seconds": 300,
@@ -9141,8 +9147,8 @@
     "quarantine": {
       "since": "2026-11-16",
       "repair": "https://boxes.dev/thread/ph7dks458a5md98rqzhab8wafn8jaypb",
-      "error": "Agent status: COST_LIMIT_REACHED (expected COMPLETED)",
-      "evidence": "PR #2279 deploy 15ec855ebe smoke: first attempt (agent 51abff93-c92b-463a-8e60-0e2fc41af2fc) reached COST_LIMIT_REACHED at 147 cents / 229 s after 80 moonshotai/kimi-k3 browser-model calls (77 RoseInvalidRequest route fall-throughs); single rerun on the same source COMPLETED at 38 cents / 137 s with 26 calls (FLAKY). Not introduced: the diff only closes Rose archive records on exceptional exits and relabels a backend phone-verifier archive call_site."
+      "error": "Agent status: COST_LIMIT_REACHED (expected COMPLETED) || Timeout after 420s (task timeout=420s)",
+      "evidence": "PR #2279 deploy 15ec855ebe smoke: first attempt (agent 51abff93-c92b-463a-8e60-0e2fc41af2fc) reached COST_LIMIT_REACHED at 147 cents / 229 s after 80 moonshotai/kimi-k3 browser-model calls (77 RoseInvalidRequest route fall-throughs); single rerun on the same source COMPLETED at 38 cents / 137 s with 26 calls (FLAKY). Not introduced: the diff only closes Rose archive records on exceptional exits and relabels a backend phone-verifier archive call_site. [COST_LIMIT occurrence: de7a09b9a72047a4a25d7502027d2245] || PR #2289 smoke FLAKY occurrence dde1843d76714899ba2cff244c0a6541 on ce6d88652e (agent 7d335a40 ACTIVE at 420 s; same-ref rerun passed); PR diff (back-end worker-deployment-queue only) does not reach this task per select_affected_tests; PR #2289 timeout repair owner: https://boxes.dev/thread/ph77fvbp3fna54x71mn0523e2d8jaxc1"
     },
     "title": "Browser Biometrics WebDecoy",
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",

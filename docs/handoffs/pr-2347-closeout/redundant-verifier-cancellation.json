@@ -1,0 +1,16 @@
+{
+  "pid": 3420119,
+  "birth_ticks": "13986129",
+  "ppid": 3420118,
+  "cmd": ["python3", "/tmp/phone2347-preservation/final/verify-independent.py"],
+  "cwd": "/home/boxes/rose",
+  "uid": 1002,
+  "owner_shell_cmd": "/bin/bash -c python3 /tmp/phone2347-preservation/final/verify-independent.py > /tmp/phone2347-preservation/final/verification.log 2>&1 ",
+  "authorization": "Explicit user amendment; only owned redundant PID3420119",
+  "signal": "SIGTERM",
+  "result": "CANCELLED",
+  "owner_shell_exit_code": 143,
+  "verifier_absent": true,
+  "owner_shell_absent": true,
+  "optimized_verifier_result": "PASS (unchanged)"
+}

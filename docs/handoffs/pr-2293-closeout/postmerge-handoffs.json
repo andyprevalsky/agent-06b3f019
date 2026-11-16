@@ -1,0 +1,37 @@
+{
+  "originating_merge": "1ac75606167f7973aeb63f983eedfa8aed2c3775",
+  "delivered_at": "2026-11-16T09:16:41.222240+00:00",
+  "repairs": [
+    {
+      "occurrence": "909d3b3614724842a6a17f54e04a0ef7",
+      "test": "C15 per-account usage-limit account-order fixture",
+      "url": "https://boxes.dev/thread/thr_5447e3f5e7c04372acb9f3b05b3144f1",
+      "thread_id": "ph7c6089q8dehvrx4ztee7wz4n8jbwhb",
+      "devbox_id": "a3d15e37-9412-4b50-9e2e-cb1206fe574a",
+      "different_devbox": true,
+      "folder": "Bugs",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "speed": "standard"
+    },
+    {
+      "occurrence": "4cb7636d7f1d4792b51743551e888478",
+      "test": "iPhone setup-verifier positive Keychain outlier",
+      "url": "https://boxes.dev/thread/thr_936e5f263b93487ca3480f41deb517c8",
+      "thread_id": "ph76kqk82ks6cx41scbxjf70698jb4fz",
+      "devbox_id": "2d790d20-1893-4cdb-bfe0-12c0b38ab563",
+      "different_devbox": true,
+      "existing_matched_owner": true,
+      "folder_requirement": "Full delivered goal requires Bugs self-verification before continuation; prior original goal already required same.",
+      "matched_pr": 2355,
+      "folder": "Bugs",
+      "folder_confirmation": "Existing owner direct reply confirms devbox2d790d20 inBugs, not parent726b25a4. Received full4cb7636d goal; owns samecause.",
+      "owner_followup_pr": "https://github.com/Rose-Ai-Labs/rose/pull/2385",
+      "owner_class_fix_pr": "https://github.com/Rose-Ai-Labs/rose/pull/2355",
+      "owner_reported_class_fix_merge": "99ca195f9c",
+      "acknowledgement_observed_at": "2026-11-16T09:23:34.066443+00:00"
+    }
+  ],
+  "scope": "Additional failures only; assigned browser-chip repaired and unquarantined in PR2293.",
+  "no_acknowledgement_or_repair_completion_wait": true
+}

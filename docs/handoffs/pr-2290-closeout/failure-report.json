@@ -1,0 +1,33 @@
+{
+  "failures": [
+    {
+      "id": "rca118-production-live-successor-multiline-report",
+      "description": "Production Fly verifier cannot parse the actual multiline monitor report for a qualified successor; native Fly FAIL and dependent semantic prerequisite refusal remain preserved.",
+      "evidence": "Compared source96d and currentmain780ec1, native production failures and actual AST replay: /tmp/rca-118fff32-fly-production-rca/current-tools-failure/receipt.json; owner read and delivered postmerge packet receipts plus source comparison in repair-ancestry-proof.json. No original root mutation, replacement cutover, rollback or queue change.",
+      "native_result": "FAIL",
+      "attribution": "NOT_INTRODUCED",
+      "repair_agent": "https://boxes.dev/thread/thr_af17783e8a81484fa1d67ddad36f5440",
+      "test": "scripts/deploy production / Fly monitor report parser",
+      "command": "/tmp/rca-118fff32/run-profile.sh scripts/deploy_cli.py production --sha cc7a39b2846aa385320386bbb1374e74c989e6a4 --state-dir .context/deploy-pipeline",
+      "source": "780ec1dc547dcca4cf9aabd09634c9c4a4c4ac7e",
+      "originating_merge": "cc7a39b2846aa385320386bbb1374e74c989e6a4",
+      "repair_devbox": "9c9a144d-9731-482b-8084-2fa75f582596",
+      "handoff_delivery": "peer_007bff4a1bc0d816da1baaf23b627e98f47d304b8ca2cc617abe10bd89b77a6c",
+      "qualifications": "Existing owner owns full original failed gate and dependent checks; head0b971 did not yet contain originating merge, evidence/instruction delivered for authorized integration. Parent cannot inspect other devbox folder; owner instructed to retain Bugs membership proof. Successful delivery completes handoff under controlling policy; no acknowledgement/completion wait. Original native statuses are not PASS.",
+      "disposition": "delegated / waived"
+    },
+    {
+      "id": "rca118-coderabbit-final96d-organization-cap",
+      "description": "CodeRabbit organization spending cap on exact final runtime source; native usage-cap review skip, release merged unreviewed by CodeRabbit.",
+      "evidence": "Native skip: /tmp/rca-118fff32-review96d/summary.md, decision.json and native-skip-ready.json; neutral check133177604316 and exact-head bot comment6906518948.",
+      "native_result": "SKIPPED-usage-cap",
+      "attribution": "NOT_INTRODUCED",
+      "external_provider": {
+        "name": "CodeRabbit",
+        "reason": "credits exhausted"
+      },
+      "source": "96d12280d3438f764b0c098ab4f9547eb763b3fd",
+      "disposition": "external / waived"
+    }
+  ]
+}

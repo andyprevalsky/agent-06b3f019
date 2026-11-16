@@ -60,6 +60,28 @@ function gpDetail(overrides: Partial<AgentDetail> = {}): AgentDetail {
 }
 
 describe('SubAgentBreadcrumb (hub / archived sub-agents)', () => {
+  it('keeps the ancestor chain and owner clickable while a coding session is current', async () => {
+    const onSelectAgent = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <SubAgentBreadcrumb
+        ancestors={[{ id: 'root-1', goal: 'Root goal' }]}
+        agentDetail={gpDetail()}
+        codeAgentTitle="verify_project"
+        onSelectAgent={onSelectAgent}
+        dripStyles={dripStyles}
+        blur={0}
+      />,
+    );
+    const nav = screen.getByRole('navigation', { name: 'Agent breadcrumb' });
+    expect(nav).toHaveTextContent('Root goal');
+    expect(screen.getByText('verify_project')).toHaveAttribute('aria-current', 'page');
+    await user.click(screen.getByRole('button', { name: 'Root goal' }));
+    expect(onSelectAgent).toHaveBeenLastCalledWith('root-1');
+    await user.click(screen.getByRole('button', { name: gpDetail().goal }));
+    expect(onSelectAgent).toHaveBeenLastCalledWith('gp-1');
+  });
+
   it('synthesizes a clickable parent crumb when the ancestors API is empty', async () => {
     const onSelectAgent = vi.fn();
     const user = userEvent.setup();
