@@ -104,7 +104,11 @@ export const verifyPhoneCredential: CredentialVerifier = async (input) => {
       },
     },
     dump_context: {
-      call_site: 'phone_saved_credential_binding',
+      // Same label the ledger bills the call under (service.passcode.ts / service.savedCredential.ts).
+      call_site:
+        input.purpose === 'device_passcode'
+          ? 'phone_device_passcode_binding'
+          : 'phone_saved_credential_binding',
       agent_id: input.agentId,
       archive_scope: { agentId: input.agentId },
     },

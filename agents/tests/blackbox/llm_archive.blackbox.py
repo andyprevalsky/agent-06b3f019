@@ -1049,6 +1049,50 @@ async def test_consumer_stopping_after_done_still_archives_output():
     assert len(finals) == 1 and finals[0]["output"]["content"] == "complete", finals
 
 
+async def test_cancelled_or_closed_call_archives_partial_output():
+    """A call cancelled mid-stream (Temporal activity cancellation) or closed before `done`
+    still closes its record with the streamed output, marked cancelled (waiver W1)."""
+    from providers.rose import RoseClient
+
+    sse = _sse(
+        [
+            {"choices": [{"delta": {"content": "partial"}}]},
+            {"choices": [{"delta": {"content": " rest"}, "finish_reason": "stop"}]},
+            {"usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}},
+        ]
+    )
+    set_mock_handler(lambda request: httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"}))
+    results = {}
+    with _archive(clickhouse=False) as (root_dir, _), patch.dict(os.environ, {"CEREBRAS_API_KEY": ""}):
+        os.environ.pop("CEREBRAS_API_KEY", None)
+        for root, stop in (("root-cancelled", "cancel"), ("root-closed", "close")):
+            stream = RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-flash",
+                messages=[{"role": "user", "content": "hi"}],
+                agent_id=root,
+                call_site="context_compression",
+            )
+            async for chunk in stream:
+                if chunk.kind == "content":
+                    break
+            if stop == "cancel":
+                try:
+                    await stream.athrow(asyncio.CancelledError("Activity cancelled"))
+                except asyncio.CancelledError:
+                    pass
+                else:
+                    raise AssertionError("cancellation must propagate to the caller")
+            else:
+                await stream.aclose()
+            results[root] = _read(root_dir, root, "llm-updates")
+    teardown_mock()
+    for root, finals in results.items():
+        assert len(finals) == 1, (root, finals)
+        output = finals[0]["output"]
+        assert output["content"].startswith("partial"), (root, output)
+        assert "cancel" in json.dumps(output["error"]).lower(), (root, output["error"])
+
+
 def test_nonprod_r2_publication_requires_explicit_opt_in():
     """A dev/test process never publishes traces to R2 unless TRACE_ARCHIVE_ALLOW_NONPROD_R2=1."""
     import helpers.trace_archive as trace_archive
@@ -1150,6 +1194,9 @@ async def run_all_tests():
     r.record("legacy_world_server_binds_session_root", test_legacy_world_server_binds_session_root_in_step)
     await r.record_async(
         "consumer_stop_after_done_keeps_output", test_consumer_stopping_after_done_still_archives_output
+    )
+    await r.record_async(
+        "cancelled_or_closed_call_keeps_partial_output", test_cancelled_or_closed_call_archives_partial_output
     )
     r.record("nonprod_r2_requires_opt_in", test_nonprod_r2_publication_requires_explicit_opt_in)
     teardown_mock()
