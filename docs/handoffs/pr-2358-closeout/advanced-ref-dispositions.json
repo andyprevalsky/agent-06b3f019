@@ -1,0 +1,38 @@
+{
+  "source_merge": "a3944cd513b8a7771b86716156ab7fb26e01d7da",
+  "proof": [
+    {
+      "captured_ref": "refs/heads/fix/read-only-tx-timeout-regression",
+      "captured_tip": "3683b914ad93dbbad9e4cf1905131c85594d85c8",
+      "previous_tip": "2074c321c5775bc50f4f7ced53d0fb0fae5a348a",
+      "durable_remote_ref": "refs/heads/fix/read-only-tx-timeout-regression",
+      "observed_remote_tip": "3683b914ad93dbbad9e4cf1905131c85594d85c8",
+      "captured_tip_ancestor_of_remote": true
+    },
+    {
+      "captured_ref": "refs/remotes/origin/HEAD",
+      "captured_tip": "4e3525b222dfcd774cbaa81bb57a5581c2e1966a",
+      "previous_tip": "f47873fc36d8b0eea22182c5970b981f3a387a0a",
+      "durable_remote_ref": "refs/heads/main",
+      "observed_remote_tip": "f14f0cc030f288d2212c8d76acdd63043a3ed679",
+      "captured_tip_ancestor_of_remote": true
+    },
+    {
+      "captured_ref": "refs/remotes/origin/fix/read-only-tx-timeout-regression",
+      "captured_tip": "3683b914ad93dbbad9e4cf1905131c85594d85c8",
+      "previous_tip": "2074c321c5775bc50f4f7ced53d0fb0fae5a348a",
+      "durable_remote_ref": "refs/heads/fix/read-only-tx-timeout-regression",
+      "observed_remote_tip": "3683b914ad93dbbad9e4cf1905131c85594d85c8",
+      "captured_tip_ancestor_of_remote": true
+    },
+    {
+      "captured_ref": "refs/remotes/origin/main",
+      "captured_tip": "4e3525b222dfcd774cbaa81bb57a5581c2e1966a",
+      "previous_tip": "f47873fc36d8b0eea22182c5970b981f3a387a0a",
+      "durable_remote_ref": "refs/heads/main",
+      "observed_remote_tip": "f14f0cc030f288d2212c8d76acdd63043a3ed679",
+      "captured_tip_ancestor_of_remote": true
+    }
+  ],
+  "later_records_branch": "Pushed and merged by the records PR; native deletion checker verifies no local-only commits. Source branch is retained."
+}

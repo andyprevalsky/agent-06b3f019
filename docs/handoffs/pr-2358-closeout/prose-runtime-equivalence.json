@@ -1,0 +1,8 @@
+{
+  "source_before": "2074c321c5775bc50f4f7ced53d0fb0fae5a348a",
+  "path": "back-end/src/providers/database.ts",
+  "typescript_version": "5.9.3",
+  "emitted_javascript_identical": true,
+  "emitted_sha256": "5273030a4dc440203081473202b0b89f4f1e0d05f5790d7d3a686db5c61bb95a",
+  "scope": "Prose-only equivalence evidence, no substitute for native gate binding"
+}

@@ -1,0 +1,19 @@
+{
+  "repair_agent": "https://boxes.dev/thread/ph726rz537t23hzq6ec6e0ye018jbmh6",
+  "devbox": "a7762f0f-bd8d-4a82-ac1e-613eb58fabe8",
+  "origin_devbox": "886224d9-3005-42ea-89dc-88a795f30e9d",
+  "native_goal": "ACTIVE",
+  "folder": "z57k17gzz4egv17ag6qqtasexs8h273j",
+  "folder_revision": 1,
+  "verified_by": "actual repair-owner message and parent folders get",
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "requested_speed": "standard",
+  "service_tier": "UNVERIFIED (absent from native context)",
+  "source_main": "b76525adf8c0249e89df45079b59b713c85b76e1",
+  "origin_merge": "a3944cd513b8a7771b86716156ab7fb26e01d7da",
+  "origin_merge_ancestry_verified": true,
+  "original_private_archive_restored_authenticated_files": 2156,
+  "native_pending_post_merge": 0,
+  "checked_at": "2026-11-16T18:40:28.794107+00:00"
+}
