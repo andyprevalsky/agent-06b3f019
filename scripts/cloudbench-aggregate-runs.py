@@ -87,9 +87,31 @@ def _display_status(task: dict) -> str:
     status = str(task.get("benchmark_status") or task.get("status") or "").upper()
     if status == "SKIPPED":
         return "skipped"
-    if status in {"INFRA_ERROR", "ERROR", "CANCELLED"}:
+    if status in {"INFRA_ERROR", "ERROR", "CANCELLED", "CAPACITY_DEFERRED"}:
         return "error"
     return "failed"
+
+
+def _capacity_deferral(fleet_dir: Path) -> str | None:
+    """The controller's own pre-provider capacity deferral reason, if recorded.
+
+    run-bench-fleet writes this marker only when its bounded wait for the
+    emergency teardown disk reserve expired before any provider mutation.
+    Anything unreadable or malformed keeps the INFRA_ERROR projection.
+    """
+    marker = fleet_dir / "_batch/capacity-deferred.json"
+    try:
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 4096:
+            return None
+        value = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        return None
+    wait = value.get("wait_seconds") if isinstance(value, dict) else None
+    if (value.get("schema") != "cloudbench-capacity-deferred-v1" or value.get("reason") != "cleanup_disk_reserve"
+            or type(wait) is not int or wait < 0):
+        return None
+    return (f"local disk could not hold the emergency teardown reserve within the {wait}s capacity wait; "
+            "no provider mutation (capacity, not infrastructure)")
 
 
 def _optional_number(value) -> float | None:
@@ -274,6 +296,7 @@ def aggregate(
     else:
         expected_modes = {}
     tasks: list[dict] = []
+    deferral = _capacity_deferral(fleet_dir)
     for bench in benches:
         name = str(bench["name"])
         path = fleet_dir / name / "cloudbench-run.json"
@@ -285,6 +308,8 @@ def aggregate(
                 "failure_reason": "no current run artifact produced",
                 "lifecycle_stage": _lifecycle_stage(fleet_dir / name),
             }
+            if deferral is not None:
+                missing_task.update(status="CAPACITY_DEFERRED", failure_reason=deferral)
             if expected_execution_provenance is not None:
                 missing_task["execution_provenance"] = expected_execution_provenance
                 missing_task["world_model_mode"] = expected_modes[name]

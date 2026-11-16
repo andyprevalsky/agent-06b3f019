@@ -18,14 +18,83 @@ import tarfile
 from pathlib import Path, PurePosixPath
 
 
+# A guest seals run.json and its whole runtime bundle up to the status
+# server's MAX_RECOVERY_RUN_BYTES; this consumer must admit what that producer
+# admits (a real Polar run.json was 95-206 MiB, above an older 64 MiB bound).
+RUN_RECORD_MAX_BYTES = 512 * 1024 * 1024
+# The forensic packet retains every guest's originals, so its bound scales with
+# the guests it covers: one producer runtime budget per primary and worker.
+GUEST_EVIDENCE_MAX_BYTES = 512 * 1024 * 1024
+# Producer bound in run-bench-fleet cloudbench_preserve_unlaunched_worker.
+UNLAUNCHED_STAGE_LOG_MAX_BYTES = 2 * 1024 * 1024
+
+
 def regular_bytes(path: Path, limit: int) -> bytes:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
-        assert stat.S_ISREG(info.st_mode) and info.st_size <= limit
+        assert stat.S_ISREG(info.st_mode), f"not a regular file: {path}"
+        assert info.st_size <= limit, f"{path}: {info.st_size} bytes exceeds the {limit}-byte bound"
         data = stream.read(info.st_size + 1)
         assert len(data) == info.st_size
         return data
+
+
+def regular_sha256(path: Path, limit: int) -> str:
+    """Stream one exact regular file's digest; memory stays independent of size."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        assert stat.S_ISREG(before.st_mode), f"not a regular file: {path}"
+        assert before.st_size <= limit, f"{path}: {before.st_size} bytes exceeds the {limit}-byte bound"
+        digest, left = hashlib.sha256(), before.st_size
+        while left:
+            block = stream.read(min(left, 1048576))
+            assert block, f"{path} ended early"
+            digest.update(block)
+            left -= len(block)
+        assert not stream.read(1), f"{path} grew while hashing"
+        after = os.fstat(stream.fileno())
+        assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+        return digest.hexdigest()
+
+
+def forensic_archive_limit(guests: int) -> int:
+    assert type(guests) is int and 1 <= guests <= 8192
+    return GUEST_EVIDENCE_MAX_BYTES * guests
+
+
+def verify_unlaunched_worker(out: Path, machine: str, primary: str, token: str) -> dict[str, bytes]:
+    """Return the complete originals of an autoscaler worker that never launched.
+
+    The fleet seals not-launched.json only for an inert clone whose wrapper was
+    never launched (cloudbench_preserve_unlaunched_worker), so the worker has no
+    runtime evidence by construction. Its owner receipt, sealed receipt and the
+    exact stage log that receipt binds are its whole evidence; any capture or
+    launch marker means it is not this case.
+    """
+    base = out / "worker-runtime-evidence" / machine
+    assert base.is_dir() and base.resolve(strict=True) == base
+    assert {entry.name for entry in base.iterdir()} == {"owner.json", "not-launched.json"}, (
+        f"never-launched worker {machine} has other evidence")
+    owner_bytes = regular_bytes(base / "owner.json", 1048576)
+    receipt_bytes = regular_bytes(base / "not-launched.json", 1048576)
+    stage = regular_bytes(out / f"worker-{machine}.stage.log", UNLAUNCHED_STAGE_LOG_MAX_BYTES)
+    owner, receipt = json.loads(owner_bytes), json.loads(receipt_bytes)
+    assert isinstance(owner, dict) and all(owner.get(key) == value for key, value in {
+        "version": 1, "machine_id": machine, "primary_machine_id": primary,
+        "run_token": token}.items()), f"worker {machine} owner receipt is foreign"
+    assert receipt == dict(owner, worker_started=False,
+                           stage_sha256=hashlib.sha256(stage).hexdigest()), (
+        f"worker {machine} not-launched receipt does not bind its original stage log")
+    assert b"launch worker wrapper" not in stage, f"worker {machine} wrapper launched"
+    for marker in (f"worker-{machine}.ready", f"worker-{machine}.launch-attempted"):
+        assert not os.path.lexists(out / marker), f"worker {machine} has {marker}"
+    ready = out / "worker-ready.ids"
+    if os.path.lexists(ready):
+        assert machine not in regular_bytes(ready, 1048576).decode().split(), (
+            f"worker {machine} was reported ready")
+    return {"owner.json": owner_bytes, "not-launched.json": receipt_bytes, "stage.log": stage}
 
 
 def fields(path: Path) -> dict[str, str]:
@@ -549,6 +618,11 @@ def verify_pool_worker_evidence(
             "version": 1, "machine_id": machine,
             "primary_machine_id": original["source_machine_id"],
             "run_token": f"{owner}-{ordinal}"}.items())
+        if os.path.lexists(base / "not-launched.json"):
+            originals = verify_unlaunched_worker(
+                run / task, machine, original["source_machine_id"], f"{owner}-{ordinal}")
+            worker_hashes.append(hashlib.sha256(originals["not-launched.json"]).hexdigest())
+            continue
         capture = base / "capture"
         worker_contract["verify_directory"](
             capture, worker_contract["authority"](f"{owner}-{ordinal}", machine))
@@ -1168,8 +1242,8 @@ def verify_normal_primary_capture(
     assert row["files"]["normal-primary/manifest.json"] == info
     for name, capture_info in manifest["files"].items():
         assert row["files"]["repo/.context/cloudbench/" + name] == capture_info
-    canonical = regular_bytes(out / "cloudbench-run.json", 64 * 1024 * 1024)
-    assert canonical == regular_bytes(capture / "run.json", 64 * 1024 * 1024)
+    canonical = regular_bytes(out / "cloudbench-run.json", RUN_RECORD_MAX_BYTES)
+    assert canonical == regular_bytes(capture / "run.json", RUN_RECORD_MAX_BYTES)
     document = json.loads(canonical)
     assert not result["validate_run_document"](
         document, [row["task"]], expected_execution_provenance=provenance,
@@ -1340,9 +1414,9 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         else:
             # The normal collector clears pending only after publishing the
             # exact canonical result. A failed peer may still retain pending.
-            canonical = regular_bytes(out / "cloudbench-run.json", 64 * 1024 * 1024)
+            canonical = regular_bytes(out / "cloudbench-run.json", RUN_RECORD_MAX_BYTES)
             assert canonical == regular_bytes(
-                out / "remote-logs/runtime-evidence/run.json", 64 * 1024 * 1024)
+                out / "remote-logs/runtime-evidence/run.json", RUN_RECORD_MAX_BYTES)
             assert isinstance(json.loads(canonical), dict)
         if machine in retired_primaries:
             assert contracts is not None and row["services_status"] == "stopped"
@@ -1471,12 +1545,21 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         assert worker["task"] == parent["task"] and worker["run_token"] == parent["run_token"]
         assert worker["volume_id"] == original["volume_id"] and worker["proof_credit"] == 0
         base = run / parent["task"] / "worker-runtime-evidence" / machine
-        capture_manifest = object_file(base / "capture/manifest.json")
-        required_capture = {"capture/" + name for name in capture_manifest["files"]}
-        assert {"owner.json", "capture/manifest.json"} | required_capture <= set(worker["files"])
+        if worker.get("kind") == "not-launched":
+            # No runtime exists by construction; the archived originals must be
+            # exactly the receipts and stage log the shared verifier rechecks now.
+            originals = verify_unlaunched_worker(
+                run / parent["task"], machine, parent["machine_id"], parent["run_token"])
+            assert set(worker["files"]) == set(originals)
+        else:
+            assert "kind" not in worker
+            capture_manifest = object_file(base / "capture/manifest.json")
+            required_capture = {"capture/" + name for name in capture_manifest["files"]}
+            assert {"owner.json", "capture/manifest.json"} | required_capture <= set(worker["files"])
+            originals = None
         for relative, info in worker["files"].items():
             assert safe_name(relative)
-            data = regular_bytes(base / relative, 64 * 1024 * 1024)
+            data = originals[relative] if originals is not None else regular_bytes(base / relative, 64 * 1024 * 1024)
             assert info == {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
             member = f"_normal_workers/{machine}/{relative}"
             assert member not in expected_members
@@ -1492,7 +1575,8 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         expected_total += info["bytes"]
     assert expected_total == manifest["uncompressed_bytes"]
     assert archive_path.stat().st_size == manifest["archive_bytes"]
-    assert hashlib.sha256(regular_bytes(archive_path, 512 * 1024 * 1024)).hexdigest() == manifest["archive_sha256"]
+    guests = len(rows) + len(normal_rows) + len(unstarted_workers) + len(started_workers)
+    assert regular_sha256(archive_path, forensic_archive_limit(guests)) == manifest["archive_sha256"]
     seen = set()
     archived_services = {}
     archived_unstarted = {}

@@ -22,6 +22,8 @@ tags:
   - flake
   - deploy-gate
 sources:
+  - PR #2258
+  - commit 2d99b77abfd3ae2f23fbcb16e48ef9c3d41a702d
   - PR #2104
   - commit 31641a67091091fa3920a6049773281b827fd2aa
   - commit cf458ba660fa059c2378e7c545ce3275fe3646f2
@@ -95,6 +97,8 @@ the configured 1 s wait, `CAPACITY_ADMISSION_DEADLINE=10` and the 8 s join
 timeout are unchanged. The quarantine marker is removed. Budget expiry stays
 covered by the inventory contract test's `caller-deadline`, `expired-caller`
 and `stale-new-expires` cases. 10k agents: test-only change.
+
+Shipped in PR #2258 (merged 2d99b77abf, 2026-11-16); all 17 deploy gates passed on 8277c90e7e and production semantics passed (verified by descendant 530b71fe93).
 
 ## Human feedback
 

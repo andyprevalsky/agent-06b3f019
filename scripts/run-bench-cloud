@@ -4809,6 +4809,17 @@ cloudbench_skip_held_driver_teardown_race() {
         || [ "${CLOUDBENCH_SKIP_AUTOSCALER:-0}" = "1" ]
 }
 
+# Boot-launch members outside the held-driver paths take their terminal record
+# from the sealed runtime-evidence run.json, so the guest writes only that
+# record's identity into bench.log (0). Every other path reads the inline copy (1).
+cloudbench_inline_run_result() {
+    if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != 1 ] || cloudbench_skip_held_driver_teardown_race; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
 # Controller cleanup natively stops an owned guest that no party ever
 # delivered an authenticated /shutdown to. Its own request can fail merely
 # because this runner already delivered the stop and retired the proxy while
@@ -5778,6 +5789,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "BENCHMARK_PEAK_FLY_MACHINES=$OBSERVED_PEAK_FLY_MACHINES"
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
         --env "CLOUDBENCH_INFRA_PROBE=${CLOUDBENCH_INFRA_PROBE:-0}"
+        --env "CLOUDBENCH_INLINE_RUN_RESULT=$(cloudbench_inline_run_result)"
         --env "CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}"
         # Explicit (also when empty) so a pooled Machine never keeps an older run's value.
         --env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}"
@@ -6300,6 +6312,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export BENCHMARK_PEAK_FLY_MACHINES=$(printf '%q' "$OBSERVED_PEAK_FLY_MACHINES")"
     echo "export BENCHMARK_VM_USD_PER_HOUR=$(printf '%q' "$VM_USD_PER_HOUR")"
     echo "export CLOUDBENCH_INFRA_PROBE=$(printf '%q' "${CLOUDBENCH_INFRA_PROBE:-0}")"
+    echo "export CLOUDBENCH_INLINE_RUN_RESULT=$(cloudbench_inline_run_result)"
     echo "export CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=$(printf '%q' "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}")"
     echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf '%q' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"
     echo "export CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(printf '%q' "$(cloudbench_compute_token_authority_url)")"
