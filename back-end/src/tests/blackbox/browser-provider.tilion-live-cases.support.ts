@@ -21,12 +21,8 @@ import {
   navigateKernelPage,
   retryBackendFetch,
 } from './browser-provider.helpers';
-import {
-  LOCATION,
-  runLiveTilionProviderParity,
-  tilionApi,
-  withPage,
-} from './browser-provider.tilion-live.support';
+import { LOCATION, tilionApi, withPage } from './browser-provider.tilion-live.support';
+import { runQuarantinedLiveTilionProviderParity } from './browser-provider.tilion-parity.quarantine';
 
 const RECOVERY_URL = 'https://en.wikipedia.org/wiki/Web_browser';
 
@@ -255,7 +251,7 @@ export async function runLiveCrossProviderCases(): Promise<number> {
   const tilion = TILION_RESIDENTIAL_LIVE_OVERRIDE;
   const cases: Array<[string, () => Promise<void>, string | null]> = [
     ['live Kernel/Steel auth persist', () => runLiveKernelSteelAuthPersist('steel'), kernel],
-    ['live Tilion provider parity', runLiveTilionProviderParity, tilion],
+    ['live Tilion provider parity', runQuarantinedLiveTilionProviderParity, tilion],
     ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion'), tilion],
     ['live Tilion challenge recovery', runLiveTilionChallengeRecovery, tilion],
     ['live Tilion concurrency cap', runLiveTilionConcurrency, null],
