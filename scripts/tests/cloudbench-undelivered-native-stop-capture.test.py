@@ -21,6 +21,7 @@ inputs, as recovery does.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import copy
 import hashlib
@@ -730,6 +731,137 @@ cloudbench_recover_guest_cleanup_receipts {self.registry}
         self.assertEqual(status, self.helper["EXIT_REFUSED"], stderr)
         self.assertIn("not an exact verified pre-backend stop", stderr)
         self.assertEqual(self.state["mutations"], [])
+
+
+RETIREMENT = ROOT / "scripts/cloudbench-forensic-retirement.py"
+BUILDER = ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py"
+
+
+class PrebackendExitForensicArchive(unittest.TestCase):
+    """The recovered pre-backend guest's originals retire through the forensic archive.
+
+    stack.log is present and no driver cleanup ACK exists, so the pre-stack
+    archive contract cannot apply; the archive binds the exact pre-backend
+    native stop and zero-session recovery receipt instead.
+    """
+
+    setUp = UndeliveredNativeStopCapture.setUp
+    tearDown = UndeliveredNativeStopCapture.tearDown
+    main = UndeliveredNativeStopCapture.main
+    capture = UndeliveredNativeStopCapture.capture
+    write_native_stop = UndeliveredNativeStopCapture.write_native_stop
+    session = UndeliveredPrestackZeroProvider.session
+    recover_stopped_guest = UndeliveredPrestackZeroProvider.recover_stopped_guest
+    prepare = PrebackendExitNativeStop.prepare
+    publish = PrebackendExitNativeStop.publish
+
+    def recovered_owner(self) -> None:
+        """Record, capture and recover exactly as the stale-owner CLI does, then discharge the cleanup latch."""
+        env = self.original_config["env"]
+        env.update(CLOUDBENCH_FRESH_VOLUME="1", BENCH_TASKS_B64=base64.b64encode(BENCH.encode()).decode())
+        self.state["machines"][MACHINE]["config"] = copy.deepcopy(self.original_config)
+        self.prepare()
+        self.assertEqual(self.publish().returncode, 0)
+        status, _, stderr = self.capture()
+        self.assertEqual(status, 0, stderr)
+        steps = self.recover_stopped_guest()
+        self.assertEqual([step.returncode for step in steps], [0, 0, 0], [step.stderr for step in steps])
+        write(self.out / "guest-shutdown.confirmed", RUN_ID + "\n")
+        identity = json.dumps({"version": 1, "machine_id": MACHINE, "run_token": TOKEN})
+        write(self.out / "runtime-evidence.owner.json", identity)
+        write(self.out / "runtime-evidence.pending", identity)
+        meta = (self.registry / "meta").read_text().replace("cleanup_policy=retain", "cleanup_policy=reap")
+        write(self.registry / "meta", meta)
+        (self.registry / "guest-cleanup-unconfirmed").unlink()
+        write(self.registry / "runtime-evidence-unconfirmed", "")
+        write(self.run / "_batch/benches.json", json.dumps([{"name": BENCH}]))
+        write(self.run / "_batch/lifecycle.json", json.dumps({
+            "version": 1, "status": "failed", "fleet_owner_token": OWNER, "run_id": RUN_ID,
+            "controller_exit_code": 1}))
+        for name in ("execution-provenance.json", "execution-task-matrix.json"):
+            write(self.run / name, "{}")
+        write(self.tmp / "machines.json", "[]")
+        write(self.tmp / "volumes.json", "[]")
+
+    def build(self) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(BUILDER), "--registry", str(self.registry),
+                               "--capture-dir", str(self.capture_dir)], capture_output=True, text=True)
+
+    def verify(self) -> dict:
+        retirement = runpy.run_path(str(RETIREMENT))
+        packet = self.run / "_forensic"
+        return retirement["verify"](self.registry, self.run, packet / "manifest.json",
+                                    packet / "originals.tar.gz", self.tmp / "machines.json",
+                                    self.tmp / "volumes.json", archive_only=True)
+
+    def test_pre_backend_capture_builds_and_verifies_zero_credit_archive(self) -> None:
+        self.recovered_owner()
+        built = self.build()
+        self.assertEqual(built.returncode, 0, built.stderr)
+        row = json.loads((self.run / "_forensic/manifest.json").read_text())["tasks"][0]
+        self.assertEqual((row["phase"], row["services_status"], row["proof_credit"]),
+                         ("pre-backend-exit", None, 0))
+        self.assertIn("repo/.context/cloudbench/stack.log", row["files"])
+        self.assertIn(f"cloudbench-driver-clean-{TOKEN}.ack", row["missing"])
+        self.assertEqual(len(row["missing"]), len(set(row["missing"])))
+        self.assertIn("pre-backend-recovery-receipt.json", row["files"])
+        result = self.verify()
+        self.assertEqual((result["proof_credit"], result["incomplete_tasks"]), (0, 1))
+        # The verifier recomputes the zero-session proof from the retained evidence.
+        for name, change in (("guest-cleanup.state.json", dict(PREBACKEND_STATE, live_service_pids=[4242])),
+                             ("guest-cleanup.recovery-receipt.json", {"kind": "forged"})):
+            with self.subTest(changed=name):
+                original = (self.out / name).read_bytes()
+                write(self.out / name, json.dumps(change, sort_keys=True))
+                with self.assertRaises(Exception):
+                    self.verify()
+                write(self.out / name, original)
+        self.verify()
+
+    def test_backend_log_beside_the_capture_refuses_the_archive(self) -> None:
+        self.recovered_owner()
+        self.assertEqual(self.build().returncode, 0)
+        write(self.out / "guest-cleanup.backend.log", "[Server] Server started\n")
+        with self.assertRaises(Exception):
+            self.verify()
+
+    def test_without_pre_backend_stop_the_pre_stack_contract_still_refuses(self) -> None:
+        self.recovered_owner()
+        (self.out / "guest-native-stop.json").unlink()
+        built = self.build()
+        self.assertNotEqual(built.returncode, 0)
+        self.assertFalse((self.run / "_forensic/manifest.json").exists())
+
+    def test_failed_build_partial_is_preserved_and_does_not_block_the_retry(self) -> None:
+        self.recovered_owner()
+        native_stop = (self.out / "guest-native-stop.json").read_bytes()
+        (self.out / "guest-native-stop.json").unlink()
+        self.assertNotEqual(self.build().returncode, 0)
+        partial = (self.run / "_forensic/originals.tar.gz").read_bytes()
+        self.assertFalse((self.run / "_forensic/manifest.json").exists())
+        write(self.out / "guest-native-stop.json", native_stop)
+        built = self.build()
+        self.assertEqual(built.returncode, 0, built.stderr)
+        kept = self.run / f"_forensic.partial-{hashlib.sha256(partial).hexdigest()[:16]}"
+        self.assertEqual((kept / "originals.tar.gz").read_bytes(), partial)
+        self.assertEqual(self.verify()["proof_credit"], 0)
+        # A published packet is never moved aside by a plain build.
+        built = self.build()
+        self.assertNotEqual(built.returncode, 0)
+        self.assertIn("use --rebuild-existing", built.stderr)
+        self.assertTrue((self.run / "_forensic/manifest.json").is_file())
+
+    def test_pre_backend_phase_cannot_relax_a_row_with_service_files(self) -> None:
+        self.recovered_owner()
+        self.assertEqual(self.build().returncode, 0)
+        packet = self.run / "_forensic"
+        manifest = json.loads((packet / "manifest.json").read_text())
+        manifest["tasks"][0]["missing"].remove("repo/.context/cloudbench/logs/backend.log")
+        manifest["tasks"][0]["files"]["repo/.context/cloudbench/logs/backend.log"] = {
+            "bytes": 0, "sha256": hashlib.sha256(b"").hexdigest()}
+        (packet / "manifest.json").write_text(json.dumps(manifest))
+        with self.assertRaises(Exception):
+            self.verify()
 
 
 if __name__ == "__main__":

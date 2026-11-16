@@ -483,6 +483,8 @@ print('bounded 99999999 0',free//1024,'0% /bounded')
                     row["limit"] *= 100
                 (root / "provider-limits.json").write_text(json.dumps(limits))
                 env["CLOUDBENCH_PROVIDER_LIMITS_FILE"] = str(root / "provider-limits.json")
+                # It also exceeds the app delegating-guest ceiling; use the fleet's own override.
+                env["CLOUDBENCH_DELEGATING_PRIMARY_CEILING"] = "600"
             if mode == "fresh":
                 stamp = root / ".context/fleet-infra-canary.last-pass"
                 stamp.parent.mkdir(parents=True, exist_ok=True)

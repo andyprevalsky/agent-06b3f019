@@ -84,7 +84,7 @@ const quarantinedChipCount = (run: ChipCountTest): ChipCountTest =>
   quarantine(
     {
       since: '2026-11-16',
-      repair: 'pending-handoff:764c43fceeb84b16abc375a8b14cc00f',
+      repair: 'https://boxes.dev/thread/ph7193zbgchqaaz524rn3e69858jb1k9',
       error: 'Error: page answered 32 probe(s); slowest 39ms',
       evidence: '.context/deploy-pipeline/rca/764c43fceeb84b16abc375a8b14cc00f.json',
     },
