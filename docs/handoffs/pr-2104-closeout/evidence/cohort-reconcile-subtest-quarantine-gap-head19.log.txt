@@ -1,0 +1,16 @@
+.FTEST_QUARANTINE status=QUARANTINED_PASS unit=CohortReconciliation.test_campaign_noop_and_mutation_share_the_completed_barrier since=2026-11-15 repair=pending-handoff:b7248ac5873d434aa5320ab2bea17f4c
+......
+======================================================================
+FAIL: test_campaign_noop_and_mutation_share_the_completed_barrier (__main__.CohortReconciliation.test_campaign_noop_and_mutation_share_the_completed_barrier) (mutated=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/tmp/cohort-head/scripts/tests/cloudbench-cohort-reconcile.test.py", line 283, in test_campaign_noop_and_mutation_share_the_completed_barrier
+    code,out,err=f.join(f.spawn(index));self.assertEqual(code,0,out+err)
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 != 0 : ❌ timed out waiting for a new healthy parent inventory generation
+
+
+----------------------------------------------------------------------
+Ran 8 tests in 14.169s
+
+FAILED (failures=1)

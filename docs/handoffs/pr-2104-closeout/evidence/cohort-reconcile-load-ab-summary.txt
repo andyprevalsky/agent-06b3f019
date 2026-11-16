@@ -1,0 +1,4 @@
+main runs=50 failed_files=6
+      6 FAIL: test_campaign_noop_and_mutation_share_the_completed_barrier
+head runs=50 failed_files=2
+      2 FAIL: test_campaign_noop_and_mutation_share_the_completed_barrier
