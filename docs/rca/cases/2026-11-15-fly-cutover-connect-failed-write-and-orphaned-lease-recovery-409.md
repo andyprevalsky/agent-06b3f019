@@ -23,8 +23,9 @@ sources:
   - PR #2105 (merge dbc7b5cc70, deploy-agents run 43669103359, job 7aab4aa1)
   - PR #2065 (merge 6a8237ec7a, deploy-agents run 43669305097, job ea1b1f4c recovering 7aab4aa1)
   - PR #2127 (transient()/replay_transient(), Fly.request replay=)
+  - PR #2147 (merge 843236605b, fix; prod proof deploy-agents run 43802714720)
 repro: scripts/tests/retained-agent-machine.test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -59,6 +60,9 @@ Built on #2127's `transient()`/`replay_transient()`:
 - **Observability.** `worker_pool_cutover.for_each_machine` logs every concurrent failure it does not raise.
 - Covers both the push-run recovery path and the `*/10` cron (`--if-idle`) path. Both already go through the queue's global lease and FIFO head, so no cutover runs beside another controller; the fix removes the remaining collision with a dead predecessor's native lease.
 - 10k-agent behavior: deploy-time only and per Machine; at most 3 sends per request and about 56 lease polls per orphan. Nothing touches the agent hot path.
+- Review fixes before merge (CodeRabbit 4577478879, 4577478883): every re-sent transmission, whether a connect-phase replay or a post-409 re-acquire, first passes `Fly.assert_request_allowed`, which `OwnedFly` overrides with ledger ownership and mutability; the 404 re-acquire path is bounded by the same deadline.
+- Shipped: PR #2147, merged 843236605b1d924d8a0083b1f66df4a66d7511a5 (2026-11-16 02:16Z) after 16/16 gates on a5df38c753; production semantic lane PASS (run 43791203116).
+- Production proof: the merge's own batch cutover (job c2b6101f, run 43791105681) was executed from #2257's older checkout, so the fixed controller did not run there. A coalesced cutover runs the executing run's controller scripts; follow-up fixes are in #2285, #2288 and fix/cutover-coalesced-controller-source. The fixed controller then ran in deploy-agents run 43802714720 (checkout abcfbbc0b7, which contains 843236605b): job dd1f6731 was executed by that run itself, 37/37 workflows handed off, 8 Machines retired through the changed retirement-wave path, job SUCCEEDED, and no 409 or network error appeared. No fault occurred in that run; the fault branches are proven by the regression tests.
 
 ## Human feedback
 
