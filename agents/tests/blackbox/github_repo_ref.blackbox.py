@@ -593,6 +593,7 @@ async def test_spawn_schema_documents_github_repo_ref():
     for tool in (SpawnAgentTool, SpawnAgentToolNoGP):
         description = tool.model_json_schema()["properties"]["github_repo_ref"]["description"]
         for needle in (
+            "Normally the project id or 'gh:owner/repo' ref shown in # Available projects",
             "gh:owner/repo",
             "Explicit selection wins over inherited",
             "never falls back",

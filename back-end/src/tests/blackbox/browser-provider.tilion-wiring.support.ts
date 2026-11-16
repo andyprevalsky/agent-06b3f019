@@ -16,6 +16,7 @@ import { buildBrowserSessionMetadata } from '../../domains/browser-session/servi
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecoverySupport';
 import { TilionRateLimitError } from '../../providers/browser/tilion';
 import { assertTilionCarriedStateReachesReplacementsAndNever500s } from './browser-provider.tilion-carried-state.support';
+import { tilionFileFetchCases } from './browser-provider.tilion-file-fetch.support';
 import {
   exitGeoLocale,
   resolveExitGeoLocale,
@@ -632,4 +633,5 @@ export const tilionWiringCases: Array<[string, () => Promise<void>]> = [
     'rotate-proxy/resume carry storage_state; uncarried Tilion swaps answer 409',
     assertTilionCarriedStateReachesReplacementsAndNever500s,
   ],
+  ...tilionFileFetchCases,
 ];

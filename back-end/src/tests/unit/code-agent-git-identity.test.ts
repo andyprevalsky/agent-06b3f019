@@ -222,6 +222,7 @@ test('only github.com repositories get an identity; an empty direct URL defers t
       '',
       'https://github.com/Rose-Ai-Labs/rose',
       '',
+      undefined,
       github.fetchImpl
     );
     assert.equal(project.GITHUB_TOKEN, undefined, 'an empty direct URL clones nothing');
@@ -291,6 +292,7 @@ test('a sandbox gets the push credential and the identity of the account behind 
       'https://github.com/Rose-Ai-Labs/rose',
       null,
       '',
+      undefined,
       github.fetchImpl
     );
     assert.equal(repoSession.GITHUB_REPO_URL, 'https://github.com/Rose-Ai-Labs/rose');
@@ -307,16 +309,20 @@ test('a sandbox gets the push credential and the identity of the account behind 
       undefined,
       'https://github.com/Rose-Ai-Labs/rose',
       'Codex',
+      undefined,
       github.fetchImpl
     );
     assert.equal(projectSession.GITHUB_TOKEN, undefined);
     assert.equal(projectSession.GIT_AUTHOR_NAME, 'andyprevalsky');
-    assert.deepEqual(await codeSandboxGithubEnvs(undefined, null, '', github.fetchImpl), {});
+    assert.deepEqual(
+      await codeSandboxGithubEnvs(undefined, null, '', undefined, github.fetchImpl),
+      {}
+    );
     assert.equal(github.calls.length, 1, 'the identity is resolved once for both sessions');
 
     delete process.env.GITHUB_TOKEN;
     await assert.rejects(
-      codeSandboxGithubEnvs('https://github.com/o/r', null, '', github.fetchImpl),
+      codeSandboxGithubEnvs('https://github.com/o/r', null, '', undefined, github.fetchImpl),
       /GITHUB_TOKEN not configured/
     );
   } finally {
@@ -336,7 +342,8 @@ test('both cloud spawn paths give the sandbox these envs before acquiring it', (
     const end = next === null ? source.length : source.indexOf(next, start);
     const body = source.slice(start, end);
     const inject = body.indexOf(
-      `await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, ${label})`
+      // The session's own user decides whose GitHub credential is used (never another's).
+      `await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, ${label}, userId)`
     );
     assert.ok(inject >= 0, `${name} merges the GitHub envs and identity into the sandbox envs`);
     const acquire = body.indexOf('acquireCodeSandbox(');

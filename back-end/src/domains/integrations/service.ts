@@ -67,6 +67,10 @@ import {
   LanternCredentialError,
 } from './service.lantern';
 import { settleLinkedInSync } from './service.linkedinSync';
+import {
+  GITHUB_USER_CREDENTIAL_INTEGRATION,
+  redactGithubUserCredential,
+} from '../../providers/githubUserCredentials';
 export { LanternCredentialError } from './service.lantern';
 
 const log = createLogger('Integrations');
@@ -200,7 +204,9 @@ export async function getIntegrations(userId: string) {
       userId,
       withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId))
     )
-  ).map(redactLanternIntegration);
+  )
+    .map(redactLanternIntegration)
+    .map(redactGithubUserCredential);
   log.info('Integrations query done', { durationMs: Date.now() - queryStart });
 
   const authenticatedDomains = await repo.getAuthenticatedDomains(userId);
@@ -246,8 +252,11 @@ export async function updateIntegration(
     updateData.status = updates.status;
   }
   if (updates.isActive !== undefined) updateData.isActive = updates.isActive;
-  if (updates.config !== undefined) updateData.config = updates.config;
-  return repo.updateIntegration(existing.id, updateData);
+  // The GitHub credential's config is written only by its own verified import.
+  if (updates.config !== undefined && name !== GITHUB_USER_CREDENTIAL_INTEGRATION) {
+    updateData.config = updates.config;
+  }
+  return redactGithubUserCredential(await repo.updateIntegration(existing.id, updateData));
 }
 
 export async function deleteIntegration(userId: string, name: string) {

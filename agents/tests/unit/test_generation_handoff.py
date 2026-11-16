@@ -250,3 +250,39 @@ def test_short_caller_slices_still_reach_the_lost_signal_backstop():
     asyncio.run(_run())
     assert len(reads) == 1, reads  # at the 20-minute mark; the 40-minute check is the next park
     assert all(t.total_seconds() == 30 for t in fake.wait_calls), fake.wait_calls
+
+
+def test_refused_pointer_read_keeps_the_workflow_on_its_current_generation(monkeypatch):
+    """RCA 2026-11-15 (agent 08aa04a2): a failed or retired deploy never strands an agent.
+
+    The backend refuses a continuation onto any generation whose admission gate is not
+    qualified OPEN; the workflow must then stay on its current queue rather than
+    continue_as_new onto the pointer's queue.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from workflows.agent_workflow import AgentWorkflow
+
+    current = "navi-agent-tasks-pool-701ac3d5ae3d@f38b8b178a7e"
+    live = "navi-agent-tasks-pool-5c33f46a4b8d@40e8aa1c8933"
+    outcomes = iter(
+        [
+            RuntimeError("409 Managed continuation destination is not qualified OPEN"),
+            {"task_queue": live, "surface_hash": "40e8aa1c8933"},
+            {"task_queue": current, "surface_hash": "f38b8b178a7e"},
+        ]
+    )
+
+    async def pointer_activity(*_args, **_kwargs):
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(temporal_workflow, "execute_activity", pointer_activity)
+    monkeypatch.setattr(temporal_workflow, "info", lambda: SimpleNamespace(task_queue=current))
+    monkeypatch.setattr(temporal_workflow, "logger", SimpleNamespace(info=lambda *_: None, warning=lambda *_: None))
+    wf = AgentWorkflow()
+    assert asyncio.run(wf._check_generation_handoff()) is None, "a refused destination keeps the current queue"
+    assert asyncio.run(wf._check_generation_handoff()) == live, "an admitted live generation still hands off"
+    assert asyncio.run(wf._check_generation_handoff()) is None

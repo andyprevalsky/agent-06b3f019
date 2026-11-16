@@ -119,6 +119,14 @@
       {
         "from": "node_modules/ws",
         "to": "code-agent/node_modules/ws"
+      },
+      {
+        "from": "../scripts/lib/rose-sync",
+        "to": "rose-cli",
+        "filter": [
+          "**/*.mjs",
+          "package.json"
+        ]
       }
     ],
     "afterSign": "scripts/notarize.js",

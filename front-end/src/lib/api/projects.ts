@@ -65,6 +65,19 @@ export interface Project {
   /** Latest published template snapshot new code sessions start from; null: none yet. */
   snapshot: { takenAt: string; sha: string | null } | null;
   envFileCount: number;
+  /**
+   * Shown as a left-bar folder (folders only organize agents). false: a
+   * repository connected or imported in Integrations › GitHub Repositories.
+   * Older responses omit it (every row was a folder).
+   */
+  isFolder?: boolean;
+  /** Listed in Integrations › GitHub Repositories (a GitHub repo or a local import). */
+  isRepository?: boolean;
+  /**
+   * A repository a teammate shared with this user through a team: usable by
+   * this user's code agents, read-only here; the owner's env files stay private.
+   */
+  shared?: { ownerName: string; teamName: string } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -235,6 +248,36 @@ export async function deleteProjectEnvFile(projectId: string, fileId: string): P
   if (!response.ok) throw new Error(`Failed to delete environment file (${response.status})`);
 }
 
+/**
+ * The caller's own GitHub credential (imported by `rose github import` from the
+ * Mac, verified by GitHub). Code agents clone, push and use gh as this account.
+ * The token itself is never returned.
+ */
+export interface GithubCredentialStatus {
+  connected: boolean;
+  login: string | null;
+}
+
+const GITHUB_CREDENTIAL_URL = `${PROJECTS_URL}/github-credential`;
+
+export async function fetchGithubCredential(): Promise<GithubCredentialStatus> {
+  const response = await fetch(GITHUB_CREDENTIAL_URL, { headers: getAuthHeaders() });
+  if (!response.ok) throw new Error(`Failed to load your GitHub account (${response.status})`);
+  const data = (await response.json()) as { connected?: unknown; login?: unknown };
+  return {
+    connected: data.connected === true,
+    login: typeof data.login === 'string' ? data.login : null,
+  };
+}
+
+export async function deleteGithubCredential(): Promise<void> {
+  const response = await fetch(GITHUB_CREDENTIAL_URL, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) throw new Error(`Failed to remove your GitHub account (${response.status})`);
+}
+
 /** One-time code for `rose agent-init --login-code` (single use, ~30 minutes). */
 export interface CliLoginCode {
   code: string;
@@ -242,11 +285,12 @@ export interface CliLoginCode {
   project: { id: string; name: string } | null;
 }
 
-export async function createCliLoginCode(projectId: string): Promise<CliLoginCode> {
+/** null = an unbound code: its login can create a new project (Import from your computer). */
+export async function createCliLoginCode(projectId: string | null): Promise<CliLoginCode> {
   const response = await fetch(`${PROJECTS_URL}/cli-login-codes`, {
     method: 'POST',
     headers: getAuthHeaders(),
-    body: JSON.stringify({ projectId }),
+    body: JSON.stringify(projectId === null ? {} : { projectId }),
   });
   if (!response.ok) throw new Error(`Failed to create a setup code (${response.status})`);
   return (await response.json()) as CliLoginCode;

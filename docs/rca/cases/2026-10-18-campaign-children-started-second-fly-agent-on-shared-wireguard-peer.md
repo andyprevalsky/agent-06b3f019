@@ -11,8 +11,8 @@ symptoms:
   - "❌ complete terminal runtime evidence could not be verified -- infrastructure failure"
   - "❌ guest cleanup request failed (HTTP 000)"
   - "err context deadline exceeded"
-  - "failed writing: write unix /tmp/cb-relay-*/fly-agent.sock->@: write: broken pipe"
-  - "❌ guest cleanup was not acknowledged; machine ownership must be retained (HTTP 000)"
+  - "❌ bench.log could not be read after 5 bounded retries -- infrastructure failure"
+  - "Error contacting Fly.io API when probing \"personal\": timed out (context deadline exceeded)"
 tags:
   - cloudbench
   - shared-relay
@@ -24,7 +24,8 @@ sources:
   - fleet run original600-1792308435478660056 (100-copy sharded diagnostic, source 373585f80c006fc53412c8f9ccc0c7335e32f32a)
   - commit caf73e6de28e36e97cd226662dcff974f7648871 (reverted)
   - fleet run 20261023-060858-2779218 (descend-full69-20261023 recurrence on 8ada0056f; also 20261023-060858-2779216/-2779217, 20261023-060710-2729411/-2729441, K5 canary 20261023-063527-3731387)
-repro: python3 scripts/tests/cloudbench-shared-transport-integration.test.py CallerIntegration.test_campaign_child_wireguard_flyctl_reuses_the_relay_agent
+  - fleet run 20261116-012637-640093 (2026-11-16 recurrence on 26714e91d0, standalone beside campaign-20261116-014819-911365; evidence on devbox 9b1d621b /home/boxes/rca-6c5f96b1/infra-noresult)
+repro: python3 scripts/tests/cloudbench-shared-transport-integration.test.py CallerIntegration.test_second_campaign_in_one_home_refuses_a_second_agent_on_the_wireguard_peer
 status: open
 ---
 
@@ -91,6 +92,32 @@ Repro (red on 8ada0056f, green on the fix): `python3 scripts/tests/cloudbench-sh
 Fix: `start_shared_relay` first takes `claim_home_wireguard_peer`, a non-blocking exclusive `flock` on `$HOME/.fly/rose-campaign-wireguard-peer.lock` that records its holder. A second campaign in the same HOME now refuses before it starts any agent or Machine. The refusal names the holder and points to a single or sharded campaign, and the campaign's startup failure line prints the reason. The lock descriptor is passed to the agent's bootstrap, so the claim ends with that agent, and a dead holder releases it. Fixture tests that start relays now use a private HOME. This is the guard rung: a per-campaign peer would require creating and deleting a Fly WireGuard peer per campaign. Moving all campaigns onto the default agent would change token and lifecycle ownership. Neither is verifiable offline.
 
 Still open: (1) an ad-hoc `flyctl ssh`, or a concurrency-1 local run that uses the HOME default agent while a relay campaign runs, still opens a second session on the peer. Operational rule until fixed: run no other flyctl tunnel traffic in that HOME during a relay campaign. Prefer sharded campaigns, whose controllers each have their own peer. (2) For a natively stopped guest whose provider manifest was never sealed, `--recover-stale-owner` prints `stopped exact Machine has no sealed provider-state proof` instead of pointing at the documented original-volume capture procedure. Outcome proof is pending the parent's cloud rerun.
+
+## Recurrence 2026-11-16 (standalone run beside a -k 4 campaign, open item 1)
+
+Evidence (devbox 9b1d621b, `/home/boxes/rca-6c5f96b1/infra-noresult`). A standalone `scripts/run-bench browser-auth-email-otp --ref 26714e91d0 --durable` (run 20261116-012637-640093) started the HOME default agent (pid 769131, 01:36:47, `~/.fly/fly-agent.sock`). A `-k 4 --concurrency 4 --durable` campaign of the same task (campaign-20261116-014819-911365) then started its private relay agent (pid 915279, 01:48:38). Both agents' establish replies named the same peer, `interactive-boxes-ed05f94c-…-01M7GZZTQ2F9ZJ7S22D92C9ANB`, with the same public key. At 01:56:06.8 both degraded in the same second (`Error contacting Fly.io API … timed out (context deadline exceeded)` / `context deadline exceeded`). About 6% of connections to all 4 guests then failed, evenly spread. All 5 guests printed "passed", but every run ended REAL NORESULT / INFRA_ERROR: sealed runtime-evidence read `TimeoutError`, guest shutdown got no HTTP answer, and `bench.log could not be read after 5 bounded retries`. 4 owners were retained.
+
+Archive searches: `bench.log could not be read after 5 bounded retries default fly agent wireguard peer` and `standalone run default agent fly-agent.sock campaign second agent context deadline exceeded`. Both rank this case first. `2026-10-20-preterminal-infra-failure-waited-runtime-evidence-backstop` shares the bench.log symptom but sits at a different boundary (post-loop evidence wait). This is a recurrence of open item (1): the guardrail failed because only one side of the conflict was guarded.
+
+First bad boundary: `run-bench-campaign.py claim_home_wireguard_peer` excluded only another campaign. A standalone `run-bench-fleet` controller took no claim, and the campaign never looked at `~/.fly/fly-agent.sock`, so it started a second agent on the HOME peer beside a live default agent. The reverse order was equally unguarded. Why 1: tunnels on the peer lost packets. Why 2: two agents held sessions on one peer. Why 3: the peer invariant (one live agent per HOME) was enforced between campaigns only, and a standalone run's default agent was invisible to it. Why 4 is flyctl's single-peer-per-HOME design (third party), so the ladder stops at Why 3.
+
+Fix: one lock, both modes. A standalone (relay-unbound) `run-bench-fleet` controller holds `~/.fly/rose-campaign-wireguard-peer.lock` with `LOCK_SH` for its lifetime. The claim is `claim_home_wireguard_peer_shared`, taken right after Fly token resolution and before the first `fly_with_timeout` call; only exact-owner recovery (`RECOVER_OWNER_TOKEN`) is exempt. A campaign still takes `LOCK_EX`. Standalone runs share with each other, while a standalone run and a relay campaign refuse in either order:
+- A standalone run beside a campaign exits 1. The message names the campaign holder (`pid=… campaign=…`).
+- A campaign beside a standalone run raises before starting any agent. The exclusive lock fails and a shared lock succeeds, so the holders are standalone runs or agents they started. Their PIDs and command lines are found from `/proc/*/fd` and named in the message.
+- A campaign that wins the lock still sends a v0.4.115 PING to `~/.fly/fly-agent.sock`. It refuses if a default agent answers, or if the socket accepts but does not answer or cannot be probed. The message names the socket and agent PID and says to stop the agent with `flyctl agent stop` once no standalone run or ad-hoc tunnel uses the HOME. A missing or stale socket (connection refused) passes.
+
+The fd is not close-on-exec, so a default agent started by a standalone run inherits the shared claim and holds it while the agent lives. That matches the PING rule. A lingering default agent is reused by any later flyctl call in the HOME, so it is a latent second session even when idle (Diagnosis step 4 shows only active traffic degrades the tunnel). Relay-bound campaign children are covered by the parent's exclusive claim and skip the shared claim. A refusal fails immediately and never waits, and standalone runs still run together. Benchmark tasks, timeouts and concurrency are unchanged. 10k-agent behavior: one flock and one Unix-socket PING per campaign start; the `/proc` scan runs only on refusal.
+
+The same week, main (479f42e1b3) keyed the claim on `FLY_CONFIG_DIR` (default `~/.fly`), because flyctl keeps its config, agent socket and `wire_guard_state` there. The standalone shared claim and the default-agent PING follow that same directory, so a run with its own `FLY_CONFIG_DIR` has its own peer and is not refused.
+
+An independent reviewer (fresh sub-agent, symptom and evidence only) named the same first bad boundary: `claim_home_wireguard_peer` was the only guard, and standalone `run-bench-fleet` never joined it. Its findings were resolved as follows. The exemption was narrowed from `RECOVER_STALE_ONLY` to exact-owner recovery, so `--admit-existing-idle`, `--admit-fixed-native-worker` and `--cold-handoff-request` now take the claim. Any socket error now refuses with the peer message instead of escaping as a generic error. The test now asserts the real call site comes before the first `fly_with_timeout`, and that the refusal names the exact standalone holder PID. The items below remain open.
+
+Repro: `python3 scripts/tests/cloudbench-shared-transport-integration.test.py CallerIntegration.test_second_campaign_in_one_home_refuses_a_second_agent_on_the_wireguard_peer`, extended to cover both orders. Order 1 holds the standalone claim and starts the fake HOME default agent, then a campaign must refuse; with the controller gone but its agent still answering, the campaign must still refuse; after the agent dies (stale socket), the campaign starts. Order 2 starts a campaign first; a second campaign and a standalone run must both refuse, and the standalone must make no WireGuard call and start no agent. The negative control runs two standalone runs together and expects them to share one agent. On origin/main c678865ab9 it fails: the standalone claim does not exist (`ValueError: substring not found` extracting `claim_home_wireguard_peer_shared`). With only the fleet half applied, a campaign still starts beside a live default agent (`AssertionError: ValueError not raised` at the `fly-agent.sock` refusal). With the fix it passes: 6 consecutive runs of the single test, then the full 21-test file.
+
+Still open:
+1. Some default-agent users outside `run-bench-fleet` benchmark controllers take no claim: ad-hoc `flyctl`, `run-bench-fleet` exact-owner recovery, `run-bench --setup`/`--build-image` and the WMH build (`run-bench-cloud` directly), and the R2 evidence archive and original-volume capture helpers. These are maintenance and cleanup that must stay able to release retained Machines. A campaign still refuses on the default agent they leave behind (PING and inherited claim), but such a call started during a live campaign is unguarded.
+2. A relay-less campaign (width 1 without owned transport, or `CLOUDBENCH_CAMPAIGN_SHARED_RELAY=0`) holds no claim of its own between child jobs. Its children's inherited default-agent claim covers the gap in practice.
+3. Item (2) from the 10-23 section is unchanged.
 
 ## Human feedback
 

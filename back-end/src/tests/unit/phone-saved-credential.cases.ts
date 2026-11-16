@@ -58,6 +58,8 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
   assert.equal(result.usage?.model, 'saved-binding-model');
   assert.equal(result.usage?.totalCostCents, 1);
   assert.equal(captured?.messages[0].content, PHONE_CREDENTIAL_PURPOSE);
+  // The archive record is labelled with the call site the ledger bills it under.
+  assert.equal(captured?.dump_context?.call_site, 'phone_saved_credential_binding');
   assert.ok(PHONE_CREDENTIAL_PURPOSE.includes('Other apps'));
   assert.deepEqual(JSON.parse(captured!.messages[1].content as string), {
     expectedAppleIdentity: input.expectedAppleIdentity,
@@ -130,6 +132,7 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
   assert.equal(passcode.allowed, true);
   assert.equal(passcode.passcodeStage, 'create');
   assert.equal(passcode.credentialRealm, undefined);
+  assert.equal(captured?.dump_context?.call_site, 'phone_device_passcode_binding');
   assert.ok(String(captured?.messages[0].content).includes('MDM restrictions'));
   assert.ok(!JSON.stringify(captured?.messages).includes('1234'));
   assert.equal(

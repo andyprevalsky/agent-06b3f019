@@ -15,7 +15,8 @@
  * Header = icon + title; no close X (the triggers toggle, UI ledger row 67).
  * Bodies reuse existing pages (loaded lazily through the pages layer; features
  * never import other features):
- *   integrations → Integrations page   benchmarks → BenchmarksView
+ *   integrations → Integrations page, with the project settings panel passed in
+ *                  as Projects' ⚙ slot   benchmarks → BenchmarksView
  *   health       → AdminHealth page ("Biz health", admins only)
  *   settings     → admin account switcher (inline, admins only; it replaced the
  *                  floating top-right pill for Rose Desktop accounts), then the
@@ -28,13 +29,19 @@
 import { Loader2 } from 'lucide-react';
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 
+import type { Project } from '@/lib/api/projects';
+
 import SidebarCreditIndicator from '../SidebarCreditIndicator';
+import RoseProjectSettingsPanel from '../rose-sidebar/RoseProjectSettingsPanel';
 import { AppDrawerShell } from './AppDrawerShell';
 import { FeedbackAppPanel } from './FeedbackAppPanel';
 import { DRAWER_DURATION_MS, coversComposer } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 
 const IntegrationsPage = lazy(() => import('@/pages/Integrations'));
+const projectSettings = (project: Project) => (
+  <RoseProjectSettingsPanel key={project.id} project={project} />
+);
 const BenchmarksPage = lazy(() => import('@/pages/Benchmarks'));
 const TeamsPage = lazy(() => import('@/pages/Teams'));
 const SettingsPage = lazy(() => import('@/pages/Settings'));
@@ -92,7 +99,7 @@ function SettingsBody({ onLogout }: { onLogout?: () => void }) {
 
 function PanelBody({ app }: { app: PanelApp }): ReactNode {
   const apps = useRoseApps();
-  if (app === 'integrations') return <IntegrationsPage />;
+  if (app === 'integrations') return <IntegrationsPage projectSettings={projectSettings} />;
   if (app === 'benchmarks') return <BenchmarksPage onOpenAgent={apps?.openAgent} />;
   if (app === 'feedback') return <FeedbackAppPanel />;
   if (app === 'teams') return <TeamsPage />;

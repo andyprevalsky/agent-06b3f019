@@ -54,6 +54,9 @@ for (const width of widths) {
       name: 'Rose',
       repoUrl: null,
       githubConnected: false,
+      // A repository imported from the user's computer (Integrations › GitHub Repositories).
+      isFolder: false,
+      isRepository: true,
       defaultBranch: 'main',
       startupScript: null,
       startupTimeoutS: 120,
@@ -340,9 +343,12 @@ for (const width of widths) {
       });
       await page.keyboard.press('Escape');
       await expect(picker).toHaveCount(0);
+      // Project sharing lives in the repository's settings (Integrations › GitHub Repositories ⚙).
       await page.getByRole('button', { name: 'Integrations', exact: true }).click();
-      await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 90 } });
-      await page.getByRole('button', { name: 'Rose folder settings', exact: true }).click();
+      await page
+        .getByRole('region', { name: 'GitHub Repositories' })
+        .getByRole('button', { name: 'Rose settings', exact: true })
+        .click();
       const projectSettings = page.getByRole('region', { name: 'Project team sharing' });
       await expect(
         projectSettings.getByRole('checkbox', { name: 'Share project with Rose Labs' }),

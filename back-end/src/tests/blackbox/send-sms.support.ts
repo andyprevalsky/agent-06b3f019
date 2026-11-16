@@ -1,7 +1,7 @@
 import { config } from 'dotenv';
 import { randomUUID, randomInt } from 'node:crypto';
-import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 import { listArchivedObjects } from '../../providers/traceArchive';
 import { notificationFixtureKey } from '../../providers/smsSupervisor/notificationLlm';
 
@@ -22,7 +22,10 @@ export const TEST_PHONE = `+1929${String(randomInt(10_000_000)).padStart(7, '0')
 
 export const FAKE_AGENT_ID = '00000000-0000-0000-0000-fakeagent001';
 
-export const prisma = new PrismaClient();
+// The domain's one Prisma client is the app's own: a second client constructed before the first
+// connect reads process.env while that connect's engine setenv()s SSL_CERT_FILE/SSL_CERT_DIR on
+// another thread, and the process dies with SIGSEGV and no output (PR #2104 FLAKY fe640f0e).
+export { prisma };
 
 export async function createTestUser(): Promise<void> {
   await prisma.user.create({

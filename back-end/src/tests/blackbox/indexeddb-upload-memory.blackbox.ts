@@ -22,6 +22,12 @@
  *   control  — JSON.parse(payload) under {@link CHILD_HEAP_MB}MB must OOM
  *   treatment — ingestIndexedDBUploadJson(payload) under the same heap must live
  *              and round-trip databases by server-side md5
+ *
+ * Open order: prisma.$connect() ─► engine TLS probe setenv()s SSL_CERT_FILE/DIR once
+ *             ─► only then import uploadService (it constructs the app client).
+ * A client constructed before that first connect reads process.env while the probe
+ * writes it (getenv/setenv race, a silent SIGSEGV; see RCA
+ * 2026-11-08-prisma-engine-tls-setenv-raced-second-client-env-read).
  */
 
 import { execFileSync, spawn } from 'child_process';
@@ -36,13 +42,19 @@ import {
   blobOriginDatabasesSql,
   measureBackendPeak,
 } from './blob-origin-fixture.helpers';
-import { ingestIndexedDBUploadJson } from '../../domains/integrations/uploadService';
 import {
   formatUploadChildFailure,
   type UploadChildResult,
 } from './indexeddb-upload-memory.diagnostics';
+import { connectThenOpen } from '../../../scripts/seed-local-helpers';
 
 assertLocalDatabase();
+
+/** providers/database publishes its app client on globalThis outside production. */
+const appClient = () => (globalThis as { prisma?: unknown }).prisma;
+// Every static import has evaluated by now, so this sees any that built the app client.
+const appClientBuiltAtLoad = appClient() !== undefined;
+const sslCertFileUnsetAtStart = process.env.SSL_CERT_FILE === undefined;
 
 const isChildMode = process.argv.includes('--child') || process.argv.includes('--control');
 const USER_ID =
@@ -155,6 +167,17 @@ function runChildJsonParseControl(): void {
 }
 
 const prisma = new PrismaClient();
+let sslCertFileSetBeforeUploadService = false;
+let uploadService: Promise<typeof import('../../domains/integrations/uploadService')> | undefined;
+
+/** Imports uploadService (and its app client) only after this file's client has connected. */
+async function ingestIndexedDBUploadJson(userId: string, jsonString: string) {
+  uploadService ??= connectThenOpen(prisma, () => {
+    sslCertFileSetBeforeUploadService = process.env.SSL_CERT_FILE !== undefined;
+    return import('../../domains/integrations/uploadService');
+  });
+  return (await uploadService).ingestIndexedDBUploadJson(userId, jsonString);
+}
 
 /** jsonb's canonical rendering around the big origin's `databases` value. */
 const PAYLOAD_PREFIX =
@@ -346,6 +369,24 @@ test('duplicate origins in one payload deterministically keep the last occurrenc
   );
 });
 
+test("no other Prisma client starts before this file's first connect", async () => {
+  assert(
+    !appClientBuiltAtLoad,
+    'a static import constructed the providers/database client before the first connect; ' +
+      'import uploadService only through ingestIndexedDBUploadJson'
+  );
+  assert(
+    uploadService !== undefined && appClient() !== undefined,
+    'uploadService must construct the app client after the first connect'
+  );
+  if (process.platform === 'linux' && sslCertFileUnsetAtStart) {
+    assert(
+      sslCertFileSetBeforeUploadService,
+      'the engine TLS probe must set SSL_CERT_FILE before uploadService builds its client'
+    );
+  }
+});
+
 test('both origins land and the large blob round-trips by md5', async () => {
   const rows = await prisma.$queryRawUnsafe<
     Array<{ origin: string; digest: string; chars: number }>
@@ -427,9 +468,7 @@ async function main(): Promise<void> {
   }
 
   process.stdout.write(`\n${tests.length - failed}/${tests.length} passed\n`);
-  if (failed > 0) {
-    throw new Error(`${failed}/${tests.length} indexeddb-upload-memory case(s) failed`);
-  }
+  if (failed > 0) process.exit(1);
 }
 
 void main();

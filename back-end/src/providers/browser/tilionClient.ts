@@ -100,6 +100,17 @@ export class TilionSessionBusyError extends TilionApiError {
 }
 
 /**
+ * files/fetch 409 `unsupported_subresource_challenge`: an anti-bot challenge (for
+ * example Cloudflare's, `status` 403) stands in front of the file for this session's exit.
+ */
+export class TilionDownloadChallengedError extends TilionApiError {
+  constructor(init: TilionErrorInit) {
+    super({ ...init, retryable: false });
+    this.name = 'TilionDownloadChallengedError';
+  }
+}
+
+/**
  * 429 throttle or concurrency cap, or 503 `capacity_unavailable`: definite "nothing
  * allocated, retry later" answers, typed as the provider-neutral rate-limit error.
  */
@@ -264,6 +275,8 @@ export function tilionErrorFromResponse(
   ) {
     return new TilionSessionBusyError(init);
   }
+  if (status === 409 && parsed.slug === 'unsupported_subresource_challenge')
+    return new TilionDownloadChallengedError(init);
   return new TilionApiError(init);
 }
 
@@ -297,7 +310,7 @@ function retryDelayMs(error: unknown, attempt: number): number {
   return Math.min(MAX_RETRY_DELAY_MS, (hinted ?? backoff) + jitter);
 }
 
-function defaultShouldRetry(error: TilionError): boolean {
+export function defaultShouldRetry(error: TilionError): boolean {
   if (error instanceof TilionRateLimitError) {
     // A concurrency cap does not clear within a request's retry budget, and a
     // long throttle window belongs to the caller, not to a blocked request.
@@ -386,12 +399,27 @@ export async function tilionRequestWithMeta<T>(
     if (response.ok || options.acceptStatuses?.includes(response.status)) {
       return { status: response.status, data: body as T, requestId };
     }
-    throw tilionErrorFromResponse(response.status, body, {
+    const error = tilionErrorFromResponse(response.status, body, {
       requestId,
       retryAfterHeaderMs: retryAfterHeaderMs(response),
       method,
       path: loggedPath,
     });
+    // The vendor body names the refusal (busy client, challenge, ...); the status
+    // line alone could not tell them apart in a gate log.
+    log.info('Tilion request refused', {
+      method,
+      path: loggedPath,
+      status: response.status,
+      slug: error.slug,
+      body: redactTilionSecrets(typeof body === 'string' ? body : JSON.stringify(body)).slice(
+        0,
+        200
+      ),
+      requestId,
+      attempt,
+    });
+    throw error;
   };
 
   return retryWithBackoff(attemptOnce, {

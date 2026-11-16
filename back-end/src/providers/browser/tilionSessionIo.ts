@@ -9,11 +9,14 @@
 import { randomUUID } from 'node:crypto';
 import type { BrowserContext } from 'playwright';
 import {
+  defaultShouldRetry,
   mintTilionConnectUrl,
   mintTilionLiveViewUrl,
   tilionRequest,
   tilionSessionPath,
   TilionApiError,
+  TilionDownloadChallengedError,
+  TilionSessionBusyError,
 } from './tilionClient';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
@@ -84,14 +87,47 @@ export async function readTilionSessionFile(sessionId: string, path: string): Pr
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`Tilion can only fetch http(s) downloads, got ${url.protocol}`);
   }
-  const result = await tilionRequest<{ content_base64?: string; size?: number }>(
-    tilionSessionPath(sessionId, '/files/fetch'),
-    {
-      method: 'POST',
-      body: { url: url.toString(), max_bytes: TILION_FILE_CAP_BYTES },
-      timeoutMs: FILE_FETCH_TIMEOUT_MS,
+  const fetchFile = () =>
+    tilionRequest<{ content_base64?: string; size?: number }>(
+      tilionSessionPath(sessionId, '/files/fetch'),
+      {
+        method: 'POST',
+        body: { url: url.toString(), max_bytes: TILION_FILE_CAP_BYTES },
+        timeoutMs: FILE_FETCH_TIMEOUT_MS,
+        // A CDP client that just disconnected still holds the session for up to ~0.1 s
+        // (live probe 2026-11-15). The bounded retries outlast that detach lag; a client
+        // that stays attached still surfaces as TilionSessionBusyError.
+        shouldRetry: (error) =>
+          error instanceof TilionSessionBusyError || defaultShouldRetry(error),
+      }
+    );
+  let result: Awaited<ReturnType<typeof fetchFile>>;
+  try {
+    result = await fetchFile();
+  } catch (error) {
+    if (!(error instanceof TilionDownloadChallengedError)) throw error;
+    // An anti-bot challenge stands in front of the file. Tilion's navigate clears it
+    // inside this session (the clearance stays on the tab), then the page fetch passes.
+    // The navigate moves the session's open tab to the file URL.
+    log.info('Tilion file is behind a challenge; navigating the session tab to clear it', {
+      sessionId,
+      url: url.toString().slice(0, 200),
+      requestId: error.requestId,
+    });
+    const navigated = await tilionRequest<{ status?: string; error?: string | null }>(
+      tilionSessionPath(sessionId, '/navigate'),
+      { method: 'POST', body: { url: url.toString() }, timeoutMs: DRIVE_TIMEOUT_MS }
+    );
+    if (navigated?.status !== 'ok') {
+      log.warn('Tilion did not clear the challenge in front of the file', {
+        sessionId,
+        status: navigated?.status ?? null,
+        error: navigated?.error ?? null,
+      });
+      throw error;
     }
-  );
+    result = await fetchFile();
+  }
   if (typeof result?.content_base64 !== 'string') {
     throw new Error('Tilion file fetch response did not contain file content');
   }

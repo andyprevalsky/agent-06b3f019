@@ -28,6 +28,23 @@ function repoPath(repoUrl: string): string | null {
 }
 
 /**
+ * Canonical connected-repo ref `gh:owner/repo` (lowercase; the backend's
+ * providers/githubRepos/refs canonicalGithubRepoRef) of a GitHub repo URL, or
+ * null for no repo, another host, or a URL without an owner and repo. Team
+ * sharing keys a GitHub repo by this ref.
+ */
+export function githubCanonicalRef(repoUrl: string | null | undefined): string | null {
+  const owner = githubRepoOwner(repoUrl);
+  const path = owner === null ? null : repoPath((repoUrl ?? '').trim());
+  const repo = path
+    ?.split('/')
+    .filter((segment) => segment !== '')[1]
+    ?.replace(/\.git$/i, '');
+  if (owner === null || repo === undefined || !/^[A-Za-z0-9_.-]+$/.test(repo)) return null;
+  return `gh:${owner}/${repo}`.toLowerCase();
+}
+
+/**
  * Owner of a GitHub repo URL (`https://github.com/<owner>/<repo>[.git][/]`,
  * `git@github.com:<owner>/<repo>.git`, `ssh://git@github.com/<owner>/<repo>`),
  * or null for no repo, another host, or a URL without an owner and repo.

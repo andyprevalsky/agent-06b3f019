@@ -110,6 +110,7 @@ import {
   testBoundary_notifyWriteLockPaymentCardEnriched,
   testBoundary_notifyAgentStartedSuppressedForBenchmark,
   testBoundary_notifyCompletionPreviewForBenchmark,
+  testStartup_onlyTheAppPrismaClientBeforeFirstQuery,
 } from './send-sms.behavior-5';
 import {
   testBoundary_notifyAgentStartedKeepsLongGoalInsideAgent,
@@ -163,6 +164,15 @@ async function runAll() {
   const captureAvailable = await checkCaptureAvailable();
 
   const parallelGroups: TestGroup[] = [
+    {
+      name: 'startup -- Prisma clients',
+      tests: [
+        {
+          name: 'only the app client exists before the first query',
+          fn: testStartup_onlyTheAppPrismaClientBeforeFirstQuery,
+        },
+      ],
+    },
     {
       name: 'POST / (send) -- contract',
       tests: [
