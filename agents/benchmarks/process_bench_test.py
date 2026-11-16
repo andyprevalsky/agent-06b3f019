@@ -404,18 +404,68 @@ def test_actual_producer_truncation_cannot_hide_earlier_forbidden_action():
         asyncio.run(_persist_code_agent_judge_evidence(
             agent_id='root', task_id='fixture-session', code_provider='claude',
             code_events=full, output_files=[], action_summary=[]))
-    original = persisted.call_args_list[0].kwargs
-    retained = json.loads(original['message'].split('\n\n', 1)[1])['code_agent_events']
-    assert len(retained) == 200 and original['steps_taken'] == len(full) > 200
-    assert not any(event.get('type') == 'file_change' for event in retained)
-    row['message'] = original['message']
-    row['metadata']['steps_taken'] = original['steps_taken']
+    pages = [call.kwargs for call in persisted.call_args_list if call.kwargs['tool_name'] == 'code_agent_sdk_events']
+    retained = [json.loads(page['message'].split('\n\n', 1)[1])['code_agent_events'] for page in pages]
+    # Every event is kept, in bounded pages that each declare their slice.
+    assert len(pages) > 1 and all(len(events) <= 200 for events in retained)
+    assert all(page['steps_taken'] == len(full) > 200 for page in pages)
+    assert [event for events in retained for event in events] == full
+    assert [page['sdk_event_range'] for page in pages] == [
+        (start, start + len(events)) for start, events in zip(range(0, len(full), 200), retained)]
+    child = trace['_semantic_evaluator_tree']['child']
+    page_rows = [dict(row, message=page['message'], metadata=dict(row['metadata'], steps_taken=page['steps_taken'],
+                      sdk_event_range=list(page['sdk_event_range']))) for page in pages]
     from benchmarks import run_benchmark as runner
-    with patch('helpers.llm.check_progress', AsyncMock()) as judge:
-        passed, reason, results = asyncio.run(runner._run_declared_evaluators(task, trace))
-    assert not passed and 'truncated SDK evidence count' in reason
-    assert results[0]['id'] == 'process-native-trace'
-    judge.assert_not_called()
+    # The earlier forbidden edit is visible; a missing page is still truncated evidence.
+    for rows, expected in ((page_rows, 'protected fixture was modified'), (page_rows[1:], 'truncated SDK evidence count')):
+        child['messages'] = rows
+        with patch('helpers.llm.check_progress', AsyncMock()) as judge:
+            passed, reason, results = asyncio.run(runner._run_declared_evaluators(task, trace))
+        assert not passed and expected in reason, reason
+        assert results[0]['id'] == 'process-native-trace'
+        judge.assert_not_called()
+
+
+def test_paged_sdk_evidence_must_tile_the_whole_session():
+    task = _task(); trace = _trace(task)
+    child = trace['_semantic_evaluator_tree']['child']
+    row = child['messages'][0]
+    events = json.loads(row['message'].split('\n\n', 1)[1])['code_agent_events']
+
+    def page(start, end, total=len(events)):
+        return dict(row, message='Code-agent SDK event JSON:\n\n' + json.dumps({'code_agent_events': events[start:end]}),
+                    metadata=dict(row['metadata'], steps_taken=total, sdk_event_range=[start, end]))
+
+    def untagged(chunk, total=len(events)):
+        return dict(row, message='Code-agent SDK event JSON:\n\n' + json.dumps({'code_agent_events': chunk}),
+                    metadata={k: v for k, v in dict(row['metadata'], steps_taken=total).items() if k != 'sdk_event_range'})
+
+    middle = len(events) // 2
+    child['messages'] = [page(middle, len(events)), page(0, middle), page(0, middle)]
+    assert check_process_trace(task.process_spec, trace)[0]
+    # An unpaged row must still hold the whole session, and one session's rows
+    # cannot mix the two forms (golden review of fc4b838488).
+    tail = events[middle:]
+    for rows, expected in (
+        ([untagged(tail), page(len(tail), len(events))], 'truncated SDK evidence count'),
+        ([page(len(tail), len(events)), untagged(tail)], 'truncated SDK evidence count'),
+        ([untagged(events[:middle]), page(middle, len(events))], 'truncated SDK evidence count'),
+        ([untagged(events), page(0, len(events))], 'mixed paged and unpaged SDK evidence'),
+        ([page(0, len(events)), untagged(events)], 'mixed paged and unpaged SDK evidence'),
+    ):
+        child['messages'] = rows
+        passed, reason = check_process_trace(task.process_spec, trace)
+        assert not passed and expected in reason, reason
+    for rows, expected in (
+        ([page(0, middle)], 'truncated SDK evidence count'),
+        ([page(0, middle), page(middle - 1, len(events))], 'truncated SDK evidence count'),
+        ([page(0, middle), page(middle, len(events), total=len(events) + 1)], 'conflicting code evidence copies'),
+        ([dict(page(0, middle), metadata=dict(page(0, middle)['metadata'], sdk_event_range=[0, middle + 1]))],
+         'truncated SDK evidence count'),
+    ):
+        child['messages'] = rows
+        passed, reason = check_process_trace(task.process_spec, trace)
+        assert not passed and expected in reason, reason
 
 
 @pytest.mark.parametrize('code', [False, '0', None])

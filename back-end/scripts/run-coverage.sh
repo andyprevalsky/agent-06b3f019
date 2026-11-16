@@ -457,6 +457,7 @@ fi
 mkdir -p "$COV_TMP"
 
 export TEST_BASE_URL="http://localhost:$COV_PORT"
+export_blackbox_phone_upstream_env "$COV_PORT"
 COV_LOG="$BACKEND_DIR/coverage/server$SHARD_SUFFIX.log"
 
 # Keep local blackbox coverage deterministic. back-end/.env points trace

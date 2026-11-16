@@ -1353,8 +1353,10 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     assert "dom_service.get_browser_state(include_screenshot=False)" in src
     # Keep a tight window around the fetch so a distant unused assignment cannot
     # satisfy the positive asserts while a nearby UnboundLocalError regresses.
+    # 2400: H-61 added the DOM build sub-phase timing to the same observe step.
+    assert src.count(marker) == 1
     start = src.index(marker)
-    block = src[start : start + 2000]
+    block = src[start : start + 2400]
     assert 'auth_runtime_state.observe_page_text(observe_page_state.get("title")' in block
     assert 'auth_runtime_state.observe_page_text(browser_state.get("title")' not in src
 
@@ -6746,11 +6748,35 @@ def test_build_autopay_prompt_section():
     assert out.lstrip().startswith("## Billing Address")
     assert "## Payment Information" in out
     assert "call request_payment_card" in out
-    assert "only if checkout requires you to enter new card details" in out
+    assert "when checkout requires you to enter new card details" in out
     assert "valid saved payment method is already selected" in out
     assert "do not call request_payment_card" in out
     # Card field names are emitted by the RESUME prompt (after mint), not the autopay prompt.
     assert "4111111111111111" not in out
+
+
+def test_saved_payment_method_default_yields_to_user_one_time_card_request():
+    """Cement H-49: the saved-method default must not forbid a requested one-time card.
+
+    DoorDash checkout preselected a saved Visa while the user asked for
+    request_payment_card and forbade the saved method. Both payment surfaces
+    said "do not call request_payment_card" whenever a saved method was
+    selected, so the browser did neither and timed out without a payment
+    approval. The system rule and the tool description must state the user
+    exception before the saved-method default, and must agree.
+    """
+    from domains.spawn_browser_agent_v3.service_crypto import PAYMENT_CARD_ENTRY_RULE
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    exception = "the user asked for a one-time card or told you not to use a saved payment method"
+    default = "Otherwise, if a valid saved payment method is already selected and no card entry is"
+    tool_description = BROWSER_USE_TOOLS["request_payment_card"]["description"]
+    for surface in (PAYMENT_CARD_ENTRY_RULE, tool_description):
+        assert "only if checkout requires" not in surface
+        assert exception in surface
+        assert default in surface
+        assert surface.index(exception) < surface.index(default)
+        assert "continue with that saved method" in surface
 
 
 def test_build_autopay_prompt_section_no_card():
@@ -10426,6 +10452,11 @@ def test_build_usage_items():
     with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}):
         steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
     assert steel_items[1]["provider"] == "Steel.dev Browser"
+
+    # Tilion is the production default provider (since 2026-10-28).
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "tilion"}):
+        tilion_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
+    assert tilion_items[1]["provider"] == "Tilion Browser"
     # Rotation can switch providers mid-run; the session metadata overrides
     # the deployment default when attributing browser time.
     with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
@@ -10526,7 +10557,7 @@ def test_build_usage_items_carries_browser_pool_model():
     assert tool_usage["llm"][0]["model"] == BROWSER_USE_PRICING_POOL
     assert tool_usage["llm"][0]["tokens_in"] == 1_186_754
     assert tool_usage["llm"][0]["tokens_out"] == 40_000
-    assert tool_usage["service"][0]["provider"] in ("Kernel Browser", "Steel.dev Browser")
+    assert tool_usage["service"][0]["provider"] == "Kernel Browser"
 
 
 def test_browser_usage_preserves_repeatable_cache_calls():
@@ -10643,7 +10674,7 @@ def test_build_usage_items_emits_one_row_per_actual_model():
 
     # The browser-time service row is NOT per-model and stays a single row.
     assert len(service_rows) == 1
-    assert service_rows[0]["provider"] in ("Kernel Browser", "Steel.dev Browser")
+    assert service_rows[0]["provider"] == "Kernel Browser"
 
 
 def test_build_usage_items_unattributed_tokens_fall_back_to_browser_pool():
@@ -16055,7 +16086,8 @@ async def test_private_numeric_credentials_preserve_only_trusted_browser_mechani
         visible_args = json.loads(message["tool_calls"][0]["function"]["arguments"])
         for target in targets:
             assert visible_args[target] == arguments[target], f"prior {name} call lost trusted target {target}"
-        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_value(
+        # The model's own arguments use the observation policy it was shown under.
+        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_observation(
             {key: value for key, value in arguments.items() if key not in targets}
         )
         assert message["content"] == "{{secret:card_cvv}}"
@@ -16108,6 +16140,13 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     newer = "synthetic-new-realm-password"
     all_values = [*refs.values(), newer]
     echoed = " | ".join(all_values)
+    # The rendered page holds a typed card name, expiry or CVV as a field
+    # value; prose matching those short values is ordinary page text. Long
+    # secrets are protected anywhere in it. Script readbacks stay strict.
+    field_echo = (
+        f"<input value={refs['card_name']} /> <input value={refs['card_expiry']} /> "
+        f"<input value={refs['card_cvv']} /> {refs['card_number']} | {refs['pwd:fixture']} | {newer}"
+    )
     dom = DOMService("ws://unused-private-observation-fixture")
     dom.register_secret_refs(refs)
     dom.mark_secret_used()
@@ -16115,7 +16154,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     state = SimpleNamespace(
         url="https://checkout.fixture.test/",
         title=refs["card_cvv"],
-        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: echoed),
+        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: field_echo),
         tabs=[
             SimpleNamespace(target_id="fixture-tab", url="https://checkout.fixture.test/", title=refs["card_number"])
         ],
@@ -16896,6 +16935,134 @@ async def test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label
             assert await page.locator("#seat").is_checked()
         finally:
             await browser.close()
+
+
+async def test_dom_service_cross_origin_iframe_coordinates_include_frame_offset():
+    """Regression for b4466499 (prod agent-payment-production-purchase, 2026-11-15).
+
+    Stripe's /g/pay/ Checkout renders its whole Payment Element inside one
+    offset cross-origin js.stripe.com iframe. ``get_element_rect`` measured each
+    control with getBoundingClientRect() in the iframe's own session, so the
+    humanizer clicked iframe-local points on the top page: Email, Card and Pay
+    missed for 12 minutes and Pay was sent to y=830 in a 625px viewport.
+    Indexed coordinates must be top-level viewport points that hit the control.
+    """
+    import functools
+    import http.server
+    import socketserver
+
+    from playwright.async_api import async_playwright
+
+    from browser_tools.dom_service import DOMService
+
+    pages = {
+        "/top": (
+            "<style>body{margin:0}iframe{position:absolute;left:700px;top:40px;width:400px;"
+            "height:900px;border:2px solid #000;padding:0}</style>"
+            '<iframe src="http://127.0.0.1:{port}/frame"></iframe>'
+        ),
+        "/frame": (
+            "<style>body{margin:0}#email{position:absolute;left:20px;top:120px;width:200px;height:30px}"
+            "#pay{position:absolute;left:20px;top:800px;width:200px;height:40px}</style>"
+            '<input id="email"><button id="pay" onclick="this.dataset.clicked=1">Pay</button>'
+        ),
+    }
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = pages.get(self.path, "").replace("{port}", str(self.server.server_address[1])).encode()
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True, args=["--site-per-process"])
+            try:
+                page = await browser.new_page(viewport={"width": 1366, "height": 625})
+                await page.goto(f"http://localhost:{port}/top")
+                frame = next(f for f in page.frames if f.url.endswith("/frame"))
+                await frame.wait_for_selector("#pay")
+                top_cdp = await page.context.new_cdp_session(page)
+                frame_cdp = await page.context.new_cdp_session(frame)  # OOPIF target session
+
+                async def _backend_id(cdp, selector):
+                    document = await cdp.send("DOM.getDocument")
+                    node = await cdp.send(
+                        "DOM.querySelector", {"nodeId": document["root"]["nodeId"], "selector": selector}
+                    )
+                    described = await cdp.send("DOM.describeNode", {"nodeId": node["nodeId"]})
+                    return described["node"]["backendNodeId"]
+
+                def _session(name, cdp):
+                    async def _send(method, *, params, session_id):
+                        assert session_id == name
+                        return await cdp.send(method, params)
+
+                    def domain(prefix):
+                        methods = ("scrollIntoViewIfNeeded", "resolveNode", "callFunctionOn")
+                        return SimpleNamespace(**{m: functools.partial(_send, f"{prefix}.{m}") for m in methods})
+
+                    return SimpleNamespace(
+                        session_id=name,
+                        cdp_client=SimpleNamespace(send=SimpleNamespace(DOM=domain("DOM"), Runtime=domain("Runtime"))),
+                    )
+
+                sessions = {"top": _session("top", top_cdp), "frame": _session("frame", frame_cdp)}
+                owner = SimpleNamespace(
+                    backend_node_id=await _backend_id(top_cdp, "iframe"), node_name="IFRAME", parent_node=None,
+                    session="top",
+                )
+                document = SimpleNamespace(
+                    backend_node_id=None, node_name="#document", parent_node=owner, session="frame"
+                )
+                owner.content_document = document
+                email = SimpleNamespace(
+                    backend_node_id=await _backend_id(frame_cdp, "#email"), node_name="INPUT", parent_node=document,
+                    session="frame",
+                )
+                pay = SimpleNamespace(
+                    backend_node_id=await _backend_id(frame_cdp, "#pay"), node_name="BUTTON", parent_node=document,
+                    session="frame",
+                )
+
+                class _FakeSession:
+                    agent_focus_target_id = "page"
+
+                    async def cdp_client_for_node(self, node):
+                        return sessions[node.session]
+
+                dom = DOMService(cdp_url="")
+                dom._session = _FakeSession()
+                dom._selector_map = {email.backend_node_id: email, pay.backend_node_id: pay}
+
+                coords = await dom.get_click_coordinates(email.backend_node_id)
+                # Email box in top-level viewport: (722..922, 162..192), center (822, 177).
+                assert coords is not None
+                assert abs(coords[0] - 822) <= 12 and abs(coords[1] - 177) <= 8, coords
+                await page.mouse.click(*coords)
+                await page.keyboard.type("a@roselabs.ai")
+                assert await frame.locator("#email").input_value() == "a@roselabs.ai"
+
+                coords = await dom.get_click_coordinates(pay.backend_node_id)
+                assert coords is not None
+                assert 0 <= coords[0] < 1366 and 0 <= coords[1] < 625, coords
+                await page.mouse.click(*coords)
+                assert await frame.locator("#pay").get_attribute("data-clicked") == "1", coords
+            finally:
+                await browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 async def test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser():
@@ -18363,7 +18530,10 @@ async def test_hard_recover_frozen_renderer_page_restores_evaluate():
     async with async_playwright() as playwright:
         async with _local_raw_probe_browser(playwright) as (browser, probe_for_page):
             try:
-                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                # Production pages share a CDP session context; browser.new_page()
+                # would make Playwright own the context and refuse a second page.
+                context = await browser.new_context(viewport={"width": 1280, "height": 800})
+                page = await context.new_page()
                 await page.set_content("<html><body><h1>waiver</h1></body></html>")
                 probe = await probe_for_page(page)
                 cdp = await page.context.new_cdp_session(page)
@@ -18385,7 +18555,7 @@ async def test_hard_recover_frozen_renderer_page_restores_evaluate():
                     fallback_url="about:blank",
                 )
                 assert new_page is not None
-                assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
+                assert "new_page" in actions, actions
                 recovered = await classify_evaluate_cdp_stall(
                     input_page=new_page, playwright_browser=browser, timeout_s=2.0, probe=await probe_for_page(new_page)
                 )
@@ -18435,7 +18605,10 @@ async def test_hard_recover_frozen_renderer_page_restores_click():
     async with async_playwright() as playwright:
         async with _local_raw_probe_browser(playwright) as (browser, probe_for_page):
             try:
-                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                # Production pages share a CDP session context; browser.new_page()
+                # would make Playwright own the context and refuse a second page.
+                context = await browser.new_context(viewport={"width": 1280, "height": 800})
+                page = await context.new_page()
                 await page.set_content("<html><body><button>Sign</button></body></html>")
                 assert await _timed_click(page) == "ok"
 
@@ -18463,11 +18636,169 @@ async def test_hard_recover_frozen_renderer_page_restores_click():
                     fallback_url="about:blank",
                 )
                 assert new_page is not None
-                assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
+                assert "new_page" in actions, actions
                 await new_page.set_content("<html><body><button>Sign</button></body></html>")
                 assert await _timed_click(new_page) == "ok"
             finally:
                 await _force_close(browser)
+
+
+async def test_hard_recover_frozen_renderer_keeps_session_browser_context():
+    """Hard renderer recovery must resume inside the session's own BrowserContext.
+
+    H-63 (anti-bot-doordash-store r001-j0007, agent 18808d56): the backend put
+    the saved login cookies into the CDP default context
+    (``browser.contexts()[0].addCookies``). The renderer froze, and hard recovery
+    opened its replacement page in ``playwright_browser.new_context()``, which
+    has its own empty cookie jar. DoorDash then served a different guest
+    consumer (business-profiles 401), and the agent asked for sign-in instead
+    of a payment card. This test uses the production shape: Chromium reached
+    over CDP, cookies in the default context, a frozen renderer on a page
+    served over HTTP, and the server checking that the resumed navigation sent
+    the session cookie.
+    """
+    import socket
+    import importlib.util
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.handler import _hard_recover_frozen_renderer_page
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    from browser_tools.cdp_probe import OwnedCdpProbe
+    from cdp_use.client import CDPClient
+
+    wait_spec = importlib.util.spec_from_file_location("condition_wait", Path(__file__).resolve().parents[3] / "scripts/lib/condition_wait.py")
+    condition_wait = importlib.util.module_from_spec(wait_spec)
+    wait_spec.loader.exec_module(condition_wait)
+
+    seen: list = []
+
+    class _Store(BaseHTTPRequestHandler):
+        def do_GET(self):
+            names = sorted(
+                part.split("=", 1)[0].strip() for part in (self.headers.get("Cookie") or "").split(";") if "=" in part
+            )
+            seen.append((self.path, names))
+            body = b"<html><body><h1>store</h1><button>Add</button></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Store)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    store_url = f"{origin}/store"
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        debug_port = reservation.getsockname()[1]
+
+    async with async_playwright() as playwright:
+        launched = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={debug_port}"])
+        browser = None
+        probe_client = None
+        try:
+            async def connect_session_browser():
+                nonlocal browser
+                browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+                return browser
+
+            await condition_wait.async_wait_until(
+                connect_session_browser, timeout=5.0, initial_interval=0.1, max_interval=0.1,
+                description="Chromium session CDP endpoint reachable", ignore_exceptions=(Exception,),
+            )
+            assert browser is not None, "Chromium CDP endpoint never became reachable"
+            session_context = browser.contexts[0]
+            await session_context.add_cookies([{"name": "session_token", "value": "local-owned", "url": origin}])
+            page = session_context.pages[0] if session_context.pages else await session_context.new_page()
+            await page.goto(store_url, wait_until="domcontentloaded")
+            assert seen[-1] == ("/store", ["session_token"]), seen
+
+            # Main's stall classifier reads only an owned cdp-use probe (same
+            # owner as production); bind it before the renderer freezes.
+            def read_ws_url():
+                with urllib.request.urlopen(f"http://127.0.0.1:{debug_port}/json/version", timeout=5) as response:
+                    return json.loads(response.read())["webSocketDebuggerUrl"]
+
+            probe_client = CDPClient(await asyncio.to_thread(read_ws_url))
+            await probe_client.start()
+
+            async def probe_for_page(target_page):
+                native = await target_page.context.new_cdp_session(target_page)
+                try:
+                    target_id = (await native.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+                finally:
+                    await native.detach()
+                attached = await probe_client.send_raw("Target.attachToTarget", {"targetId": target_id, "flatten": True})
+                return OwnedCdpProbe(
+                    probe_client, lambda: probe_client.ws is not None, attached["sessionId"], lambda: not target_page.is_closed()
+                )
+
+            probe = await probe_for_page(page)
+            cdp = await session_context.new_cdp_session(page)
+            freeze_started = asyncio.Event()
+            freeze_marker = "__fixture_renderer_freeze_started__"
+
+            def observe_freeze_marker(event):
+                if any(arg.get("value") == freeze_marker for arg in event.get("args", [])):
+                    freeze_started.set()
+
+            cdp.on("Runtime.consoleAPICalled", observe_freeze_marker)
+            await cdp.send("Runtime.enable")
+            await cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": f"setTimeout(() => {{ console.debug('{freeze_marker}'); while (true) {{}} }}, 0)",
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+            )
+            await asyncio.wait_for(freeze_started.wait(), timeout=0.25)
+            stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5, probe=probe)
+            assert stalled["verdict"] == "renderer_main_thread_blocked"
+
+            before_recovery = len(seen)
+            new_page, actions = await _hard_recover_frozen_renderer_page(
+                input_page=page,
+                playwright_browser=browser,
+                fallback_url=store_url,
+            )
+            assert new_page is not None, actions
+            assert "goto_resume_url" in actions, actions
+            resumed = [entry for entry in seen[before_recovery:] if entry[0] == "/store"]
+            assert resumed, f"recovery never resumed {store_url}: {actions}"
+            assert all("session_token" in names for _path, names in resumed), (
+                f"resumed navigation lost the session cookie: {resumed} actions={actions}"
+            )
+            assert new_page.context is session_context, "recovery moved the page out of the session BrowserContext"
+            assert "session_token" in {cookie["name"] for cookie in await new_page.context.cookies(origin)}
+            recovered = await classify_evaluate_cdp_stall(
+                input_page=new_page, playwright_browser=browser, timeout_s=2.0, probe=await probe_for_page(new_page)
+            )
+            assert recovered["renderer"] == "ok"
+        finally:
+            if probe_client is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(probe_client.stop(), timeout=5.0)
+            if browser is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(browser.close(), timeout=5.0)
+            try:
+                await asyncio.wait_for(launched.close(), timeout=5.0)
+            except Exception:
+                proc = getattr(launched, "process", None)
+                if proc is not None and getattr(proc, "pid", None):
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+            server.shutdown()
+            server.server_close()
 
 
 def test_action_timeout_cdp_classify_not_gated_on_evaluate():
@@ -24840,6 +25171,7 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
         },
         resume_overrides={
             "browser_turn_messages": turns,
+            "auth_realm": "rose-shop-test",
             "rejected_action": {"tool_call_id": "denied-auth-call", "approval_type": "auth_assistance",
                                 "request_id": "denied-auth-request", "url": "https://example.com/login"},
         },
@@ -24852,8 +25184,20 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
         recipient="/root", sender="/root/member_number", agent_type="browser",
         status="completed", summary=result["message"], structured_response=result.get("structured_response"),
     )
-    assert "declined sign-in assistance" in result["message"]
-    assert "declined sign-in assistance" in notification
+    # The parent's only evidence is this result. "Declined sign-in assistance" read as
+    # "the user won't help" and the root respawned a browser for an email code
+    # (RCA 2026-10-15-auth-decline-root-continuation-unproven). The result quotes the
+    # exact request the backend showed the user and adds no scope or instruction
+    # (review of 4b12ac96d1: facts only; the policy lives in the EXECUTE prompt).
+    assert result["message"] == h.auth_assistance_declined_message("rose-shop-test")
+    assert result["message"] in notification
+    assert 'The user declined the request "Sign in to rose-shop-test". The browser task stopped.' in notification
+    assert h.auth_assistance_declined_message("iphone") == (
+        'The user declined the request "Complete the protected step on your iPhone". The browser task stopped.'
+    )
+    backend = Path(__file__).resolve().parents[3] / "back-end/src/domains/auth-assistance"
+    assert "question: `Sign in to ${input.authRealm}`," in (backend / "repo.ts").read_text()
+    assert "question: 'Complete the protected step on your iPhone'," in (backend / "repo.nativeWrite.ts").read_text()
 
 
 @_in_browser_activity_context
@@ -25324,6 +25668,7 @@ class _FakeDomService:
     restore_secret_redaction_state = _PrivacyPolicyDOMService.restore_secret_redaction_state
     model_visible_value = _PrivacyPolicyDOMService.model_visible_value
     model_visible_action_result = _PrivacyPolicyDOMService.model_visible_action_result
+    model_visible_observation = _PrivacyPolicyDOMService.model_visible_observation
 
     def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
         self.cdp_url = cdp_url
@@ -26239,6 +26584,115 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
     assert model_contexts and "# Auth Options for claude.ai" not in str(model_contexts[0]), (
         "stale Claude auth inventory reached Google model turn"
     )
+
+
+@_in_browser_activity_context
+async def test_auth_assistance_result_redacts_backend_minted_tilion_live_view_token():
+    """I-05: the backend mints the Tilion live-view token for the auth handoff.
+    The activity result (Temporal history, then the requestUserAuthentication
+    message metadata, realtime broadcast, run records and Hub uploads) must
+    carry it redacted, exactly as browser_url is; the backend re-mints it for
+    display. Other providers' live views are displayed from the persisted URL
+    and stay unchanged."""
+    from contextlib import ExitStack
+    from domains.spawn_browser_agent_v3.cdp_urls import redact_url_secrets
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    minted_token = "tilion-view-token-0123456789abcdefghijklmnopqrstuvwxyz"
+    tilion_view = (
+        "https://east.back.tilion.dev/v1/session/sess_fixture/live-view"
+        f"?token={minted_token}&interactive=true&showControls=true"
+    )
+    kernel_view = "https://live.onkernel.com/browser/abc?interactive=true&showControls=true"
+    for minted, expected in ((tilion_view, redact_url_secrets(tilion_view)), (kernel_view, kernel_view)):
+        fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+        fake_playwright = _FakePlaywright(fake_browser)
+        session_info = {
+            "session_id": "session-1",
+            "debug_url": "https://kernel.example/debug",
+            "ws_url": "ws://old",
+            "passwords": [],
+            "auth_options": {"realm": "example.com"},
+            "browser_session_metadata": {"provider": "kernel"},
+            "same_session_available": True,
+        }
+        create_auth = AsyncMock(
+            return_value={
+                "request": {"id": "request-1", "steelSessionId": "session-1", "mode": "live_view"},
+                "handoff": {"type": "live_view", "steelSessionId": "session-1", "liveViewUrl": minted},
+            }
+        )
+
+        async def model_step(**_kwargs):
+            return {
+                "action": {
+                    "action": "request_user_assistance_for_authentication",
+                    "thinking": "Sign-in needs the user",
+                    "params": {},
+                },
+                "usage": {},
+                "mode": "waterfall",
+            }
+
+        handler = "domains.spawn_browser_agent_v3.handler."
+        targets = [
+            patch(handler + "load_config", return_value=_fake_config()),
+            patch(handler + "activity.heartbeat"),
+            patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+            patch(handler + "fetch_session_info", AsyncMock(return_value=session_info)),
+            patch(handler + "fetch_recent_otps", AsyncMock(return_value=[])),
+            patch(
+                handler + "get_model_pricing_with_fallback",
+                AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+            ),
+            patch(handler + "_call_browser_use_with_rotation", model_step),
+            patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+            patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+            patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+            patch(
+                handler + "_observe_step_page",
+                AsyncMock(return_value={"url": "https://example.com/login", "title": "Sign in"}),
+            ),
+            patch(handler + "create_user_auth_assistance_request", create_auth),
+            patch(handler + "extract_session_files", AsyncMock(return_value=[])),
+            patch(handler + "disconnect_browser_after_passkey_capture", AsyncMock()),
+            patch(
+                handler + "propagate_browser_run_credentials",
+                AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+            ),
+            patch(handler + "close_browser_session", AsyncMock()),
+            patch(handler + "save_browser_action_message", AsyncMock()),
+            patch(handler + "save_browser_assistant_message", AsyncMock()),
+            patch(handler + "save_browser_credential_ref_message", AsyncMock()),
+            patch(handler + "persist_resume_context", AsyncMock(return_value={})),
+            patch("browser_tools.dom_service.DOMService", _FakeDomService),
+            patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+            patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
+            patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+        ]
+        with ExitStack() as stack:
+            for target in targets:
+                stack.enter_context(target)
+            result = await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Sign in to example.com",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                start_url="https://example.com",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+            )
+        assert result["status"] == "awaiting_auth_assistance", result.get("status")
+        assert create_auth.await_count == 1
+        assert result["request_id"] == "request-1"
+        handoff = result["auth_assistance_request"]["handoff"]
+        assert handoff["liveViewUrl"] == expected, "auth handoff live view must match the persisted-URL policy"
+        assert minted_token not in json.dumps(result, default=str), (
+            "backend-minted Tilion live-view token leaked into the activity result"
+        )
 
 
 @_in_browser_activity_context
@@ -38743,6 +39197,10 @@ async def run_all_tests():
     r.record("build_autopay_prompt_section_no_card", test_build_autopay_prompt_section_no_card)
     r.record("build_payment_card_resume_prompt_section", test_build_payment_card_resume_prompt_section)
     r.record(
+        "saved_payment_method_default_yields_to_user_one_time_card_request",
+        test_saved_payment_method_default_yields_to_user_one_time_card_request,
+    )
+    r.record(
         "build_payment_card_resume_prompt_section_requires_all_refs",
         test_build_payment_card_resume_prompt_section_requires_all_refs,
     )
@@ -39664,6 +40122,10 @@ async def run_all_tests():
         "hard_recover_frozen_renderer_page_restores_click",
         test_hard_recover_frozen_renderer_page_restores_click,
     )
+    await r.record_async(
+        "hard_recover_frozen_renderer_keeps_session_browser_context",
+        test_hard_recover_frozen_renderer_keeps_session_browser_context,
+    )
     r.record(
         "action_timeout_cdp_classify_not_gated_on_evaluate",
         test_action_timeout_cdp_classify_not_gated_on_evaluate,
@@ -39694,6 +40156,10 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_opacity_hidden_checkbox_nonempty_rect_uses_label",
         test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label,
+    )
+    await r.record_async(
+        "dom_service_cross_origin_iframe_coordinates_include_frame_offset",
+        test_dom_service_cross_origin_iframe_coordinates_include_frame_offset,
     )
     await r.record_async(
         "dom_service_disconnect_stops_session",
@@ -40821,6 +41287,10 @@ async def run_all_tests():
     await r.record_async(
         "failed_realm_discovery_invalidates_previous_auth_context",
         test_failed_realm_discovery_invalidates_previous_auth_context,
+    )
+    await r.record_async(
+        "auth_assistance_result_redacts_backend_minted_tilion_live_view_token",
+        test_auth_assistance_result_redacts_backend_minted_tilion_live_view_token,
     )
     await r.record_async(
         "activity_failed_steel_auth_recovers_same_run",

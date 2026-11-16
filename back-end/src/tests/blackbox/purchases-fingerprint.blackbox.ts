@@ -11,6 +11,7 @@ import * as purchasesService from '../../domains/purchases/service';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { assert, StubCardStateProvider } from './purchases.testkit';
+import { testReviewlessItemParity } from './purchases-fingerprint-parity.support';
 
 config();
 
@@ -371,6 +372,7 @@ async function testUnicodeParity(): Promise<void> {
   );
 }
 
+/** Owner decisions 2026-11-08: product URL, rating and review count are optional and omitted when absent. */
 async function testBackfillBeyondTwenty(): Promise<void> {
   const userId = await createUser('over-twenty');
   const baseTime = new Date('2026-07-19T12:00:00.000Z');
@@ -572,6 +574,7 @@ async function main(): Promise<void> {
     await testProductDescriptionNameParity();
     await testActiveCardSurvivesCanonicalizationUpgrade();
     await testUnicodeParity();
+    await testReviewlessItemParity();
     await testBackfillBeyondTwenty();
     await testChargingMintGuard();
     console.log('PASS purchase fingerprint parity and legacy indexed backfill');

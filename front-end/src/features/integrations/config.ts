@@ -19,7 +19,7 @@ export const meetingNotesReturnKey = (provider: MeetingNotesProvider) =>
   `rose.${provider}.returnPath`;
 
 export const INTEGRATION_CATALOG = {
-  iphone: { title: 'Cloud iPhone', aliases: 'ios mobile phone apps device' },
+  iphone: { title: 'Phone', aliases: 'cloud iphone ios android mobile phone apps device' },
   browsers: {
     title: 'Browser Cookies',
     aliases:
@@ -57,7 +57,14 @@ export const INTEGRATION_CATALOG = {
     title: 'GitHub Repos',
     aliases: 'github gh git repository repositories repo code projects folders',
   },
-  pebble: { title: 'Other', aliases: 'pebble index 01 ring wearable audio recording webhook' },
+  pebble: {
+    title: 'Wearables',
+    aliases: 'pebble index 01 ring wearable wearables audio recording webhook other',
+  },
+  other: {
+    title: 'Other',
+    aliases: 'other request new integration missing not listed suggest add',
+  },
   clis: {
     title: 'CLIs',
     aliases: 'cli command line terminal tools github gh vercel fly stripe supabase',

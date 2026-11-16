@@ -3,8 +3,10 @@
     fetch_github_repo_inventory ──▶ GET /api/integrations/github/repos  (X-API-Key + X-User-Id)
 
 The backend scopes the inventory to the user (connected AND still granted
-repos only, legacy project repos imported first). Only repo_name, repo_url
-and canonical_ref leave this module; any failure is None (unavailable, not empty).
+repos only, legacy project repos imported first, plus repos teammates share
+with the user's teams). Only repo_name, repo_url and canonical_ref leave this
+module, plus a shared repo's sanitized owner and team names; any failure is
+None (unavailable, not empty).
 """
 
 from __future__ import annotations
@@ -49,7 +51,12 @@ async def fetch_github_repo_inventory(user_id: str) -> Optional[List[GithubRepoE
         logger.warning("[GithubRepoInventory] inventory fetch failed", error=type(exc).__name__)
         return None
     logger.info("[GithubRepoInventory] inventory fetched", count=len(repos))
-    return [
-        GithubRepoEntry(repo_name=r["repo_name"], repo_url=r["repo_url"], canonical_ref=r["canonical_ref"])
-        for r in repos
-    ]
+    return [_entry(r) for r in repos]
+
+
+def _entry(repo: dict) -> GithubRepoEntry:
+    entry = GithubRepoEntry(repo_name=repo["repo_name"], repo_url=repo["repo_url"], canonical_ref=repo["canonical_ref"])
+    if "shared_team" in repo:  # a teammate's shared repo keeps its sanitized owner and team
+        entry["shared_by"] = repo["shared_by"]
+        entry["shared_team"] = repo["shared_team"]
+    return entry

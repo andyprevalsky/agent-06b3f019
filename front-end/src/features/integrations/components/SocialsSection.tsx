@@ -11,11 +11,15 @@
  *     [SYNCING] --export agent ends without uploading--> [SYNC_FAILED]
  *     SYNCING shows "Connecting your data…" across refreshes; SYNCING and
  *     CONNECTED light the rose glow and block re-export.
+ *     A shareable connected LinkedIn shows its team-sharing caption by its name
+ *     (AccountTeamShare), on the web's Desktop Only row too.
  *   X, Instagram: [COMING_SOON] (static)
  */
 
 import { Loader2, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 
 import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
 import SectionToggleButton from './SectionToggleButton';
@@ -122,6 +126,8 @@ function LinkedInRow({
   connected: boolean;
   onSync: () => void;
 }) {
+  const target = useAccountShares().shareTarget('linkedin');
+  const share = target && <AccountTeamShare {...target} />;
   if (!isAvailable) {
     return (
       <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
@@ -134,6 +140,7 @@ function LinkedInRow({
             <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
               Desktop Only
             </span>
+            {share}
           </div>
         </div>
         <Button size="sm" variant="outline" asChild>
@@ -149,7 +156,10 @@ function LinkedInRow({
           <LinkedInIcon />
         </DropdownIconFrame>
         <div className="flex min-w-0 flex-col">
-          <span className="text-sm">LinkedIn</span>
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="text-sm">LinkedIn</span>
+            {share}
+          </div>
           {started && (
             <span className="bg-gradient-to-bl from-[#FE7503] via-[#FD5776] to-[#7A6BEC] bg-clip-text text-[11px] font-medium leading-none text-transparent">
               Connecting your data…

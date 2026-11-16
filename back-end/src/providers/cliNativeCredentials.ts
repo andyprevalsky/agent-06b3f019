@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
 import { encryptProjectSecret, decryptProjectSecret } from './projects/secrets';
 import { CliIntegrationError, type CliCaller } from './cliIntegrations';
+import { isSharedCliFor, SHARED_CLI_CREDENTIALS_REFUSED } from './cliTeamShares';
 
 export interface CliCredentialFile {
   path: string;
@@ -168,13 +169,23 @@ function declaredPaths(config: Prisma.JsonValue): string[] {
     throw new CliIntegrationError(409, 'Native CLI credentials are not configured');
   return config.credential_files as string[];
 }
+/** Only the owner's own sessions lease; a teammate's shared CLI is refused explicitly. */
+async function leasableCli(userId: string, integrationId: string) {
+  try {
+    return await ownedCli(userId, integrationId);
+  } catch (error) {
+    if (error instanceof CliIntegrationError && (await isSharedCliFor(userId, integrationId)))
+      throw new CliIntegrationError(403, SHARED_CLI_CREDENTIALS_REFUSED);
+    throw error;
+  }
+}
 async function authorized(
   caller: CliCaller,
   integrationId: string
 ): Promise<{ paths: string[]; command: string }> {
   if (caller.taskId === null) throw new CliIntegrationError(403, 'A live code session is required');
   const [connection, task, agent] = await Promise.all([
-    ownedCli(caller.userId, integrationId),
+    leasableCli(caller.userId, integrationId),
     prisma.claudeCodeSession.findUnique({
       where: { id: caller.taskId },
       select: { agentId: true, status: true },
@@ -230,6 +241,25 @@ function assertLease(state: CredentialState, caller: CliCaller, token: string): 
     throw new CliIntegrationError(409, 'CLI credential lease does not belong to this session');
   if (state.lease.expiresAt <= Date.now())
     throw new CliIntegrationError(409, 'CLI credential lease expired; reconnect this CLI');
+}
+
+/**
+ * The decoded text of every file in a connection's stored credential bundle, so
+ * a shared run can scrub them from its output; null when there is no bundle
+ * (its secrets are unknown). Server-side only: never returned to any caller.
+ */
+export async function cliCredentialFileValues(
+  ownerUserId: string,
+  integrationId: string
+): Promise<string[] | null> {
+  const row = await prisma.integration.findUnique({
+    where: credentialsWhere(ownerUserId, integrationId),
+    select: { config: true },
+  });
+  if (!row) return null;
+  return opened(credentialState(row.config)).flatMap((file) =>
+    file.data === null ? [] : [Buffer.from(file.data, 'base64').toString('utf8')]
+  );
 }
 
 /** Setup may refresh its bundle until Connected; published credentials change only on release. */
@@ -370,4 +400,56 @@ export async function releaseCliCredentials(
   assertLease(state, caller, token);
   await swap(caller.userId, integrationId, state, { kind: KIND, paths, envelope: secured(files) });
   return { released: true };
+}
+
+/** A server-side lease outlives sandbox start-up, the 30s command and capture together. */
+const OWNER_SIDE_LEASE_MS = 180_000;
+
+/**
+ * Lease the OWNER's bundle for a teammate's shared run that executes in an
+ * owner-side sandbox (cliSharedNativeRun.ts). The files go only into that
+ * sandbox, never to the teammate; `holder` (the teammate's agent and task)
+ * fences the release, and the owner's own sessions cannot release it.
+ */
+export async function acquireOwnerCliLease(
+  ownerUserId: string,
+  integrationId: string,
+  holder: { agentId: string; taskId: string }
+): Promise<{ token: string; command: string; paths: string[]; files: CliCredentialFile[] }> {
+  const connection = await ownedCli(ownerUserId, integrationId);
+  if (connection.status !== 'CONNECTED') throw new CliIntegrationError(409, 'CLI is not connected');
+  const paths = declaredPaths(connection.config);
+  const state = await loadState(ownerUserId, integrationId);
+  if (state.lease)
+    throw new CliIntegrationError(
+      409,
+      state.lease.expiresAt <= Date.now()
+        ? 'CLI credential lease expired; reconnect this CLI'
+        : 'CLI credentials are in use by another command'
+    );
+  const files = validateCliCredentialFiles(opened(state), paths);
+  const token = randomUUID();
+  const lease = { token, ...holder, expiresAt: Date.now() + OWNER_SIDE_LEASE_MS };
+  await swap(ownerUserId, integrationId, state, { ...state, lease });
+  return {
+    token,
+    command: String((connection.config as Prisma.JsonObject).command),
+    paths,
+    files,
+  };
+}
+
+/** Return the owner-side lease with the files the command left (refreshed logins persist). */
+export async function releaseOwnerCliLease(
+  ownerUserId: string,
+  integrationId: string,
+  holder: { agentId: string; taskId: string },
+  token: string,
+  value: CliCredentialFile[]
+): Promise<void> {
+  const paths = declaredPaths((await ownedCli(ownerUserId, integrationId)).config);
+  const files = validateCliCredentialFiles(value, paths);
+  const state = await loadState(ownerUserId, integrationId);
+  assertLease(state, { userId: ownerUserId, ...holder }, token);
+  await swap(ownerUserId, integrationId, state, { kind: KIND, paths, envelope: secured(files) });
 }

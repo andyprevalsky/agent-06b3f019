@@ -1,0 +1,96 @@
+---
+id: 2026-11-15-iphone-setup-verifier-ocr-only-evidence-rejected-visible-proof
+date: 2026-11-15
+title: iPhone setup verifier returned unknown on screens that showed Gmail, iMessage and receive-address proof because its OCR-only evidence rules covered neither Gmail's Settings screen nor OCR checkmark glyphs
+surface: cross
+component: iphone-setup-verifier
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: back-end/src/providers/phoneSetupPurpose.ts settingsPurpose — the verifier receives only screen.text OCR (no app identity, no switch or checkmark state) but its gmail/imessage/receive_address purposes named no OCR-observable proof screen, so rose-1-mini returned unknown on the screens the agent could actually capture
+symptoms:
+  - setup.verify target gmail returned unknown
+  - phone_setup_gmail
+  - phone_setup_receive_address
+  - Gmail Settings a@roselabs.ai still unknown
+tags:
+  - iphone
+  - phone-harness
+  - setup-verification
+  - ocr
+  - prompt
+  - rose-1-mini
+sources:
+  - PR #2210
+  - PR #2250
+  - PR #2268
+  - commit 2289691502a3771aa29c6316ec8f5142448c4db6
+  - PR #2262
+  - commit abcfbbc0b7062514ac5e6068b04432b173ef5f06
+  - commit 33ef570dae578831f563f9e2e446ebe73afec0fc
+  - commit 8e74738f13adfe9a5db1c61cd673dd8c3dd69b73
+  - agent 1772a64a-c22a-5cf7-9184-17508eda5df6
+  - agent 1772a64a lease 45543f2e-e77c-4470-b258-4c19dc135226
+  - agent 1772a64a lease 7c1dd8c6-b81e-4bcc-908b-15f76b23d1ed
+repro: back-end/src/tests/blackbox/iphone-control.setup-verifier-replay.cases.ts "live setup verifier: recorded proof screens and controls"
+status: fixed
+---
+
+## Problem
+
+Prod setup agent 1772a64a (2026-11-15 05:21-06:15Z) passed portrait lock and Apple Account, signed in to Gmail and reached Gmail's per-account Settings screen (`Settings / Account / Andy Prevalsky / a@roselabs.ai / … / Apps in Gmail`, cursor 119 and again cursor 4 on lease 7c1dd8c6) and the Google Account page (cursor 9). Every `setup.verify target=gmail` returned `{"status":"unknown"}` (archived `phone_setup_gmail` finals 29f5b7b1, e2654036, f7bf822f, plus the 06:04:38Z call). The Send & Receive page (`V +1 (972) 977-7432`, `/ andyprevalsky@icloud.com`, `v andyprevalsky@yahoo.com`, `Apple Account: andyprevalsky@yahoo.com`) returned unknown for receive_address (df737ea3; model reasoning: "a 'V' might represent a visual checkmark, but it's not explicitly marked"). The prod journal (`iPhoneOperation` rows for both leases) shows the agent never submitted icloud_messages, icloud_keychain, icloud_contacts or imessage.
+
+## Diagnosis
+
+Critical path: agent screen.text → `setupEvidence` (repo.setupEvidence.ts: one current window of OCR rows, identities un-redacted) → `verifyPhoneSetup` (rose-1-mini, `settingsPurpose(target)`, strict `{status}` schema) → `parseSettingsResult` → stored proof → `verificationDto`/`setupProgress`.
+
+- Evidence selection, schema and parse were correct: each call carried the intended latest observation, expected identities were present and unmasked, output was valid JSON `{"status":"unknown"}` (no truncation, no refusal).
+- First bad data: the model's verdict. Exact replays through the same TS client path (gpt-5.6-luna-foundry, same messages/schema/config): Gmail Settings gmail unknown 3/3 (both recorded observations), Google Account page unknown 3/3, Send & Receive receive_address confirmed 1/3, imessage unknown 3/3.
+- Why: the evidence is OCR text only (`Only server-loaded text evidence is available`), so app identity, switch positions and checkmarks are not represented. The gmail purpose required an "authenticated Gmail screen" but nothing OCR-visible identified Gmail's account Settings screen as one; no purpose said how iOS checkmarks render in OCR (a leading `V`/`v`/`/` glyph), so receive_address was a coin flip and imessage (whose switch has no text) could never confirm.
+- Why possible: the agent guidance (agents/domains/spawn_browser_agent_v3/phone.py) never told the agent the verifier sees OCR only or which screens carry textual proof, so the agent also never opened the iCloud or Messages > Send & Receive screens for icloud_* / imessage.
+- Progress reset (separate finding, not fixed here): `ensureSetup` (back-end/src/domains/iphone/repo.setup.ts:103-135) mints a new attempt id and floor for each new lease, so proofs from released lease 45543f2e failed `proofCurrent` on lease 7c1dd8c6 and the card restarted at portrait_lock. Sibling of 2026-11-14-iphone-session-ttl-refresh-discarded-in-progress-setup-checks (epoch carry only), recommended as its own goal.
+
+Class stopped at: "verifier prompts must name the OCR-observable proof for each target". Deeper class tried: give the verifier structured app identity / control state from the provider (no such provider field exists; the journal's last `apps.launch` is not proof because later taps can switch apps), so a prompt-level OCR contract is the coherent owned fix.
+
+## Solution
+
+- `settingsPurpose` shared suffix: an iOS checkmark on a selectable row renders as a separate single leading glyph (V, v, /, check mark) followed by a space and counts as selection only for that row; switches have no text.
+- gmail purpose: Gmail's per-account Settings screen showing the exact account email under Account with Gmail-only settings (Apps in Gmail) is an authenticated Gmail screen; a Google Account page alone does not identify the Gmail app.
+- imessage purpose: the Send & Receive screen headed "You Can Receive iMessages to and Reply From" with the exact expected Apple Account establishes iMessage On and signed in unless any observation shows "Waiting for activation" or an activation error (unknown).
+- PHONE_GUIDANCE: tell the agent the verifier sees screen.text OCR only and name the screens (Settings > your name > iCloud; Settings > Apps > Messages > Send & Receive; Gmail account Settings).
+- Regression: live rose-1-mini replay of the recorded observations with negative controls (inbox under dialog, Google Account page alone, typed sign-in form, wrong Google account, phone row without glyph, phone unchecked only under Receive, Waiting for activation, FaceTime look-alike, wrong Apple Account). Before: FAIL 3/3 (Gmail Settings and iMessage unknown); after: PASS 5/5. The independent review's Waiting-for-activation negative caught an overbroad first draft, fixed before landing.
+- 10k agents: prompt text only; no new queries or fan-in.
+
+Shipped: PR #2210, merged 8e74738f13 on 2026-11-15. Production lanes PASS: Render live via descendant 37308b16bd, backend probes, Fly verified by descendant cutover 64f91559 (a867f5d4), workflow migration, semantic via descendant 6c9aa700. Live owner retry (agent 87c1e09a-28ed-5f81-b7ce-6166c18523d7, 20:40Z) after #2210 shipped:
+- gmail, icloud_messages and icloud_keychain confirmed on the real Gmail account Settings and Saved to iCloud screens.
+- receive_address was a FALSE CONFIRM from the FaceTime settings page ("You can be reached by FaceTime at … Caller ID"). The #2210 checkmark-glyph rule let FaceTime checkmarks read as iMessage receive selection. imessage on the same page was unknown in prod, but confirmed 2/3 in replay.
+- Exact replay of that request on #2210's prompt: receive_address confirmed 3/3.
+
+Follow-up fix: PR #2250, merged 33ef570dae on 2026-11-15. Production PASS: Render live, backend probes, semantic (descendant e7b9f9ef). Backend only, so no Fly cutover, per the coordinator's hold during the live owner setup.
+- receive_address needs the phone checkmark inside the You Can Receive iMessages to and Reply From list. Start New Conversations From, FaceTime and Caller ID checkmarks do not count, and a FaceTime screen is never Send and Receive.
+- imessage: a FaceTime screen never proves iMessage, and an Apple Account line naming another identity is disabled.
+- Regressions use the real FaceTime page (as receive_address and as imessage) and the real Saved to iCloud page: messages and keychain confirm, contacts stays unproven without a Contacts row.
+- The replay case fails 3/3 runs on #2210's prompt and passes 10/10 consecutive runs after.
+
+Third gap, icloud_contacts:
+- After #2250, live agent 87c1e09a confirmed gmail, passcode, imessage and receive_address under the stricter verifier.
+- icloud_contacts stayed unknown on the real iCloud See All list (cursors 14 and 38). There Contacts is a switch row with no On text, so OCR can never show its state.
+- The textual proof is Settings > Apps > Contacts > Accounts, where the iCloud row's services line reads 'iCloud Drive, iCloud Mail, Contacts, and' / '10 more...' (cursor 9, split across OCR rows). The verifier said unknown there 3/3.
+
+Fix (backend-only): an Accounts screen whose iCloud row's services line explicitly lists Contacts confirms it. A line that doesn't list Contacts (including one truncated with 'and N more'), or Contacts under another account, is unknown and never disabled. The regressions use the real Accounts and See All screens plus those two mutations. The 21-check replay passes 10/10 after and fails 3/3 before.
+
+Remaining for ready, none of them a verifier defect: device_passcode is disabled (no passcode set); imessage needs the real Send & Receive screen; icloud_contacts needs See All under Saved to iCloud. The agent-guidance wording for the last two is held as draft PR #2262. The coordinator will batch it into thread ph78393fcn3's single Fly cutover once the live setup is done. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
+
+**Outcome (live, 2026-11-16):**
+- #2268 merged 2289691502. Production: Render via descendant 26714e91d, backend probes PASS, semantic via descendant 771a3da8.
+- Owner setup 87c1e09a reached **ready at 02:13:45Z**. icloud_contacts confirmed on the real Settings > Apps > Contacts > Accounts screen (cursor 15: 'iCloud Drive, iCloud Mail, Contacts, and' / '10 more...').
+- Every CONFIG_TARGET was confirmed, with security passcode_enabled.
+- #2262 (agent guidance naming the Contacts Accounts proof and the FaceTime look-alike) merged abcfbbc0b7. Its first golden review was NOT_GROUNDED because the See All advice pointed at an unlabeled switch; revision 2 is GROUNDED. Production: Fly cutover deploy-agents run 43802714720 SUCCEEDED, workflow migration PASS, semantic via descendant e3416343.
+
+
+## Human feedback
+
+The coordinator asked to hold Fly cutovers during the live owner setup, so the follow-up is backend-only. The user required no weakening of proof (a typed-but-unsigned identifier must never confirm) and replay regressions from the real observations.
+
+## Reusable lesson
+
+When a verifier only sees OCR text, each target's purpose and the agent guidance must name the OCR-visible screen that proves it (and how glyphs like checkmarks render); otherwise a correct device state stays unknown forever.
