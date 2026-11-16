@@ -25,6 +25,7 @@ import { markdownPreview } from '@/features/terminal-component-group/components/
 import { buildAgentToolData } from '@/features/terminal-component-group/components/message-bubble/agentToolData';
 import { ToolMessageHeader } from '@/features/terminal-component-group/components/message-bubble/ToolMessageHeader';
 import { waitAgentKindNeedsTranscript } from '@/features/terminal-component-group/components/waitAgentKinds';
+import { WaitlistGate } from '@/features/auth';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { isRoseDesktopSession } from '@/lib/roseDesktopSession';
 import type { Message } from '@/lib/api';
@@ -32,7 +33,14 @@ import { msg, WithAgent } from './code-agent-steering.fixtures';
 import { renderWithProviders } from './test-wrapper';
 import { server } from './msw/server';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+  for (const cookie of document.cookie.split(';')) {
+    const key = cookie.trim().split('=')[0];
+    if (key.startsWith('rose-theme')) document.cookie = `${key}=; Max-Age=0; Path=/`;
+  }
+});
 
 const at = (n: number) => new Date(Date.UTC(2026, 9, 28, 12, 0, n)).toISOString();
 const goal = msg(
@@ -535,6 +543,35 @@ describe('Rose Desktop comes up with the session, not the invite check', () => {
   const inviteCheck = 'http://localhost:3001/api/invite-codes/check';
   const htmlIsDark = () => document.documentElement.classList.contains('dark');
 
+  it.each([false, true])(
+    'logged-out terminal uses new chrome (anonymous session: %s)',
+    async (anonymous) => {
+      if (anonymous) {
+        localStorage.setItem(
+          'rose-session',
+          JSON.stringify({
+            access_token: 'anonymous-token',
+            refresh_token: 'anonymous-refresh',
+            expires_in: 3600,
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            token_type: 'bearer',
+            user: { id: 'anonymous-session', is_anonymous: true },
+          }),
+        );
+      }
+      renderWithProviders(createElement(Terminal));
+      expect(await screen.findByTestId('rose-sidebar')).toBeInTheDocument();
+      expect(screen.getByTestId('rose-app-icons')).toBeInTheDocument();
+      expect(screen.getByTestId('query-toolbar-nub')).toBeInTheDocument();
+      expect(screen.queryByText('Safe Writes')).toBeNull();
+      expect(screen.getByTestId('query-model-selector')).toHaveTextContent('rose-flash');
+      expect(document.documentElement).not.toHaveClass('dark');
+      fireEvent.click(screen.getByTestId('rose-app-dark-mode'));
+      expect(document.documentElement).toHaveClass('dark');
+      expect(localStorage.getItem('rose-theme:guest')).toBe('dark');
+    },
+  );
+
   it.each([
     ['pending', () => delay('infinite')],
     ['failed (reconnect)', () => HttpResponse.json({ error: 'down' }, { status: 500 })],
@@ -547,7 +584,7 @@ describe('Rose Desktop comes up with the session, not the invite check', () => {
     await waitFor(() => expect(htmlIsDark()).toBe(true));
   });
 
-  it('a known waitlisted account (check answered needs-invite) keeps the stock chrome', async () => {
+  it('a known waitlisted account keeps the new chrome without bypassing the invite check', async () => {
     let answered = 0;
     server.use(
       http.get(inviteCheck, () => {
@@ -556,13 +593,18 @@ describe('Rose Desktop comes up with the session, not the invite check', () => {
       }),
     );
     storeSession();
-    renderWithProviders(createElement(Terminal));
-    await waitFor(() => expect(answered).toBeGreaterThan(0));
-    await waitFor(() => expect(screen.queryByTestId('rose-app-icons')).toBeNull());
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(screen.queryByTestId('rose-app-icons')).toBeNull();
+    renderWithProviders(
+      <>
+        <Terminal />
+        <WaitlistGate />
+      </>,
+    );
+    await screen.findByText("You're On The Waitlist!");
+    expect(answered).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByTestId('rose-app-icons')).toBeInTheDocument());
+    expect(screen.getByTestId('rose-app-icons')).toBeInTheDocument();
     expect(
       isRoseDesktopSession({ isAnonymous: false, authUser: { id: USER }, inviteRequired: true }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
