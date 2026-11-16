@@ -209,6 +209,25 @@ class WorkerPoolCutoverTests(unittest.TestCase):
             return json.dumps(self.pointer)
         return ""
 
+    def test_concurrent_machine_failures_beyond_the_raised_one_are_logged(self):
+        """2026-11-15 run 43669103359: a second failure in the wave (a lease release) was silently dropped."""
+        def operation(record):
+            if record["id"] == "ok":
+                return record["id"]
+            raise URLError(f"fixture failure on {record['id']}")
+
+        stderr = io.StringIO()
+        with patch.object(sys, "stderr", stderr), self.assertRaisesRegex(URLError, "on first"):
+            cutover.for_each_machine(operation, [{"id": "first"}, {"id": "ok"}, {"id": "second"}])
+        self.assertIn("also failed on 'second'", stderr.getvalue())
+        self.assertNotIn("'first'", stderr.getvalue())
+        self.assertNotIn("'ok'", stderr.getvalue())
+        # Negative control: a clean wave logs nothing.
+        stderr = io.StringIO()
+        with patch.object(sys, "stderr", stderr):
+            self.assertEqual(cutover.for_each_machine(operation, [{"id": "ok"}]), ["ok"])
+        self.assertEqual(stderr.getvalue(), "")
+
     def run_job(self, ledger, native):
         with (
             patch.object(cutover, "backend_command", self.command),

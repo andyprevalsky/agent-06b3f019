@@ -16086,7 +16086,8 @@ async def test_private_numeric_credentials_preserve_only_trusted_browser_mechani
         visible_args = json.loads(message["tool_calls"][0]["function"]["arguments"])
         for target in targets:
             assert visible_args[target] == arguments[target], f"prior {name} call lost trusted target {target}"
-        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_value(
+        # The model's own arguments use the observation policy it was shown under.
+        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_observation(
             {key: value for key, value in arguments.items() if key not in targets}
         )
         assert message["content"] == "{{secret:card_cvv}}"
@@ -16139,6 +16140,13 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     newer = "synthetic-new-realm-password"
     all_values = [*refs.values(), newer]
     echoed = " | ".join(all_values)
+    # The rendered page holds a typed card name, expiry or CVV as a field
+    # value; prose matching those short values is ordinary page text. Long
+    # secrets are protected anywhere in it. Script readbacks stay strict.
+    field_echo = (
+        f"<input value={refs['card_name']} /> <input value={refs['card_expiry']} /> "
+        f"<input value={refs['card_cvv']} /> {refs['card_number']} | {refs['pwd:fixture']} | {newer}"
+    )
     dom = DOMService("ws://unused-private-observation-fixture")
     dom.register_secret_refs(refs)
     dom.mark_secret_used()
@@ -16146,7 +16154,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     state = SimpleNamespace(
         url="https://checkout.fixture.test/",
         title=refs["card_cvv"],
-        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: echoed),
+        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: field_echo),
         tabs=[
             SimpleNamespace(target_id="fixture-tab", url="https://checkout.fixture.test/", title=refs["card_number"])
         ],
@@ -16927,6 +16935,134 @@ async def test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label
             assert await page.locator("#seat").is_checked()
         finally:
             await browser.close()
+
+
+async def test_dom_service_cross_origin_iframe_coordinates_include_frame_offset():
+    """Regression for b4466499 (prod agent-payment-production-purchase, 2026-11-15).
+
+    Stripe's /g/pay/ Checkout renders its whole Payment Element inside one
+    offset cross-origin js.stripe.com iframe. ``get_element_rect`` measured each
+    control with getBoundingClientRect() in the iframe's own session, so the
+    humanizer clicked iframe-local points on the top page: Email, Card and Pay
+    missed for 12 minutes and Pay was sent to y=830 in a 625px viewport.
+    Indexed coordinates must be top-level viewport points that hit the control.
+    """
+    import functools
+    import http.server
+    import socketserver
+
+    from playwright.async_api import async_playwright
+
+    from browser_tools.dom_service import DOMService
+
+    pages = {
+        "/top": (
+            "<style>body{margin:0}iframe{position:absolute;left:700px;top:40px;width:400px;"
+            "height:900px;border:2px solid #000;padding:0}</style>"
+            '<iframe src="http://127.0.0.1:{port}/frame"></iframe>'
+        ),
+        "/frame": (
+            "<style>body{margin:0}#email{position:absolute;left:20px;top:120px;width:200px;height:30px}"
+            "#pay{position:absolute;left:20px;top:800px;width:200px;height:40px}</style>"
+            '<input id="email"><button id="pay" onclick="this.dataset.clicked=1">Pay</button>'
+        ),
+    }
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = pages.get(self.path, "").replace("{port}", str(self.server.server_address[1])).encode()
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True, args=["--site-per-process"])
+            try:
+                page = await browser.new_page(viewport={"width": 1366, "height": 625})
+                await page.goto(f"http://localhost:{port}/top")
+                frame = next(f for f in page.frames if f.url.endswith("/frame"))
+                await frame.wait_for_selector("#pay")
+                top_cdp = await page.context.new_cdp_session(page)
+                frame_cdp = await page.context.new_cdp_session(frame)  # OOPIF target session
+
+                async def _backend_id(cdp, selector):
+                    document = await cdp.send("DOM.getDocument")
+                    node = await cdp.send(
+                        "DOM.querySelector", {"nodeId": document["root"]["nodeId"], "selector": selector}
+                    )
+                    described = await cdp.send("DOM.describeNode", {"nodeId": node["nodeId"]})
+                    return described["node"]["backendNodeId"]
+
+                def _session(name, cdp):
+                    async def _send(method, *, params, session_id):
+                        assert session_id == name
+                        return await cdp.send(method, params)
+
+                    def domain(prefix):
+                        methods = ("scrollIntoViewIfNeeded", "resolveNode", "callFunctionOn")
+                        return SimpleNamespace(**{m: functools.partial(_send, f"{prefix}.{m}") for m in methods})
+
+                    return SimpleNamespace(
+                        session_id=name,
+                        cdp_client=SimpleNamespace(send=SimpleNamespace(DOM=domain("DOM"), Runtime=domain("Runtime"))),
+                    )
+
+                sessions = {"top": _session("top", top_cdp), "frame": _session("frame", frame_cdp)}
+                owner = SimpleNamespace(
+                    backend_node_id=await _backend_id(top_cdp, "iframe"), node_name="IFRAME", parent_node=None,
+                    session="top",
+                )
+                document = SimpleNamespace(
+                    backend_node_id=None, node_name="#document", parent_node=owner, session="frame"
+                )
+                owner.content_document = document
+                email = SimpleNamespace(
+                    backend_node_id=await _backend_id(frame_cdp, "#email"), node_name="INPUT", parent_node=document,
+                    session="frame",
+                )
+                pay = SimpleNamespace(
+                    backend_node_id=await _backend_id(frame_cdp, "#pay"), node_name="BUTTON", parent_node=document,
+                    session="frame",
+                )
+
+                class _FakeSession:
+                    agent_focus_target_id = "page"
+
+                    async def cdp_client_for_node(self, node):
+                        return sessions[node.session]
+
+                dom = DOMService(cdp_url="")
+                dom._session = _FakeSession()
+                dom._selector_map = {email.backend_node_id: email, pay.backend_node_id: pay}
+
+                coords = await dom.get_click_coordinates(email.backend_node_id)
+                # Email box in top-level viewport: (722..922, 162..192), center (822, 177).
+                assert coords is not None
+                assert abs(coords[0] - 822) <= 12 and abs(coords[1] - 177) <= 8, coords
+                await page.mouse.click(*coords)
+                await page.keyboard.type("a@roselabs.ai")
+                assert await frame.locator("#email").input_value() == "a@roselabs.ai"
+
+                coords = await dom.get_click_coordinates(pay.backend_node_id)
+                assert coords is not None
+                assert 0 <= coords[0] < 1366 and 0 <= coords[1] < 625, coords
+                await page.mouse.click(*coords)
+                assert await frame.locator("#pay").get_attribute("data-clicked") == "1", coords
+            finally:
+                await browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 async def test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser():
@@ -25532,6 +25668,7 @@ class _FakeDomService:
     restore_secret_redaction_state = _PrivacyPolicyDOMService.restore_secret_redaction_state
     model_visible_value = _PrivacyPolicyDOMService.model_visible_value
     model_visible_action_result = _PrivacyPolicyDOMService.model_visible_action_result
+    model_visible_observation = _PrivacyPolicyDOMService.model_visible_observation
 
     def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
         self.cdp_url = cdp_url
@@ -40019,6 +40156,10 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_opacity_hidden_checkbox_nonempty_rect_uses_label",
         test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label,
+    )
+    await r.record_async(
+        "dom_service_cross_origin_iframe_coordinates_include_frame_offset",
+        test_dom_service_cross_origin_iframe_coordinates_include_frame_offset,
     )
     await r.record_async(
         "dom_service_disconnect_stops_session",

@@ -731,7 +731,7 @@ class ActionHistory:
                 value = entry[key]
                 if key == "result" and entry.get("action") == "read_browser_state" and isinstance(value, dict) and isinstance(value.get("formatted_state"), str):
                     safe_entry[key] = dom_service.model_visible_value({k: v for k, v in value.items() if k != "formatted_state"})
-                    safe_entry[key]["formatted_state"] = dom_service.model_visible_value(value["formatted_state"])
+                    safe_entry[key]["formatted_state"] = dom_service.model_visible_observation(value["formatted_state"])
                 elif key == "result" and entry.get("action") == "request_payment_card" and callable(getattr(dom_service, "model_visible_action_result", None)):
                     safe_entry[key] = dom_service.model_visible_action_result(entry.get("action", ""), value)
                 else:
@@ -752,6 +752,11 @@ class ActionHistory:
         for key in ("step", "action", "index", "coordinates"):
             if key in entry:
                 safe_entry[key] = entry[key]
+        result, safe_result = entry.get("result"), safe_entry.get("result")
+        context = result.get("screenshot_context") if isinstance(result, dict) else None
+        if (isinstance(context, dict) and type(context.get("step")) is int and isinstance(safe_result, dict)
+                and isinstance(safe_result.get("screenshot_context"), dict)):
+            safe_result["screenshot_context"]["step"] = context["step"]
         return safe_entry
 
 
@@ -881,6 +886,8 @@ class ActionHistory:
         context.setdefault("session_id", session_id)
         entry.screenshot = screenshot
         entry.result["screenshot_context"] = self.model_visible_value(context)
+        # The capture's step is harness bookkeeping, not a page readback.
+        entry.result["screenshot_context"]["step"] = context["step"]
 
     def screenshot_evidence(self, session_id: str = "", task_id: str = "") -> List[Dict[str, Any]]:
         """Return captured tool results already in this history, without task-proof gating."""
@@ -1123,14 +1130,27 @@ class DOMService:
         from helpers.screenshot_history import redact_with_screenshots
         return redact_with_screenshots(value, lambda item: mask_secret_values(item, self._secret_redaction_refs))
 
+    def model_visible_observation(self, value: Any) -> Any:
+        """Redact a browser-state observation or model-authored content.
+
+        A short card value is masked where the page holds it as a value, never
+        in prose or numbers; long secrets stay masked everywhere. Raw readbacks
+        use ``model_visible_value``.
+        """
+        from helpers.screenshot_history import redact_with_screenshots
+        return redact_with_screenshots(
+            value, lambda item: mask_secret_values(item, self._secret_redaction_refs, value_scoped=True)
+        )
+
     def model_visible_action_result(self, action_name: str, result: Any) -> Any:
         """Redact page payloads while preserving trusted action bookkeeping."""
-        safe = self.model_visible_value(result)
+        from browser_tools.result_projection import preserve_output_protocol, project_result, retain_model_preview
+        observe = self.model_visible_observation
+        safe = project_result(result, action_name, self.model_visible_value, observe)
         if not isinstance(result, dict) or not isinstance(safe, dict):
             return safe
-        from browser_tools.result_projection import preserve_output_protocol, retain_model_preview
-        safe = preserve_output_protocol(result, safe, action_name, self.model_visible_value)
-        safe = retain_model_preview(result, safe, action_name, self.model_visible_value)
+        safe = preserve_output_protocol(result, safe, action_name, self.model_visible_value, scoped_redact=observe)
+        safe = retain_model_preview(result, safe, action_name, self.model_visible_value, scoped_redact=observe)
         if "credential_ref" in result:
             safe["credential_ref"] = result["credential_ref"]
         if action_name == "request_payment_card":
@@ -1151,7 +1171,7 @@ class DOMService:
         if isinstance(result.get("tabs"), list):
             safe["tabs"] = []
             for tab in result["tabs"]:
-                visible_tab = self.model_visible_value(tab)
+                visible_tab = observe(tab)
                 if isinstance(tab, dict) and "id" in tab:
                     visible_tab["id"] = tab["id"]
                 safe["tabs"].append(visible_tab)
@@ -2767,6 +2787,9 @@ class DOMService:
             result["screenshot_context"] = {"captured_at": capture_started_at, "url": result["url"]}
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
         safe_result = self.model_visible_value(result)
+        # The rendered page itself is an observation, not a script readback.
+        for key in ("url", "title", "dom_tree", "tabs"):
+            safe_result[key] = self.model_visible_observation(result[key])
         if screenshot_to_use:
             # PNG base64 is binary transport, not page text. A short CVV can
             # coincidentally occur in it; textual substitution corrupts pixels.
@@ -3046,6 +3069,81 @@ class DOMService:
                 return candidates[0]
         return None
 
+    @staticmethod
+    def _frame_owner_chain(element: Any) -> List[Any]:
+        """Return the iframe/frame elements that own ``element``, innermost first."""
+        owners: List[Any] = []
+        child, node = element, getattr(element, "parent_node", None)
+        while node is not None:
+            if (
+                str(getattr(node, "node_name", "")).upper() in ("IFRAME", "FRAME")
+                and getattr(node, "content_document", None) is child
+            ):
+                owners.append(node)
+            child, node = node, getattr(node, "parent_node", None)
+        return owners
+
+    async def _rect_in_top_viewport(self, element: Any, rect: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Translate a frame-local viewport rect into top-level viewport coordinates.
+
+        ``getBoundingClientRect()`` runs in the element's own frame, but the
+        humanizer dispatches mouse input on the top page. Each owning iframe's
+        content-box origin is added, and the rect is clipped to every ancestor
+        viewport, so a control inside an offset (cross-origin) iframe is clicked
+        where it is drawn. Returns None when no part of it is visible on top.
+        """
+        owners = self._frame_owner_chain(element)
+        if not owners:
+            return rect
+        x, y = float(rect["x"]), float(rect["y"])
+        right, bottom = x + float(rect["width"]), y + float(rect["height"])
+        viewport_width, viewport_height = rect.get("viewportWidth"), rect.get("viewportHeight")
+        for owner in owners:
+            cdp_session = await self._session.cdp_client_for_node(owner)
+            resolved = await cdp_session.cdp_client.send.DOM.resolveNode(
+                params={"backendNodeId": owner.backend_node_id},
+                session_id=cdp_session.session_id,
+            )
+            object_id = resolved.get("object", {}).get("objectId")
+            if not object_id:
+                return None
+            js_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+                params={
+                    "objectId": object_id,
+                    "functionDeclaration": """
+                    function() {
+                        const rect = this.getBoundingClientRect();
+                        const style = window.getComputedStyle(this);
+                        return {
+                            x: rect.left + this.clientLeft + (Number.parseFloat(style.paddingLeft) || 0),
+                            y: rect.top + this.clientTop + (Number.parseFloat(style.paddingTop) || 0),
+                            viewportWidth: window.innerWidth || document.documentElement.clientWidth || 0,
+                            viewportHeight: window.innerHeight || document.documentElement.clientHeight || 0
+                        };
+                    }
+                    """,
+                    "returnByValue": True,
+                },
+                session_id=cdp_session.session_id,
+            )
+            box = js_result.get("result", {}).get("value")
+            if not box:
+                return None
+            viewport_width, viewport_height = box["viewportWidth"], box["viewportHeight"]
+            x, right = max(0.0, x + box["x"]), min(float(viewport_width), right + box["x"])
+            y, bottom = max(0.0, y + box["y"]), min(float(viewport_height), bottom + box["y"])
+            if right <= x or bottom <= y:
+                return None
+        return {
+            **rect,
+            "x": x,
+            "y": y,
+            "width": right - x,
+            "height": bottom - y,
+            "viewportWidth": viewport_width,
+            "viewportHeight": viewport_height,
+        }
+
     async def get_element_rect(
         self,
         index: int,
@@ -3217,6 +3315,15 @@ class DOMService:
                     extra={"index": index, "rect": rect_data},
                 )
                 return None
+
+            top_rect = await self._rect_in_top_viewport(element, rect_data)
+            if top_rect is None:
+                logger.warning(
+                    "Iframe element has no visible top-level viewport intersection",
+                    extra={"index": index, "frame_rect": rect_data},
+                )
+                return None
+            rect_data = top_rect
 
             viewport_width = rect_data.get("viewportWidth") or self.viewport_width
             viewport_height = rect_data.get("viewportHeight") or self.viewport_height
