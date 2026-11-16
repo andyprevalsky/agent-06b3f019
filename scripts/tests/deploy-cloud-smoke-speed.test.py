@@ -384,7 +384,7 @@ class SingleWidthRerunOwnsFlyTransport(unittest.TestCase):
             arguments = ['campaign', '--root', str(root), '--runs', '1', '--concurrency', '1',
                          '--retry-infra', '0', '--task=agent-payment-idempotent-abandonment']
             replacements = dict(campaign_workspace=lambda r, _forward: (r, None),
-                                provider_capacity_refusal=lambda _n: None, scorecard_hooks=lambda: None,
+                                provider_capacity_refusal=lambda _n, _tasks=None: None, scorecard_hooks=lambda: None,
                                 start_shared_inventory=start_shared_inventory,
                                 start_shared_relay=start_shared_relay,
                                 stop_shared_inventory=lambda *_a: True,
