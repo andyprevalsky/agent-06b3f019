@@ -5,7 +5,7 @@
  *   [Provider value=false]   → false
  *   [Provider value=true]    → true (Rose Desktop chrome; see lib/roseDesktop.ts)
  *
- * The terminal layout provides it from the signed-in account with
+ * The terminal layout enables it for every visitor with
  * <RoseDesktopContext.Provider value={...}>; shared/benchmark views and tests
  * without a provider get the stock UI.
  */
