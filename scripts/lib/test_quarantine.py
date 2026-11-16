@@ -30,6 +30,7 @@ Stdlib only; importable from scripts/tests and agents tests with scripts/lib on 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import functools
 import importlib.util
@@ -146,6 +147,44 @@ def _failed(meta: dict[str, str], unit: str, exc: BaseException) -> None:
     record(meta, unit, 'QUARANTINED_FAIL', detail)
 
 
+@contextlib.contextmanager
+def _subtests(args: tuple):
+    """Collect failures of unittest subTest() blocks inside a quarantined method.
+
+    unittest.subTest() records a failing block on the result and does not re-raise, so the
+    wrapper would otherwise report QUARANTINED_PASS while that subtest fails the run. Each
+    block still runs under the original subTest() (skips stay subtest skips); a failure is
+    kept here instead, and the next block still runs, as unittest does.
+    """
+    case = args[0] if args and isinstance(args[0], unittest.TestCase) else None
+    failures: list[BaseException] = []
+    if case is None:
+        yield failures
+        return
+    original = case.subTest
+
+    @contextlib.contextmanager
+    def subtest(*sub_args: Any, **params: Any):
+        with original(*sub_args, **params):
+            try:
+                yield
+            except BaseException as exc:
+                if _passthrough(exc):
+                    raise
+                exc.add_note(f'in subTest {sub_args or ""}{params or ""}'.strip())
+                failures.append(exc)
+
+    case.subTest = subtest
+    try:
+        yield failures
+    finally:
+        del case.subTest
+
+
+def _combined(failures: list[BaseException]) -> BaseException:
+    return failures[0] if len(failures) == 1 else BaseExceptionGroup('quarantined subtests failed', failures)
+
+
 def quarantine(*, since: str, repair: str, error: str, evidence: str) -> Callable[[Callable], Callable]:
     meta = validate(since=since, repair=repair, error=error, evidence=evidence)
 
@@ -158,7 +197,10 @@ def quarantine(*, since: str, repair: str, error: str, evidence: str) -> Callabl
             async def run_async(*args: Any, **kwargs: Any) -> Any:
                 unit = unit_id(fn, args)
                 try:
-                    result = await fn(*args, **kwargs)
+                    with _subtests(args) as failures:
+                        result = await fn(*args, **kwargs)
+                    if failures:
+                        raise _combined(failures)
                 except BaseException as exc:
                     if _passthrough(exc):
                         raise
@@ -173,7 +215,10 @@ def quarantine(*, since: str, repair: str, error: str, evidence: str) -> Callabl
             def run_sync(*args: Any, **kwargs: Any) -> Any:
                 unit = unit_id(fn, args)
                 try:
-                    result = fn(*args, **kwargs)
+                    with _subtests(args) as failures:
+                        result = fn(*args, **kwargs)
+                    if failures:
+                        raise _combined(failures)
                 except BaseException as exc:
                     if _passthrough(exc):
                         raise
