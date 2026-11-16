@@ -260,6 +260,92 @@ def verify_pre_service_archive(meta: dict, row: dict, originals: dict[str, bytes
     assert "before-stack-launch" in source["trusted_source_review_policy"]().get(fingerprint, [])
 
 
+# Recovery receipts a pre-backend-exit row retains beside its original files.
+PRE_BACKEND_RECEIPTS = {
+    "pre-backend-native-stop.json": "guest-native-stop.json",
+    "pre-backend-guest-state.json": "guest-cleanup.state.json",
+    "pre-backend-provider-manifest.json": "guest-cleanup.provider-manifest.json",
+    "pre-backend-machine-stopped.json": "guest-cleanup.machine-stopped.json",
+    "pre-backend-recovery-receipt.json": "guest-cleanup.recovery-receipt.json",
+}
+
+
+def pre_backend_native_stop(out: Path, owner: str, run_id: str, row: dict) -> bool:
+    """True only for this row's exact verified pre-backend-exit native stop."""
+    path = out / "guest-native-stop.json"
+    if not path.exists() and not path.is_symlink():
+        return False
+    if json.loads(regular_bytes(path, 65536)).get("delivery_receipt") != "pre-backend-exit":
+        return False
+    helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-exact-session-cleanup.py")))
+    helper["native_stop_record"](str(out), owner, run_id, row["task"], row["machine_id"],
+                                 row["run_token"], row["volume_id"])
+    return True
+
+
+def verify_pre_backend_archive(meta: dict, row: dict, originals: dict[str, bytes], out: Path) -> None:
+    """A guest whose stack launcher ran but whose backend never started.
+
+    stack.log is original evidence, and no driver cleanup ACK exists. Release
+    requires every backend/worker/benchmark artifact absent from the original
+    volume, the exact pre-backend native stop, and the recomputed zero-session
+    provider manifest, stopped-Machine proof and recovery receipt.
+    """
+    owner, run_id = meta["fleet_owner_token"], meta["run_id"]
+    token, machine, volume = (row[key] for key in ("run_token", "machine_id", "volume_id"))
+    absent = {
+        "cloudbench-driver.pid", "repo/.context/cloudbench/services.json",
+        "repo/.context/cloudbench/run.json", "repo/.context/cloudbench/logs/backend.log",
+        "repo/.context/cloudbench/logs/worker.log", f"cloudbench-driver-clean-{token}.ack",
+        f"cloudbench-interrupt-cleanup-{token}.status",
+        f"repo/.context/cloudbench/cloudbench-interrupt-cleanup-{token}.status",
+    }
+    assert row.get("phase") == "pre-backend-exit"
+    assert row["services_status"] is None and row["runtime_evidence_complete"] is False
+    assert absent <= set(row["missing"]) and absent.isdisjoint(originals)
+    assert not any(name.startswith("repo/.context/cloudbench/logs/") for name in originals)
+    assert originals["cloudbench-driver.state"] == b"exited\n"
+    assert "repo/.context/cloudbench/stack.log" in originals
+    assert originals["bench.log"].splitlines()[0] == ("RUNSTAMP-" + token).encode()
+    assert {"original-capture-manifest.json", "original-capture-receipt.json"}.isdisjoint(originals)
+    capture = verify_original_volume_provenance(meta, row, originals)
+    assert absent.isdisjoint(capture["files"])
+    config = json.loads(originals["original-native-config.json"])
+    assert config["env"]["CLOUDBENCH_RUN_TOKEN"] == token
+    assert config["env"]["CLOUDBENCH_FRESH_VOLUME"] == "1"
+    assert config["env"]["BENCH_TASKS_B64"] == base64.b64encode(row["task"].encode()).decode()
+    assert config["init"]["cmd"] == ["bash", "/cloudbench-boot.sh"]
+    assert isinstance(config["mounts"], list) and len(config["mounts"]) == 1
+    assert config["mounts"][0]["volume"] == volume and config["mounts"][0]["path"] == "/data"
+    for relative, source in PRE_BACKEND_RECEIPTS.items():
+        assert originals[relative] == regular_bytes(out / source, 1048576)
+    assert pre_backend_native_stop(out, owner, run_id, row)
+    assert capture["admission"] == "undelivered-native-stop"
+    assert capture["guest_native_stop_sha256"] == hashlib.sha256(
+        originals["pre-backend-native-stop.json"]).hexdigest()
+    backend = out / "guest-cleanup.backend.log"
+    assert not backend.exists() and not backend.is_symlink()
+    helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-exact-session-cleanup.py")))
+    stopped = json.loads(originals["pre-backend-machine-stopped.json"])
+    args = argparse.Namespace(
+        owner=owner, fleet_run_id=run_id, bench=row["task"], machine_id=machine,
+        output_dir=str(out), guest_run_token=token, backend_log=str(backend),
+        clone_name=stopped["clone_name"], machine_status=str(out / "guest-cleanup.machine-status.txt"),
+        manifest=str(out / "guest-cleanup.provider-manifest.json"),
+        stopped_proof=str(out / "guest-cleanup.machine-stopped.json"), state_receipt=None,
+    )
+    provider = json.loads(originals["pre-backend-provider-manifest.json"])
+    assert provider == helper["active_provider_manifest"](args)
+    assert provider["kind"] == "provider-undelivered-prestack-zero-manifest"
+    assert provider["sessions"] == {"kernel": [], "steel": []}
+    assert provider["evidence"]["delivery_receipt"] == "pre-backend-exit"
+    assert provider["evidence"]["capture_archive_sha256"] == hashlib.sha256(
+        originals["original-volume-capture.tar.gz"]).hexdigest()
+    stopped_sha = helper["validate_stopped_machine_proof"](args, provider)
+    receipt = json.loads(originals["pre-backend-recovery-receipt.json"])
+    assert helper["validate_provider_receipt"](receipt, provider, stopped_sha)
+
+
 def safe_name(name: str) -> bool:
     path = PurePosixPath(name)
     return bool(name) and not name.startswith("/") and path.as_posix() == name \
@@ -1272,11 +1358,15 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
                      "repo/.context/cloudbench/stack.log",
                      "repo/.context/cloudbench/logs/backend.log",
                      "repo/.context/cloudbench/logs/worker.log"}
+        assert row.get("phase", "pre-backend-exit") == "pre-backend-exit"
         if row["services_status"] is None:
-            assert "bench.log" in files and mandatory - {"bench.log"} <= set(missing)
+            phase_files = {"bench.log"}
+            if row.get("phase") == "pre-backend-exit":
+                phase_files.add("repo/.context/cloudbench/stack.log")
+            assert phase_files <= set(files) and mandatory - phase_files <= set(missing)
             assert not row["runtime_evidence_complete"]
         else:
-            assert mandatory <= set(files)
+            assert "phase" not in row and mandatory <= set(files)
         assert f"cloudbench-driver-clean-{token}.ack" in files or f"cloudbench-driver-clean-{token}.ack" in missing
         assert "repo/.context/cloudbench/run.json" in files or "repo/.context/cloudbench/run.json" in missing
         complete = row["runtime_evidence_complete"]
@@ -1452,7 +1542,10 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     assert seen == set(expected_members)
     for row in rows:
         if row["services_status"] is None:
-            verify_pre_service_archive(meta, row, phase_originals[row["task"]])
+            if row.get("phase") == "pre-backend-exit":
+                verify_pre_backend_archive(meta, row, phase_originals[row["task"]], run / row["task"])
+            else:
+                verify_pre_service_archive(meta, row, phase_originals[row["task"]])
             continue
         if row["services_status"] == "failed":
             verify_failed_stack_provider_archive(
