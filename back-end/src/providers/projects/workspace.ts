@@ -107,6 +107,7 @@ export function tokenOf(url: string | null | undefined): string[] {
 }
 
 interface RestoreContext {
+  sessionId: string;
   ex: WorkspaceExecutor;
   ws: ProjectWorkspace;
   paths: ProjectSessionPaths;
@@ -115,12 +116,19 @@ interface RestoreContext {
 }
 
 async function git(ctx: RestoreContext, args: string, timeoutMs = SHORT_TIMEOUT_MS) {
-  const out = await ctx.ex.run(`git ${GIT_IDENTITY} ${args}`, {
+  const out = await ctx.ex.run(`git ${sandboxGitConfig(ctx.ex)}${GIT_IDENTITY} ${args}`, {
     cwd: ctx.paths.repoDir,
     timeoutMs,
     env: { GIT_TERMINAL_PROMPT: '0' },
   });
   return { ...out, stderr: ctx.redact(out.stderr).slice(-2000) };
+}
+
+function sandboxGitConfig(ex: WorkspaceExecutor): string {
+  // The E2B grid starts at 4 GiB. Git's default 96 MiB per-thread delta
+  // cache repeatedly evicts the ~100 MiB bases in large project histories.
+  // Keep this per-command and per-sandbox, including restore-time fetches.
+  return ex.kind === 'e2b' ? '-c core.deltaBaseCacheLimit=512m ' : '';
 }
 
 async function writePrivate(ctx: RestoreContext, rel: string, content: Buffer, mode = 0o600) {
@@ -135,14 +143,10 @@ async function repoExists(ctx: RestoreContext): Promise<boolean> {
 }
 
 async function cloneInto(ctx: RestoreContext, source: string, label: 'remote' | 'bundle') {
-  // Keep all commits/refs, but fetch only the checked-out tree's blobs now.
-  // Full clones transfer every historical artifact before the CLI can start;
-  // Git's promisor remote retrieves older file contents when actually needed.
-  // A synced bundle is already local and must retain its complete payload.
-  const filter = label === 'remote' ? ' --filter=blob:none' : '';
   const cloneStarted = Date.now();
+  log.info('Project clone started', { sessionId: ctx.sessionId, source: label });
   const out = await ctx.ex.run(
-    `git clone${filter} --quiet ${shq(source)} ${shq(ctx.paths.repoDir)}`,
+    `git ${sandboxGitConfig(ctx.ex)}clone --quiet ${shq(source)} ${shq(ctx.paths.repoDir)}`,
     {
       cwd: ctx.paths.homeDir,
       timeoutMs: GIT_TIMEOUT_MS,
@@ -150,6 +154,7 @@ async function cloneInto(ctx: RestoreContext, source: string, label: 'remote' | 
     }
   );
   log.info('Project clone finished', {
+    sessionId: ctx.sessionId,
     projectId: ctx.ws.project.id,
     source: label,
     durationMs: Date.now() - cloneStarted,
@@ -431,6 +436,7 @@ export async function restoreWorkspace(
     warnings: [...(workspace.manifest?.warnings ?? [])],
   };
   const ctx: RestoreContext = {
+    sessionId,
     ex,
     ws: workspace,
     paths,
