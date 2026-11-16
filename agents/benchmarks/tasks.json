@@ -5398,7 +5398,7 @@
     "name": "browser-auth-email-otp",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:6c5f96b152e7456a9274bbf67184a474",
+      "repair": "https://boxes.dev/thread/ph7dyx05get1qq4vywxe4781dx8jaeb6",
       "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 1} | Agent status: ACTIVE (expected COMPLETED)",
       "evidence": "PR1865 round 67 smoke: Tilion CDP 503 then FAILED browser initialization receipt blocked every transient-proxy retry (back-end/src/providers/browser/initialization.ts)"
     },
