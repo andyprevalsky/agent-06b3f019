@@ -953,8 +953,17 @@ def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, p
             need(native.get('attached_machine_id') == machine, 'stopped inert volume rebound')
 
 
-def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, archived=None):
+def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, archived=None, *, execution_clock=None):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
+    if execution_clock is None:
+        execution_start, execution_finish = receipt['started_at'], receipt['finished_at']
+    else:
+        need(proof.get('layout') == 'campaign-observation-loss-mixed42-v1'
+             and proof.get('purpose') == 'isolated-validation'
+             and isinstance(execution_clock, tuple) and len(execution_clock) == 2
+             and all(finite(value) for value in execution_clock), 'typed42 separate execution clocks')
+        execution_start, execution_finish = execution_clock
+        need(execution_start <= execution_finish, 'typed42 execution clock order')
     owner = life['fleet_owner_token']
     audit = fleet_audit_root(root) / owner
     meta = fields(bound(audit / 'meta'))
@@ -1000,6 +1009,16 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree,
     else:
         paths = [Path(p) for p in proof['files'] if Path(p).parent == audit / 'fresh']
     rows = [fields(bound(p)) for p in paths]
+    if execution_clock is not None:
+        from deploy_test_native_observation_loss42 import isolated_unallocated42
+        allocated = []
+        for row in rows:
+            if not row.get('machine_id') or not row.get('volume_id'):
+                need(isolated_unallocated42(fleet, life, root, receipt, proof, row,
+                     bound, document, tree, execution_start), 'typed42 positive unallocated authority')
+            else:
+                allocated.append(row)
+        rows = allocated
     # Rows a fleet cancelled while cloning never owned a Machine (retired_clone_rows): no Machine
     # observation exists for them, so they are admitted only from a sealed, provider-verified release.
     machine_less = [r for r in rows if not r.get('machine_id')]
@@ -1033,7 +1052,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree,
             need(tree(audit) == seal and fields(bound(local / 'source-audit'))
                  == {'path': str(audit), 'sha256': seal}, 'native release seal')
             release = float(bound(audit / 'provider-teardown-verified.epoch'))
-            need(finite(release) and receipt['started_at'] <= release <= proof['confirmed_at'], 'native release clock')
+            need(finite(release) and execution_start <= release <= proof['confirmed_at'], 'native release clock')
         elif set(evidence) == {'original_absent_pair'}:
             isolated_absent_pair(fleet, owner, root, receipt, row, evidence['original_absent_pair'], proof, bound, document)
         elif set(evidence) == {'runless_current_os'}:
@@ -1059,7 +1078,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree,
                      and observed['expected_volume'] == row['volume_id']
                      and re.fullmatch('[0-9a-f]{64}', observed['response_sha256']), 'provider response identity')
                 value = observed['metadata']
-                if stopped_startup:
+                if stopped_startup or execution_clock is not None:
                     raw = bound(Path(observed['raw_response']))
                     need(hashlib.sha256(raw).hexdigest() == observed['response_sha256'],
                          'stopped startup provider response hash')
@@ -1089,7 +1108,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree,
             value = observed['native_result']
             from datetime import datetime
             observed_at = datetime.fromisoformat(value['observed_at']).timestamp()
-            need(finite(observed_at) and receipt['finished_at'] <= observed_at <= proof['confirmed_at'], 'OS observation clock')
+            need(finite(observed_at) and execution_finish <= observed_at <= proof['confirmed_at'], 'OS observation clock')
             need(observed.get('status') == 'TERMINAL' and observed.get('native_exit') == 0
                  and observed.get('guard_identity_status') == 'PASS'
                  and observed.get('protected_original_inputs_unchanged') is True
@@ -1128,6 +1147,20 @@ def retired_clone_rows(ids, names, rows, owner, fleet, app, closure, disposition
     return machines
 
 
+def infra_probe_pre_task(task):
+    """A canary task that never started: the released INFRA_ERROR row, or the infra-probe placeholder
+    row (PASSED, zero duration, no agent/roots) a probe writes when its fleet fails before any guest.
+    Neither is execution or assertion credit; the failed run and provider release are checked apart."""
+    unstarted = not task.get('agent_id') and not task.get('owned_roots')
+    released = (task.get('status') == 'INFRA_ERROR' and task.get('passed') is False
+                and task.get('lifecycle_stage') == 'released'
+                and task.get('failure_reason') == 'no current run artifact produced')
+    placeholder = (task.get('status') == 'PASSED' and task.get('passed') is True
+                   and task.get('duration_seconds') == 0 and task.get('lifecycle_stage') == 'teardown'
+                   and task.get('failure_reason') is None)
+    return unstarted and (released or placeholder)
+
+
 def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree):
     """A linked infra-probe may fail before producing execution provenance, never task credit."""
     need(link and link['ref'] == receipt['source']['head']
@@ -1135,9 +1168,13 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     owner = life['fleet_owner_token']
     local, canonical = fleet / 'teardown-ownership', fleet_audit_root(root) / owner
     seal = tree(local)
-    need(tree(canonical) == seal and life['audit_sha256'] == seal
-         and fields(bound(local / 'source-audit')) == {'path': str(canonical), 'sha256': seal}, 'canary audit seal')
     meta = fields(bound(canonical / 'meta'))
+    # A canary whose exact owner was later recovered (run-bench --recover-stale-owner) is sealed by
+    # that recovery; its failed lifecycle kept an empty seal. The recovered audit must still match.
+    need(tree(canonical) == seal
+         and audit_seal_accepted(life, seal, recovered=False,
+                                 recovery_sealed=meta.get('hub_disposition') == 'retired-exact-owner-verified-absent')
+         and fields(bound(local / 'source-audit')) == {'path': str(canonical), 'sha256': seal}, 'canary audit seal')
     need(meta.get('status') == 'provider-teardown-verified' and meta.get('version') == '1'
          and meta.get('fleet_owner_token') == owner and meta.get('run_id') == fleet.name
          and meta.get('workspace_root') == str(root), 'canary provider release')
@@ -1161,9 +1198,7 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     need(run.get('run_id') == fleet.name and run.get('controller_exit_code') == life['controller_exit_code']
          and run.get('status') == 'failed' and isinstance(tasks, list) and len(tasks) == len(benches)
          and {t['name'] for t in tasks} == {b['name'] for b in benches}
-         and all(t.get('status') == 'INFRA_ERROR' and t.get('passed') is False and not t.get('agent_id')
-                 and not t.get('owned_roots') and t.get('lifecycle_stage') == 'released'
-                 and t.get('failure_reason') == 'no current run artifact produced' for t in tasks), 'canary pre-task projection')
+         and all(infra_probe_pre_task(t) for t in tasks), 'canary pre-task projection')
     return not machines  # Missing provenance is supported only before ANY native guest (Machine) allocation.
 
 
@@ -1767,6 +1802,150 @@ def inventory_init_failure(root, runs, campaign, request, receipt, adapter, boun
         need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
 
 
+def mixed_exclusion_inventory(receipt, request, checks):
+    """Original exclusions of a mixed/partial campaign: historical no-retry custody rows, plus the named user
+    deploy quarantine only when it equals the hash-bound receipt's own recorded policy. Never credit."""
+    from deploy_test_historical_custody import KIND as CUSTODY_KIND
+    from deploy_test_quarantine import USER_DEPLOY_CASE, USER_DEPLOY_KIND
+    skips = request.get('skips', {})
+    need(isinstance(skips, dict) and not set(skips).intersection(checks), 'mixed original exclusion inventory')
+    recorded = receipt.get('user_deploy_quarantine') or {}
+    user = {name for name, value in skips.items()
+            if isinstance(value, dict) and value.get('kind') == USER_DEPLOY_KIND}
+    need(user <= {USER_DEPLOY_CASE} and set(recorded) == user
+         and all(skips[name] == recorded[name]
+                 and recorded[name].get('credit') == {'test_execution': False, 'assertions': False,
+                                                      'cleanup': False, 'financial_release': False}
+                 and receipt.get('user_deploy_quarantine_execution', {}).get(name) == 'UNVERIFIED'
+                 and receipt.get('cases', {}).get(name) == 'SKIP'
+                 and receipt.get('case_complete', {}).get(name) is False for name in user),
+         'mixed user deploy quarantine differs from its recorded receipt policy')
+    need(all(isinstance(v, dict) and v.get('kind') == CUSTODY_KIND
+             and v.get('disposition') == 'NO_RETRY_CUSTODY' and v.get('source') == receipt['source']
+             and v.get('current_binding', {}).get('source') == receipt['source']
+             and v.get('current_execution') == v.get('current_financial_state') == 'UNVERIFIED'
+             and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
+             for name, v in skips.items() if name not in user),
+         'mixed original exclusion inventory')
+    return skips
+
+
+def partial_parent_binding(job, parent, log_owner):
+    """Campaign-recorded run identity, or (for a sibling TERM'd by the breach before the campaign recorded
+    it) the exact identity from the job's own hash-bound log. Never a partial or mixed identity."""
+    recorded = (job.get('fleet_dir'), job.get('run_id'), job.get('fleet_owner_token'))
+    if recorded == (str(parent), parent.name, log_owner):
+        return True
+    return (recorded == (None, None, None) and job.get('status') == 'cancelled'
+            and job.get('task_status') == 'INFRA_ERROR' and isinstance(log_owner, str)
+            and re.fullmatch('[0-9a-f]{32}', log_owner) is not None)
+
+
+def partial_participant_allocated(fleet, benches):
+    """Whether a partial-campaign participant reached task allocation (any per-bench allocation artifact)."""
+    return any((fleet/bench['name']/name).exists() or (fleet/bench['name']/name).is_symlink()
+               for bench in benches for name in ('cloudbench-run.json', '.cid', 'primary.ids', 'worker-clones.ids'))
+
+
+def audit_seal_accepted(life, seal, *, recovered, recovery_sealed):
+    """The lifecycle seal, or an empty one for a failed run whose audit exact-owner recovery sealed later."""
+    if life.get('audit_sha256') == seal:
+        return True
+    return (recovered or recovery_sealed) and life.get('audit_sha256') == '' and life.get('status') == 'failed'
+
+
+def retired_hub_accepted(meta, runs):
+    """run-bench-fleet records retired-exact-owner-verified-absent only after proving the exact Hub birth
+    gone; re-check that absence now. Any other disposition takes the retained-Hub path."""
+    if meta.get('hub_disposition') != 'retired-exact-owner-verified-absent':
+        return False
+    need(Path(meta.get('hub_owner_file', '')).parent == runs / '_hub'
+         and re.fullmatch('[0-9a-f]{32}', meta.get('hub_owner_token', '')) is not None
+         and str(meta.get('hub_pid', '')).isdigit(), 'retired Hub identity')
+    retired_local_process(dict(pid=int(meta['hub_pid']), birth=meta.get('hub_pid_start')))
+    return True
+
+
+def relay_leases_retired(leases, document):
+    """A breach after tasks started leaves the shared relay's lease records: each must be terminal
+    (closed/abandoned) with its exact owner process gone. Nothing else may remain."""
+    need(not leases.is_symlink() and (not leases.exists() or leases.is_dir()), 'partial campaign relay consumers remain')
+    for lease in sorted(leases.iterdir()) if leases.exists() else ():
+        value = document(lease)
+        need(lease.suffix == '.json' and value.get('state') in ('closed', 'abandoned')
+             and type(value.get('owner_pid')) is int and isinstance(value.get('owner_start'), str),
+             'partial campaign relay consumers remain')
+        retired_local_process(dict(pid=value['owner_pid'], birth=value['owner_start']))
+
+
+def partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, proof):
+    """Typed pre-execution closure, never task/financial credit or a guessed exit."""
+    contract = proof['unstarted_campaign']
+    # recovered_runtime is optional: exact-owner recovered participants bind their recaptured evidence.
+    need(set(proof) - {'recovered_runtime'} == {'kind','owner','request_token','source','receipt_sha256','worker_result_sha256',
+                       'confirmed_at','observed_by','layout','campaign','files','unstarted_campaign'},
+         'partial campaign proof fields')
+    need(isinstance(contract, dict) and set(contract) == {'kind','version','producer_sha256','unstarted_jobs','credit'}
+         and contract['kind'] == 'native-unstarted-campaign-v1' and type(contract['version']) is int
+         and contract['version'] == 1 and isinstance(contract['credit'], dict)
+         and set(contract['credit']) == {'test_execution','assertions','financial_release'}
+         and all(value is False for value in contract['credit'].values()), 'partial campaign contract/credit')
+    original = subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',
+                                       receipt['source']['head']+':scripts/run-bench-campaign.py'])
+    need(contract['producer_sha256'] == hashlib.sha256(original).hexdigest()
+         == 'cf60fcee75fc673ea2d6ccee928009a67262fdd8e3c5e28f38a3724ac33f57ca',
+         'partial campaign unsupported dispatch contract')
+    checks, jobs = request['checks'], summary['jobs']
+    unstarted, launched = [], []
+    for index, job in enumerate(jobs, 1):
+        need(job['job_id'] == f'r001-j{index:04d}' and type(job['index']) is int and job['index'] == index
+             and type(job['run']) is int and type(job['attempt']) is int
+             and job['task'] == checks[index-1] and job['run'] == job['attempt'] == 1
+             and job['attempts'] == [] and job['log'] == str(campaign/(job['job_id']+'.log'))
+             and job.get('controller_command') == ['bash',str(root/'scripts/run-bench'),job['task'],
+                                                    '--ref',receipt['source']['head'],'--foreground'],
+             'partial campaign ordered inventory')
+        if job.get('controller_pid') is None:
+            need(set(job) == {'index','job_id','task','run','status','controller_exit_code',
+                              'started_at','finished_at','wall_clock_seconds','controller_lock','log',
+                              'attempt','attempts','controller_command'}
+                 and job['status'] == 'cancelled' and all(job.get(key) is None for key in
+                 ('controller_pid','controller_exit_code','started_at','finished_at','wall_clock_seconds',
+                  'run_id','fleet_dir','fleet_owner_token'))
+                 and not Path(job['log']).exists() and not Path(job['log']).is_symlink(),
+                 'partial campaign unstarted acquired identity or log')
+            unstarted.append(job['job_id'])
+        else:
+            code = job.get('controller_exit_code')
+            infra = (type(code) is int and code in (1, 143)
+                     # A job that failed on its own after the campaign declared the breach is recorded cancelled.
+                     and job['status'] in (('failed', 'cancelled') if code == 1 else ('cancelled',))
+                     and job.get('task_status') == 'INFRA_ERROR' and job.get('infra_failure') is True)
+            # A sibling whose task already PASSED before the breach (exit 0), or that passed and was then
+            # TERM'd during the campaign's cancellation (143), keeps that genuine outcome; no credit is granted.
+            passed = (type(code) is int and job.get('task_status') == 'PASSED' and job.get('infra_failure') is False
+                      and ((code == 0 and job['status'] == 'passed') or (code == 143 and job['status'] == 'cancelled')))
+            need(type(job['controller_pid']) is int and job['controller_pid'] > 1 and (infra or passed),
+                 'partial campaign launched terminal outcome')
+            launched.append(job)
+    stop = summary.get('infra_stop', {})
+    need(unstarted and launched and contract['unstarted_jobs'] == unstarted
+         and summary['status'] == 'failed' and not summary.get('workspace_binding')
+         and type(summary['concurrency']) is int and type(summary['peak_concurrency']) is int
+         and 1 <= summary['peak_concurrency'] <= summary['concurrency'] <= len(checks)
+         and summary['peak_concurrency'] <= len(launched)
+         and stop.get('policy') == 'enabled' and stop.get('scheduled_total') == len(checks)
+         and stop.get('job_id') in {job['job_id'] for job in launched if job['status'] == 'failed'}
+         and stop.get('task_status') == 'INFRA_ERROR'
+         and type(stop.get('infra_jobs')) is int and stop['infra_jobs'] >= 1
+         and len(set(stop.get('infra_job_ids', []))) == stop['infra_jobs']
+         and set(stop['infra_job_ids']) <= {job['job_id'] for job in launched if job['status'] == 'failed'},
+         'partial campaign positive infra-stop/unstarted closure')
+    return frozenset(unstarted)
+
+
+
+
 SOURCE_REFUSAL_PRODUCERS = {'scripts/run-bench': 'd6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e', 'scripts/run-bench-campaign.py': 'bc906abd2450d58b7b9668ba6ab7db972aa79097fa9bef139a0e6031aab2c20a', 'scripts/run-bench-fleet': 'd0e6b6a4c82183560a8e51564c0f3ae2fecc722e91b4b66d11cf90255e6352fa', 'scripts/deploy_test_cloud.py': '96badb95c00fd2a735a7ddeb7f1e5616eb336c389534ca85ae71264b1c808e29', 'scripts/cloudbench-script-snapshot.py': '4065ecfecaf533b74f8b296b2c192a8d55036304e4fc4fbc52cf860e225671bc', 'scripts/cloudbench_execution_provenance.py': '04122d46f536923a0c8aa8e7859d6dcf1d1395e5d8a1998f6cad573a7073c6c2', 'scripts/cloudbench-source-lease.py': '29697fd3049d50ee6c4423eecb9e6475f5d9c544077a6798742ad5d770df0718', 'scripts/cloudbench-prepare-source-create.py': '9a65c6bd2ddb964998257b1eab58316b403021ddc3cb4a86059a6615139d2384', 'scripts/cloudbench-source.py': 'e8a03c13e9b59379d92a71502bb92c54126a64e1655620bd639d6b37eddd1ba3', 'scripts/cloudbench-volume-migration.py': '5e00ce80101dcb21b1e746f4d1a4de6fafdbeba6185d885e366e10a9cdbc1b54', 'scripts/cloudbench-disposable-controller.py': '2155f76fa604797bb1b5de224a4d97d18c34081b202c7fc51c555d7aaa3ae43d', 'scripts/cloudbench-select-snapshot.py': '8037c6cb618c772a2753c1abd80500eef4e465e17cf39afa6a86949ddfb65128', 'scripts/cloudbench-campaign-machines.py': 'e85eb826790c70e87b4d397467e01b2d1f9e805ce1efedb458edc16bff60353b', 'scripts/cloudbench-shared-relay.py': 'f28934b757c6c22427687a04af1b551ad3e18a05594a61028568b09aab5a8fbe', 'scripts/cloudbench-campaign-inventory.sh': 'e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d', 'scripts/lib/cloudbench-env.sh': '9b65b1fd201bdac49ab4e718b41f3b7c57fe89cfa0ef95934989c17ee765e93a', 'back-end/scripts/blackbox-kernel-proxy-custody.cjs': 'caa4b6a7d1941cdcda84d578009deb078594720916eaaa6a23cbcabae0aba0a9'}
 
 def source_validation_refusal(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree):
@@ -2034,12 +2213,21 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
     need(proof['receipt_sha256'] == receipt_sha and proof['worker_result_sha256'] == adapter_sha, 'original bytes changed')
     need(all(adapter.get(k) == receipt.get(k) for k in ('token', 'source', 'gate')), 'adapter identity')
     reference = owner['native_cleanup_reference']
+    observation_loss = proof.get('layout') == 'campaign-observation-loss-mixed42-v1'
+    observation_boundary = None
+    if observation_loss:
+        from deploy_test_native_observation_loss42 import admit
+        observation_boundary = admit(receipt, owner, proof, adapter, root)
+        from deploy_test_native_observation_loss42 import require_current_owner_release
+        if proof.get('purpose') != 'isolated-validation':
+            require_current_owner_release(root, adapter)
     need(receipt.get('lifecycle') == 'native-producer' and receipt.get('complete') is False
-         and receipt.get('timed_out') is False and receipt.get('cancelled') is False
+         and (observation_loss or receipt.get('timed_out') is False and receipt.get('cancelled') is False)
          and reference == receipt.get('native_cleanup_reference') and reference['result'] == str(adapter_path)
          and reference['result_sha256'] == adapter_sha, 'native cleanup reference')
     confirmed = proof['confirmed_at']
-    need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
+    need(finite(confirmed) and finite(observation_boundary if observation_loss else receipt['finished_at'])
+         and (observation_boundary if observation_loss else receipt['finished_at']) <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     archived = None if quarantine_archive is None else quarantine_bytes(quarantine_archive, proof, root)
     bindings, used = proof['files'], set()
@@ -2102,6 +2290,9 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
                     digest.update(value)
         return digest.hexdigest()
 
+    if observation_loss:
+        from deploy_test_native_observation_loss42 import consume_settlement
+        consume_settlement(root, proof, bound, document)
     request = document(folder / 'request.json')
     need(all(request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate')), 'request document')
     runs = root / '.context/deploy-cloud' / hashlib.sha256(token.encode()).hexdigest() / 'runs'
@@ -2171,6 +2362,16 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
                 'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
+    if layout == 'campaign-partial-zero-allocation38-v1':
+        from deploy_test_native_partial_admission38 import validate_partial
+        result = validate_partial(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree)
+        need(used == set(bindings), 'partial38 proof file closure')
+        return result
+    if layout == 'campaign-partial-zero-allocation-v1':
+        from deploy_test_native_partial_admission import validate_partial
+        result = validate_partial(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree)
+        need(used == set(bindings), 'partial proof file closure')
+        return result
     if layout == 'campaign-ref-preflight-v1':
         from deploy_test_native_ref_preflight import validate_ref_preflight
         result = validate_ref_preflight(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
@@ -2224,11 +2425,13 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
                 'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [],
                 'preflight_refusals': refused, 'credit_granted': False}
+    partial = 'unstarted_campaign' in proof
+    need(not partial or layout == 'campaign-v1', 'partial campaign requires strict normal layout')
     preallocation = layout == 'campaign-preallocation-v1'
     mixed = layout == 'campaign-mixed-preallocation-v1'
-    staged_preallocation = preallocation or mixed
+    staged_preallocation = preallocation or mixed or partial
     supervision = None
-    if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1'}:
+    if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1', 'campaign-observation-loss-mixed42-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
              and (reference.get('native_directory') == str(campaign) or (staged_preallocation or layout == 'campaign-v1')
@@ -2242,16 +2445,22 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
              and summary['retry_infra'] == 0 and summary['task_count'] == len(checks)
              and summary['total_jobs'] == len(checks) == len(jobs)
              and summary['status'] in {'passed', 'failed', 'cancelled'}, 'campaign inventory')
-        need(len({j['job_id'] for j in jobs}) == len(jobs)
-             and {j['task'] for j in jobs} == set(checks)
-             and all(j['run'] == 1 and j['attempt'] == 1 and j['attempts'] == []
-                     and j['status'] in {'passed', 'failed', 'cancelled'}
-                     and type(j['controller_exit_code']) is int
-                     and 0 <= j['controller_exit_code'] <= 255 for j in jobs), 'campaign terminal jobs')
+        if observation_loss:
+            from deploy_test_native_observation_loss42 import mixed_jobs
+            unstarted_jobs = mixed_jobs(root, campaign, request, receipt, adapter, summary, proof)
+        elif partial:
+            unstarted_jobs = partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, proof)
+        else:
+            need(len({j['job_id'] for j in jobs}) == len(jobs)
+                 and {j['task'] for j in jobs} == set(checks)
+                 and all(j['run'] == 1 and j['attempt'] == 1 and j['attempts'] == []
+                         and j['status'] in {'passed', 'failed', 'cancelled'}
+                         and type(j['controller_exit_code']) is int
+                         and 0 <= j['controller_exit_code'] <= 255 for j in jobs), 'campaign terminal jobs')
         from datetime import datetime
         start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
         need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
-             <= receipt['finished_at'] <= confirmed, 'campaign terminal clocks')
+             <= (observation_boundary if observation_loss else receipt['finished_at']) <= confirmed, 'campaign terminal clocks')
         pending_hubs = summary.get('shared_transport_cleanup_pending')
         need(not any(summary.get(key) for key in ('cleanup_ticket_failure', 'shared_inventory_failed'))
              and (not pending_hubs or staged_preallocation and pending_hubs is True
@@ -2274,24 +2483,15 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
             bound(path)
         if staged_preallocation:
             expected_cases = dict.fromkeys(checks, 'UNVERIFIED')
-            if mixed:
-                from deploy_test_historical_custody import KIND as CUSTODY_KIND
-                skips = request.get('skips', {})
-                need(isinstance(skips, dict) and not set(skips).intersection(checks)
-                     and all(isinstance(v, dict) and v.get('kind') == CUSTODY_KIND
-                             and v.get('disposition') == 'NO_RETRY_CUSTODY' and v.get('source') == receipt['source']
-                             and v.get('current_binding', {}).get('source') == receipt['source']
-                             and v.get('current_execution') == v.get('current_financial_state') == 'UNVERIFIED'
-                             and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
-                             for v in skips.values()),
-                     'mixed original exclusion inventory')
+            if mixed or partial:
+                skips = mixed_exclusion_inventory(receipt, request, checks)
             else:
                 skips = request.get('skips')
                 need(isinstance(skips, dict) and not set(checks).intersection(skips),
                      'preallocation active/skip inventory')
             expected_cases.update(dict.fromkeys(skips, 'SKIP'))
             need(summary['status'] in {'failed','cancelled'} and not proof.get('purpose')
-                 and not proof.get('recovered_runtime') and (mixed or not summary.get('workspace_binding'))
+                 and (partial or not proof.get('recovered_runtime')) and (mixed or not summary.get('workspace_binding'))
                  and receipt['cases'] == expected_cases,
                  'preallocation outcomes')
             supervision=preallocation_processes(root,runs,campaign,request,receipt,adapter,document,bound)
@@ -2315,6 +2515,8 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
                 need(not proof.get('current_hub_retirement'), 'unexpected current Hub retirement proof')
         handles = []
         for job in jobs:
+            if (partial or observation_loss) and job['job_id'] in unstarted_jobs:
+                continue  # Positive native never-started rows retain NULLs and no execution credit.
             need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']), 'campaign job id')
             log = campaign / (job['job_id'] + '.log')
             need(job['log'] == str(log), 'campaign job log binding')
@@ -2338,7 +2540,7 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
                     match = re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.', owner_line)
                     canary_links[Path(args[2])] = {'parent': one[0], 'ref': ref, 'owner': match[1] if match else None}
                     infra = False
-                if preallocation or mixed and not one:
+                if preallocation or (mixed or partial) and not one:
                     match=re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory[.]',
                                        lines[index+1].strip() if index+1<len(lines) else '')
                     need(match is not None, 'preallocation controller owner')
@@ -2349,6 +2551,12 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
             need(one and one[0] not in parents and type(job.get('controller_pid')) is int
                  and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
                  'campaign parent identity')
+            if partial:
+                need(partial_parent_binding(job, one[0], preallocation_links[one[0]].get('owner')),
+                     'partial campaign original parent binding')
+                if job['status'] == 'cancelled' and job['controller_exit_code'] == 143:
+                    need(sum(re.fullmatch(r'⚰️  controller received TERM \([0-9]{2}:[0-9]{2}:[0-9]{2}\)', line)
+                             is not None for line in lines) >= 1, 'partial campaign positive sibling cancellation')
             # A campaign-v1 parent whose controller refused at private fleet source validation
             # stopped before allocation; it is held to the same zero-resource admission checks.
             refusals = [x for x in lines if x.startswith(SOURCE_REFUSAL)]
@@ -2380,11 +2588,16 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
     participants = {p for p in runs.iterdir() if p.is_dir() and p.name != '_hub'}
     need(set(handles) == participants and all(p.parent == runs and (p / '_batch').is_dir() for p in participants), 'participant closure')
     isolated = proof.get('purpose') == 'isolated-validation'
-    need(proof.get('purpose') in {None, 'isolated-validation'} and (not isolated or layout == 'campaign-v1'), 'proof purpose')
+    need(proof.get('purpose') in {None, 'isolated-validation'} and (not isolated or layout == 'campaign-v1' or observation_loss), 'proof purpose')
     retained, audit_seals, recovered, excluded = {}, {}, {}, {}
+    copy_volumes = {}
+    if observation_loss and isolated:
+        from deploy_test_native_observation_loss42 import validate_retained_volume_lineage
+        copy_volumes = validate_retained_volume_lineage(root, runs, receipt, adapter, proof, bound, document)
+
     zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
-    need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    need(isinstance(recovery, dict) and (not recovery or layout in {'campaign-v1', 'campaign-observation-loss-mixed42-v1'}), 'recovery scope')
     # Fleets released by `--recover-stale-owner TOKEN --accept-lost-runtime-evidence`: their
     # sealed audit carries runtime-evidence-lost.json instead of captured runtime evidence.
     lost_runtime = proof.get('lost_runtime_evidence', [])
@@ -2409,14 +2622,17 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
         life = document(fleet / '_batch/lifecycle.json')
+        # Read linked failed probes through the same finite raw budget before proving their retirement.
         failed_canary = (layout in {'campaign-v1', 'campaign-mixed-preallocation-v1'} and fleet not in parents
                          and life.get('status') == 'failed')
         run_path = fleet / '_batch/run.json'
-        if isolated or preallocation or mixed or fleet in admission_parents or failed_canary:
+        if isolated or preallocation or mixed or partial or fleet in admission_parents or failed_canary:
             # These layouts consume the original projection. Bind its control
             # metadata through the bounded forensic reader; logs stay opaque.
             from deploy_test_run_artifact import read_run_artifact
             allocation = run_admission.get(str(run_path))
+            need(run_path.is_file() and (allocation is not None or run_path.stat().st_size <= RUN_RECORD_MAX_BYTES),
+                 'proof file too large')
             run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
                                     raw_limit=allocation['bytes'] if allocation else min(
                                         RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
@@ -2496,7 +2712,8 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
             from deploy_test_native_admission import validate_parent
             validate_parent(fleet, life, benches, run, root, bound, document, tree)
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
-        if (preallocation or (mixed and fleet in zero_parents) or (failed_canary and zero_allocation) or admission_parent or fleet in cancelled_parent_zero) and not provenance_path.exists() and not matrix_path.exists():
+        partial_unallocated = partial and not partial_participant_allocated(fleet, benches)
+        if (preallocation or (mixed and fleet in zero_parents) or (failed_canary and zero_allocation) or admission_parent or fleet in cancelled_parent_zero or partial_unallocated) and not provenance_path.exists() and not matrix_path.exists():
             pass  # Positive native admission boundary and sealed ownership; absence alone proves nothing.
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
@@ -2504,8 +2721,25 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
                  and provenance['base_sha'] == receipt['source']['head'] and provenance['workspace_patch_sha256'] == 'none', 'execution source')
             need(len(benches) == len(matrix['tasks'])
                  and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
+        partial_allocated = False
+        if partial:
+            link = preallocation_links.get(fleet) if fleet in parents else canary_links.get(fleet)
+            need(fleet in parents or link and link['parent'] in parents, 'partial campaign participant')
+            partial_allocated = partial_participant_allocated(fleet, benches)
+            if not partial_allocated:
+                need(isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree),
+                     'partial campaign participant zero allocation')
+                if fleet in parents:
+                    zero_parents.add(fleet)
+            # A launched participant (parent or linked canary) that allocated before the breach is held to the full native audit below,
+            # exactly like a terminal campaign-v1 participant; no execution or financial credit is granted.
         if isolated:
-            excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, archived))
+            current_excluded = isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, archived,
+                execution_clock=(adapter['started_at'], adapter['finished_at']) if observation_loss else None)
+            if observation_loss:
+                need(not set(current_excluded).intersection(excluded)
+                     and not set(current_excluded.values()).intersection(excluded.values()), 'typed42 resource identity overlap')
+            excluded.update(current_excluded)
             continue
         audit = fleet / 'teardown-ownership'
         canonical = fleet_audit_root(root) / owner_token
@@ -2513,8 +2747,9 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         seal = tree(audit)
         need(binding == {'path': str(canonical), 'sha256': seal}
              and tree(canonical) == seal
-             and (life['audit_sha256'] == seal or (str(fleet) in recovery or str(fleet) in lost_runtime)
-                  and life['audit_sha256'] == '' and life['status'] == 'failed'), 'native audit seal')
+             and audit_seal_accepted(life, seal, recovered=str(fleet) in recovery or str(fleet) in lost_runtime,
+                                     recovery_sealed=partial and fields(bound(audit / 'meta')).get('hub_disposition')
+                                     == 'retired-exact-owner-verified-absent'), 'native audit seal')
         meta = fields(bound(audit / 'meta'))
         need(meta.get('status') == 'provider-teardown-verified' and meta.get('version') == '1'
              and meta.get('fleet_owner_token') == owner_token and meta.get('run_id') == fleet.name
@@ -2587,9 +2822,29 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
              'preallocation unexpected supervised termination')
         for value in retained.values():
             retired_local_process(dict(pid=int(value['owner']['pid']),birth=value['owner']['pid_start']))
+    if partial or observation_loss:
+        native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+        for hub in sorted((runs/'_hub').glob('agent-link-server.*.owner')):
+            value = fields(bound(hub))
+            need(native['native_hub_owner_retired'](hub,runs,root), 'partial campaign Hub live/reused')
+            retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': value,
+                                  'disposition': 'native-owner-retired-current-absence'}
+        need(retained, 'partial campaign native Hub inventory absent')
+        if observation_loss and isolated:
+            from deploy_test_native_observation_loss42 import isolated_relay_retired42
+            isolated_relay_retired42(root, campaign, receipt, proof, bound, document)
+        else:
+            location = Path(document(campaign/'shared-relay-location.json')['directory'])
+            for leases in (campaign/'shared-relay/leases',location/'leases'):
+                relay_leases_retired(leases, document)
     need(isolated or set(recovered) == set(recovery) | set(lost_runtime), 'recovered fleet closure')
     if isolated:
         need(set(proof['execution_quiescence']) == set(excluded), 'execution observation closure')
+        if observation_loss:
+            need(copy_volumes and set(copy_volumes.values()) <= set(excluded.values())
+                 and not set(copy_volumes).intersection(excluded.values()), 'typed42 copy exclusion closure')
+            excluded = {'machines': excluded, 'copy_volumes': copy_volumes}
+
         for path in bindings:
             hub = Path(path)
             if hub.parent == runs / '_hub' and hub.name.endswith('.owner'):
@@ -2615,6 +2870,13 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
             'participants': sorted(map(str, participants)), 'native_audit_seals': audit_seals,
             'retained_services': [retained[k] for k in sorted(retained)], 'credit_granted': False}
+    if partial:
+        result.update(unstarted_campaign_verified=True, financial_cleanup_credit=False,
+                      original_outcomes_preserved=True)
+    if observation_loss:
+        result.update(observation_loss_verified=True, mixed_terminal_campaign_verified=True,
+                      original_outcomes_preserved=True, financial_cleanup_credit=False,
+                      coordinator_process_flags='UNKNOWN', cleanup_complete=not isolated)
     if staged_preallocation:
         result['preallocation_source_authorities']={str(k):v['source_authority'] for k,v in preallocation_links.items()
                                                      if preallocation or k in zero_parents}
@@ -2624,9 +2886,204 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         need(isinstance(proof.get('validation_source'), dict) and set(proof['validation_source']) == {'head', 'digest'}, 'next source')
         result.update(purpose='isolated-validation', validation_source=proof['validation_source'], excluded_resources=excluded,
                       obligations_preserved=True, cleanup_complete=False)
+        if observation_loss:
+            result.update(execution_credit=False, financial_cleanup_credit=False)
     if recovered:
         result['recovered_release_evidence'] = recovered
     return result
+
+
+ISOLATED_ADMISSION_REFUSALS_V1 = {
+    ('6428b1b8c79c47fbb0422465fec357e1', 29,
+     'bf5e5c2b74f535dab00ef441e5cf4c2fdee4973e65a6b9ec854f76dbe5282860'):
+    '7d65926e7503af6d078a91071ac27e0cf0469306db5c409a07c599b29d49574b',
+}
+
+
+def isolated_renewal_successor(state, prior, original):
+    """Admission-only failures do not replace the latest actually executed owner."""
+    from deploy_test_cycle import bounded_read, digest, sha_file
+    gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+    directory = Path(original['log']).parents[4]
+    for number, attempt in reversed(list(enumerate(state['attempts'], 1))):
+        rows = [r for r in attempt.get('results', []) if r.get('gate') == prior['gate']]
+        if not rows:
+            continue
+        need(len(rows) == 1, 'ambiguous successor attempt')
+        row = rows[0]
+        if set(row) != {'gate', 'status', 'complete', 'cases', 'source', 'reason'}:
+            return row
+        pin = ISOLATED_ADMISSION_REFUSALS_V1.get((original['token'], number, digest(row)))
+        need(pin is not None, 'unlaunched successor lacks trusted witness')
+        need(row['status'] == 'FAIL' and row['complete'] is False
+             and row['reason'] == 'native cleanup: next source/inventory binding'
+             and row['source'] == attempt.get('source')
+             and row['cases'] == dict.fromkeys(gate['checks'], 'UNVERIFIED')
+             and attempt.get('phase') in {'initial', 'focused', 'failed-gates', 'final'}
+             and not attempt.get('interrupted') and not attempt.get('stale'),
+             'unlaunched successor boundary')
+        folder = directory / 'attempts' / str(number) / attempt['phase'] / gate['name']
+        need(folder.is_dir() and not folder.is_symlink() and folder.resolve() == folder
+             and {p.name for p in folder.iterdir()} == {'request.json'}, 'unlaunched successor native files')
+        path = folder / 'request.json'
+        need(path.is_file() and not path.is_symlink() and path.resolve() == path,
+             'unlaunched successor request path')
+        need(sha_file(path) == pin, 'unlaunched successor request changed')
+        request = bounded_read(path, 'unlaunched successor request')
+        need('isolated_validation' not in request, 'unlaunched successor already admitted')
+        need(request.get('source') == row['source'] and request.get('gate') == gate['name']
+             and request.get('phase') == attempt['phase'] and request.get('worker_recipe') == gate.get('worker_recipe')
+             and request.get('custody_state') == str(directory / 'cycle.json')
+             and isinstance(request.get('token'), str) and re.fullmatch('[0-9a-f]{32}', request['token'])
+             and isinstance(request.get('checks'), list) and isinstance(request.get('skips'), dict)
+             and len(set(request['checks'])) == len(request['checks'])
+             and not set(request['checks']) & set(request['skips'])
+             and set(request['checks']) | set(request['skips']) == set(gate['checks']),
+             'unlaunched successor request identity')
+        native = Path(prior['owner']['worker_root']) / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+        need(not native.exists() and not native.is_symlink(), 'unlaunched successor native allocation')
+    return None
+
+
+def isolated_successor_custody(state, gate, successor, request, root):
+    """Authenticate historical non-remint omissions; grant no execution/cleanup credit."""
+    from deploy_test_historical_custody import KIND as CUSTODY_KIND, DISPOSITION, historical
+    custody = {}
+    for name, row in request['skips'].items():
+        if row.get('kind') != CUSTODY_KIND and row.get('disposition') != DISPOSITION:
+            continue
+        need(row.get('kind') == CUSTODY_KIND and row.get('disposition') == DISPOSITION
+             and row.get('current_execution') == row.get('current_financial_state') == 'UNVERIFIED'
+             and isinstance(row.get('credit'), dict)
+             and set(row['credit']) == {'test_execution', 'assertions', 'financial_release'}
+             and all(value is False for value in row['credit'].values()),
+             'successor custody credit')
+        binding = row.get('current_binding', {})
+        need(binding.get('source') == successor['source'] == row.get('source')
+             and binding.get('environment') == successor['execution_binding']['environment']
+             and binding.get('input_fingerprints', {}).get(gate['name']) == successor['execution_binding']['input_fingerprint'],
+             'successor custody source binding')
+        original = row.get('original_failure', {})
+        known = [v for v in state.get('historical_custody_history', [])
+                 if v.get('original_failure', {}).get('id') == original.get('id')]
+        need(len(known) == 1 and original.get('check') == gate['name'] + '/' + name,
+             'successor custody canonical obligation')
+        expected = historical(state, original, root)
+        projection = {'kind', 'disposition', 'current_binding', 'current_execution', 'current_financial_state', 'credit', 'source'}
+        need({k: v for k, v in row.items() if k not in projection} == expected == known[0],
+             'successor custody native obligation changed')
+        custody[name] = row
+    need(successor.get('custody_skips', {}) == custody
+         and successor.get('current_execution', {}) == dict.fromkeys(custody, 'UNVERIFIED'),
+         'successor custody receipt changed')
+    return custody
+
+
+def isolated_successor_resources_disjoint(prior, successor, root, *, audit_seals=None):
+    """Exact42 future fleets must allocate different native Machines and every original/copy Volume."""
+    from deploy_test_cycle import bounded_read
+    from deploy_test_native_observation_loss42 import CAPTURE
+    if prior.get('token') != CAPTURE['token']:
+        return
+    excluded = prior.get('excluded_resources', {})
+    need(set(excluded) == {'machines', 'copy_volumes'} and all(isinstance(v, dict) and v for v in excluded.values()),
+         'typed42 exclusion inventory')
+    old_machines = set(excluded['machines'])
+    old_volumes = set(excluded['machines'].values()) | set(excluded['copy_volumes'])
+    base = root/'.context/deploy-cloud'/hashlib.sha256(successor['token'].encode()).hexdigest()/'runs'
+    need(base.resolve() == base and base.is_dir() and not base.is_symlink(), 'typed42 successor native runs')
+    fleets = [p for p in base.iterdir() if p.name != '_hub']
+    need(fleets and len(fleets) <= 2048 and all(p.is_dir() and not p.is_symlink() for p in fleets), 'typed42 successor fleet inventory')
+    seen_machines, seen_volumes = set(), set()
+    remaining = [64*1024*1024]
+    def raw(path):
+        need(path.resolve() == path and path.is_file() and not path.is_symlink()
+             and path.stat().st_size <= 1024*1024 and path.stat().st_size <= remaining[0], 'typed42 successor audit bound')
+        value=path.read_bytes();remaining[0]-=len(value);return value
+    def seal(directory):
+        need(directory.resolve() == directory and directory.is_dir() and not directory.is_symlink(), 'typed42 successor audit directory')
+        digest=hashlib.sha256()
+        for item in sorted(directory.rglob('*'),key=lambda p:str(p.relative_to(directory))):
+            need(not item.is_symlink() and (item.is_dir() or item.is_file()), 'typed42 successor audit member')
+            if item.is_file() and item.name!='source-audit':
+                for value in (str(item.relative_to(directory)).encode(),raw(item)):
+                    digest.update(len(value).to_bytes(8,'big'));digest.update(value)
+        return digest.hexdigest()
+    for fleet in fleets:
+        life=bounded_read(fleet/'_batch/lifecycle.json','typed42 successor lifecycle')
+        owner=life.get('fleet_owner_token')
+        need(isinstance(owner,str) and re.fullmatch('[0-9a-f]{32}',owner), 'typed42 successor fleet owner')
+        canonical=fleet_audit_root(root)/owner;local=fleet/'teardown-ownership'
+        digest=seal(local)
+        need(seal(canonical)==digest and fields(raw(local/'source-audit'))=={'path':str(canonical),'sha256':digest}
+             and (life.get('audit_sha256')==digest or audit_seals and audit_seals.get(str(local))==digest),
+             'typed42 successor sealed allocation audit')
+        meta=fields(raw(canonical/'meta'))
+        need(meta.get('fleet_owner_token')==owner and meta.get('workspace_root')==str(root)
+             and meta.get('run_id')==fleet.name, 'typed42 successor audit identity')
+        fresh=canonical/'fresh'
+        need(fresh.is_dir() and not fresh.is_symlink(), 'typed42 successor fresh audit scope')
+        rows=list(fresh.iterdir());need(len(rows)<=2048, 'typed42 successor allocation count')
+        for path in rows:
+            row=fields(raw(path));machine,volume=row.get('machine_id'),row.get('volume_id')
+            if not machine and not volume:
+                name=row.get('clone_name')
+                need(set(row)=={'version','fleet_owner_token','run_id','app','clone_name','source',
+                                'source_machine_id','machine_id','volume_id','disposition'}
+                     and row.get('version')=='1' and row.get('source')=='fresh-clone'
+                     and row.get('disposition')=='not-allocated-verified'
+                     and row.get('fleet_owner_token')==owner and row.get('run_id')==fleet.name
+                     and row.get('app')==meta.get('app') and isinstance(name,str)
+                     and re.fullmatch('cloudbench-[A-Za-z0-9._-]+',name) and path.name==name
+                     and isinstance(row.get('source_machine_id'),str) and re.fullmatch('[0-9a-f]{14}',row['source_machine_id'])
+                     and fields(raw(canonical/'expected-fresh'/name))=={'clone_name':name,'source_machine_id':row['source_machine_id']},
+                     'typed42 successor unallocated native authority')
+                continue  # The sealed native producer verified exact-name absence before release.
+            if not machine:
+                # A clone whose Volume was created but whose Machine the provider never launched
+                # (e.g. insufficient capacity for the existing volume): only that fresh Volume exists.
+                name=row.get('clone_name')
+                need(set(row)=={'version','fleet_owner_token','run_id','app','clone_name','source',
+                                'source_machine_id','machine_id','volume_id','disposition'}
+                     and row.get('version')=='1' and row.get('source')=='fresh-clone' and row.get('machine_id')==''
+                     and row.get('fleet_owner_token')==owner and row.get('run_id')==fleet.name
+                     and row.get('app')==meta.get('app') and isinstance(name,str)
+                     and re.fullmatch('cloudbench-[A-Za-z0-9._-]+',name) and path.name==name
+                     and isinstance(row.get('source_machine_id'),str) and re.fullmatch('[0-9a-f]{14}',row['source_machine_id'])
+                     and fields(raw(canonical/'expected-fresh'/name))=={'clone_name':name,'source_machine_id':row['source_machine_id']}
+                     and isinstance(volume,str) and re.fullmatch('vol_[A-Za-z0-9]+',volume)
+                     and volume not in old_volumes and volume not in seen_volumes,
+                     'typed42 successor overlaps retained allocation')
+                seen_volumes.add(volume)
+                continue
+            need(isinstance(machine,str) and re.fullmatch('[0-9a-f]{14}',machine)
+                 and isinstance(volume,str) and re.fullmatch('vol_[A-Za-z0-9]+',volume)
+                 and row.get('fleet_owner_token')==owner and row.get('run_id')==fleet.name
+                 and machine not in old_machines and volume not in old_volumes
+                 and machine not in seen_machines and volume not in seen_volumes,
+                 'typed42 successor overlaps retained allocation')
+            seen_machines.add(machine);seen_volumes.add(volume)
+
+
+def isolated_origin_finished(prior, original):
+    """Keep unknown outer clocks; use only an authenticated exact42 isolated producer boundary."""
+    if original.get('kind') != 'recovered-native-execution-v1':
+        return original.get('finished_at')
+    from deploy_test_cycle import bounded_read, receipt_owner
+    from deploy_test_native_observation_loss42 import CAPTURE, LAYOUT, admit
+    need(prior.get('token') == original.get('token') == CAPTURE['token']
+         and prior.get('purpose') == prior.get('proof', {}).get('purpose') == 'isolated-validation'
+         and prior['proof'].get('layout') == LAYOUT and prior.get('cleanup_complete') is False
+         and prior.get('obligations_preserved') is True and prior.get('execution_credit') is False
+         and prior.get('financial_cleanup_credit') is False and prior.get('credit_granted') is False
+         and prior.get('observation_loss_verified') is True and prior.get('original_outcomes_preserved') is True,
+         'typed42 isolated origin authority')
+    owner = receipt_owner(prior['gate'], original)
+    need(owner == prior.get('owner') == prior['proof'].get('owner'), 'typed42 original isolated owner')
+    adapter = bounded_read(original['worker_result'], 'typed42 isolated origin adapter')
+    boundary = admit(original, owner, prior['proof'], adapter, Path(owner['worker_root']))
+    need(still_bound(prior, original, owner), 'typed42 isolated origin proof changed')
+    return boundary
 
 
 def historical_successor_gate(witness, successor, request, current_gate, root=None):
@@ -2857,8 +3314,16 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
          'successor original isolation binding')
     custody = {k: v for k, v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY'}
     import deploy_test_historical_custody as h
-    known = {row['check'].split('/', 1)[1] for row in h.known(state, root).values()
-             if row['gate'] == gate['name']}
+    known_rows = [row for row in h.known(state, root).values() if row['gate'] == gate['name']]
+    known = {row['check'].split('/', 1)[1] for row in known_rows}
+    # Custody first recorded by this successor's own result cannot have been skipped by it:
+    # the successor executed that check and its failure created the custody.
+    own_rows = [row for row in known_rows
+                if row.get('source') == successor['source']
+                and row.get('worker_result') == str(folder / 'result.json')
+                and row['check'].split('/', 1)[1] in checks]
+    own_custody = {row['check'].split('/', 1)[1] for row in own_rows}
+    own_ids = {row['id'] for row in own_rows}
     if custody or known:
         import deploy_test_cycle as c
         # Discover authority from the canonical ledger, never an incoming skip label.
@@ -2866,7 +3331,7 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
         current = h.binding(state['plan'], root)
         need(current == {k: state.get(k) for k in current}, 'successor current custody inputs')
         qualified = h.guard(state, gate, root, legacy_current, current=current)
-        need(set(qualified) == set(custody), 'successor current custody inventory')
+        need(set(qualified) - own_custody == set(custody), 'successor current custody inventory')
     if custody:
         legacy = {k: v for k, v in skips.items() if k not in custody}
         bindings = [v.get('current_binding') for v in custody.values()]
@@ -2883,11 +3348,19 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
                       ('historical_custody_history', 'historical_custody_import',
                        'historical_custody_transfers', 'failures', 'pending_post_merge',
                        'resource_warnings', 'superseded_resource_warnings') if k in state}
+        # Rebuild admission time: custody first recorded by this successor's own failure did not exist yet.
+        if own_ids:
+            projection['failures'] = [f for f in projection.get('failures', []) if f.get('id') not in own_ids]
+            if 'historical_custody_history' in projection:
+                projection['historical_custody_history'] = [
+                    r for r in projection['historical_custody_history']
+                    if r.get('original_failure', {}).get('id') not in own_ids]
         projection.update(copy.deepcopy(admitted))
         projection['historical_no_retry_custody'] = [
             {k: copy.deepcopy(v) for k, v in custody[r['original_failure']['check'].split('/', 1)[1]].items()
              if k != 'source'} if r['original_failure']['gate'] == gate['name'] else copy.deepcopy(r)
-            for r in state.get('historical_no_retry_custody', [])]
+            for r in state.get('historical_no_retry_custody', [])
+            if r['original_failure'].get('id') not in own_ids]
         need(h.state_identity(projection) == request.get('custody_state_sha256'),
              'successor custody identity projection')
         historical = h.guard(projection, admitted_gate, root, legacy, current=admitted)
@@ -2901,7 +3374,7 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
             need(renewal_witness is not None, 'historical successor runtime witness required')
             historical_successor_runtime(root, admitted_gate, request, binding)
             runtime_bound = True
-        need(authority(qualified) == authority(custody)
+        need(authority({k: v for k, v in qualified.items() if k not in own_custody}) == authority(custody)
              and checks == [k for k in admitted_gate['checks'] if k not in skips]
              and runtime_bound
              and isinstance(request.get('custody_child_environment'), str)
@@ -2915,6 +3388,9 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     need(successor.get('worker_result') == str(result_path), 'successor result locator')
     result = bounded_read(result_path, 'successor native result')
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
+    custody = isolated_successor_custody(state, gate, successor, request, root)
+    from deploy_test_quarantine import validate_user_deploy_receipt
+    user_policy = validate_user_deploy_receipt(root, gate, successor, request)
     # Historical no-retry custody cases never execute, so execute() records them incomplete and
     # UNVERIFIED; every other case must still be complete.
     successor_custody = successor.get('custody_skips') or {}
@@ -2952,8 +3428,10 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
              and all(type(value) is bool for value in successor['case_complete'].values()),
              'successor historical completion types')
         expected_complete.update(dict.fromkeys(historical, False))
+    expected_complete.update(dict.fromkeys(user_policy, False))
     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
          and successor.get('case_complete') == expected_complete
+         and all(type(value) is bool for value in successor['case_complete'].values())
          and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
          'successor complete cases')
     reference = successor['native_cleanup_reference']
@@ -2966,9 +3444,11 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     for evidence in result['evidence'].values():
         need(isinstance(evidence, dict) and isinstance(evidence.get('path'), str)
              and sha_file(evidence['path']) == evidence.get('sha256'), 'successor native evidence changed')
-    need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
+    isolated_successor_resources_disjoint(prior, successor, root)
+    origin_finished = isolated_origin_finished(prior, original)
+    need(finite(origin_finished) and finite(successor.get('started_at'))
          and finite(successor.get('finished_at'))
-         and original['finished_at'] <= successor['started_at'] <= successor['finished_at'], 'successor clocks')
+         and origin_finished <= successor['started_at'] <= successor['finished_at'], 'successor clocks')
 
 
 def reconciliation_occurrence(state, entry, receipt):
@@ -2984,6 +3464,89 @@ def reconciliation_occurrence(state, entry, receipt):
          and failure.get('worker_result') == receipt['worker_result']
          and failure.get('native_result') == 'UNVERIFIED' and failure.get('complete') is False
          and receipt['cases'].get(case) == 'UNVERIFIED', 'reconciliation occurrence binding')
+
+
+def reconciled_observation_loss42_isolated_successor(state, prior, original, successor):
+    """Launch-only renewal after strict typed42 closure; UNKNOWN outer facts stay immutable."""
+    from deploy_test_cycle import bounded_read, receipt_owner, sha_file
+    from deploy_test_native_observation_loss42 import CAPTURE, LAYOUT, admit
+    need(prior.get('token') == original.get('token') == '6428b1b8c79c47fbb0422465fec357e1'
+         and prior.get('purpose') == 'isolated-validation' and prior.get('cleanup_complete') is False
+         and prior.get('credit_granted') is False and prior.get('obligations_preserved') is True
+         and prior.get('gate') == 'smoke' and successor.get('token') == CAPTURE['token']
+         and successor.get('source') == CAPTURE['source'], 'typed42 original obligation/source')
+    entries = [(key, entry) for key, entry in state.get('reconciled_owners', {}).items()
+               if entry.get('token') == successor['token']]
+    need(len(entries) == 1, 'typed42 strict reconciliation required')
+    key, entry = entries[0]
+    proof = entry.get('proof', {})
+    isolated42 = (entry.get('purpose') == proof.get('purpose') == 'isolated-validation'
+                  and entry.get('cleanup_complete') is False and entry.get('obligations_preserved') is True
+                  and entry.get('execution_credit') is False and isinstance(entry.get('excluded_resources'), dict)
+                  and set(entry['excluded_resources']) == {'machines', 'copy_volumes'}
+                  and all(isinstance(value, dict) and value for value in entry['excluded_resources'].values()))
+    need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
+         and (isolated42 or entry.get('purpose') is None and proof.get('purpose') is None)
+         and proof.get('layout') == LAYOUT and key == proof.get('receipt_sha256') == CAPTURE['receipt_sha256']
+         and entry.get('observation_loss_verified') is True and entry.get('mixed_terminal_campaign_verified') is True
+         and entry.get('original_outcomes_preserved') is True and (isolated42 or entry.get('cleanup_complete') is True)
+         and entry.get('coordinator_process_flags') == 'UNKNOWN' and entry.get('credit_granted') is False
+         and entry.get('financial_cleanup_credit') is False, 'typed42 strict zero-credit closure')
+    gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+    rows = [(attempt, row) for attempt in state['attempts'] for row in attempt.get('results', []) if row is successor]
+    need(len(rows) == 1 and rows[0][0].get('phase') == 'focused'
+         and rows[0][0].get('source') == CAPTURE['source']
+         and not rows[0][0].get('interrupted') and not rows[0][0].get('stale')
+         and rows[0][0].get('settlement') == dict(kind='native-settlement-journal-v1', round=42,
+              missing_outer_nonpass_only=True, original_receipts_unchanged=True, positive_credit=False)
+         and type(rows[0][0]['settlement'].get('round')) is int
+         and all(type(rows[0][0]['settlement'].get(k)) is bool for k in
+                 ('missing_outer_nonpass_only', 'original_receipts_unchanged', 'positive_credit'))
+         and successor.get('command') == gate['command'], 'typed42 settled full attempt')
+    folder = Path(successor['log']).parent
+    need(bounded_read(folder/'receipt.json', 'typed42 original receipt') == successor
+         and key == sha_file(folder/'receipt.json')
+         and successor.get('worker_result') == str(folder/'result.json'), 'typed42 original receipt binding')
+    request = bounded_read(folder/'request.json', 'typed42 original request')
+    adapter = bounded_read(folder/'result.json', 'typed42 original adapter')
+    need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
+         and request.get('phase') == 'focused' and request.get('worker_recipe') == gate.get('worker_recipe'),
+         'typed42 full request identity')
+    checks, skips = request['checks'], request['skips']
+    need(isinstance(checks, list) and len(checks) == len(set(checks)) == 17 and isinstance(skips, dict)
+         and not set(checks) & set(skips) and set(checks) | set(skips) == set(gate['checks'])
+         and set(successor.get('cases', {})) == set(gate['checks'])
+         and set(successor.get('case_complete', {})) == set(gate['checks'])
+         and all(value is False for value in successor['case_complete'].values()), 'typed42 full inventory')
+    binding = successor.get('execution_binding', {})
+    need(isinstance(binding, dict) and set(binding) == {'contract_digest', 'environment', 'input_fingerprint'}
+         and all(isinstance(v, str) and re.fullmatch('[0-9a-f]{64}', v) for v in binding.values()),
+         'typed42 historical execution binding')
+    owner = receipt_owner(prior['gate'], successor)
+    need(isinstance(owner, dict) and owner.get('worker_root') == prior['owner']['worker_root']
+         and entry.get('owner') == proof.get('owner') == owner, 'typed42 exact original owner')
+    root = Path(owner['worker_root'])
+    native_root = root/'.context/deploy-cloud'/hashlib.sha256(successor['token'].encode()).hexdigest()
+    expected = dict(original_receipt_sha256=prior['proof']['receipt_sha256'], original_request_token=prior['token'],
+        new_request_token=successor['token'], source=successor['source'], new_native_root=str(native_root),
+        excluded_resources=prior['excluded_resources'], credit_granted=False)
+    admissions = request.get('isolated_validation')
+    need(isinstance(admissions, list) and all(isinstance(v, dict) for v in admissions)
+         and admissions == successor.get('isolated_validation')
+         and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
+         'typed42 original isolation binding')
+    # admit authenticates the immutable receipt/request/adapter, typed false credits and producer clocks.
+    # still_bound replays the SAME full validator including exact settlement/current process absence,
+    # all13 owners, native audits/runtime/provenance/provider/Hub/relay/publication/file closure.
+    admit(successor, owner, proof, adapter, root)
+    need(entry.get('occurrence') != successor['token'], 'typed42 diagnosed occurrence required')
+    reconciliation_occurrence(state, entry, successor)
+    need(still_bound(entry, successor, owner), 'typed42 strict proof no longer bound')
+    isolated_successor_custody(state, gate, successor, request, root)
+    need(finite(original.get('finished_at')) and finite(adapter.get('started_at'))
+         and finite(adapter.get('finished_at'))
+         and original['finished_at'] <= adapter['started_at'] <= adapter['finished_at'],
+         'typed42 producer chronology distinct from UNKNOWN outer clocks')
 
 
 def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
@@ -3045,10 +3608,15 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     need(len(entries) == 1, 'one strict normal successor reconciliation required')
     key, entry = entries[0]
     normal = entry.get('proof', {})
+    partial = (normal.get('layout') == 'campaign-partial-zero-allocation-v1'
+               and entry.get('partial_preexecution_zero_allocation') is True
+               and entry.get('financial_cleanup_credit') is False
+               and entry.get('original_outcomes_preserved') is True
+               and original['token'] == '6428b1b8c79c47fbb0422465fec357e1')
     need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
          and entry.get('purpose') is None and normal.get('purpose') is None
          # Mixed is the same full-cohort validator with zero-allocation members (infra stop).
-         and (normal.get('layout') in {'campaign-v1', 'campaign-mixed-preallocation-v1'}
+         and (normal.get('layout') in {'campaign-v1', 'campaign-mixed-preallocation-v1'} or partial
               or normal.get('layout') == 'campaign-source-validation-refusal-v1'
               and entry.get('source_validation_refusal_cleanup') is True)
          and key == normal.get('receipt_sha256')
@@ -3058,9 +3626,11 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     # Re-run the unchanged normal validator: all native file hashes, audits, retained Hub custody,
     # provider release and publication closure are required even when this result is incomplete.
     need(still_bound(entry, successor, owner, state), 'strict normal successor proof changed')
-    need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
+    isolated_successor_resources_disjoint(prior, successor, Path(owner['worker_root']), audit_seals=entry.get('native_audit_seals'))
+    origin_finished = isolated_origin_finished(prior, original)
+    need(finite(origin_finished) and finite(successor.get('started_at'))
          and finite(successor.get('finished_at'))
-         and original['finished_at'] <= successor['started_at'] <= successor['finished_at'],
+         and origin_finished <= successor['started_at'] <= successor['finished_at'],
          'failed successor clocks')
 
 
@@ -3494,30 +4064,40 @@ def renew_isolated_validation(state, request_token, proof, renewal_witness=None)
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
-    latest = isolated_successor(state, prior, renewal_witness)
-    if (latest is not None and latest is not receipt and latest.get('token') is None
-            and latest.get('executed') is not True and latest.get('complete') is False
-            and latest.get('status') == 'FAIL' and isinstance(latest.get('reason'), str)
-            and latest.get('pre_command_refusal') is None
-            and latest.get('source') != LEGACY_ISOLATED_REFUSAL['source']
-            and set(latest) != {'gate', 'status', 'complete', 'cases', 'source', 'reason'}):
-        # A launch refused before any request was issued (for example this missing renewal)
-        # executed nothing: it is not a successor. Its FAIL record stays in the history.
-        # Known pre-dispatch refusal rows keep their strict isolated_successor() path above.
-        executed = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
-                    if row.get('gate') == prior['gate'] and row.get('token') is not None]
-        latest = executed[-1] if executed else None
-    elif latest is not None and latest != receipt:
-        latest = isolated_refusal_successor(state, prior, latest)
+    # Two witnessed forms of the same pre-command refusal exist: per-token pinned admission
+    # refusals (ISOLATED_ADMISSION_REFUSALS_V1) walk back to the latest executed owner; any other
+    # token uses main's successor walk and its typed/legacy pre-command refusal witness.
+    if renewal_witness is None and any(key[0] == receipt['token'] for key in ISOLATED_ADMISSION_REFUSALS_V1):
+        latest = isolated_renewal_successor(state, prior, receipt)
+    else:
+        latest = isolated_successor(state, prior, renewal_witness)
+        if (latest is not None and latest is not receipt and latest.get('token') is None
+                and latest.get('executed') is not True and latest.get('complete') is False
+                and latest.get('status') == 'FAIL' and isinstance(latest.get('reason'), str)
+                and latest.get('pre_command_refusal') is None
+                and latest.get('source') != LEGACY_ISOLATED_REFUSAL['source']
+                and set(latest) != {'gate', 'status', 'complete', 'cases', 'source', 'reason'}):
+            # A launch refused before any request was issued (for example this missing renewal)
+            # executed nothing: it is not a successor. Its FAIL record stays in the history.
+            # Known pre-dispatch refusal rows keep their strict isolated_successor() path above.
+            executed = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
+                        if row.get('gate') == prior['gate'] and row.get('token') is not None]
+            latest = executed[-1] if executed else None
+        elif latest is not None and latest != receipt:
+            latest = isolated_refusal_successor(state, prior, latest)
     need(custody_state is None or latest is not None and latest != receipt
          and latest.get('complete') is True, 'historical contract requires clean successor')
     if latest != receipt:
-        if latest is not None and latest.get('complete') is False:
+        if latest is not None and latest.get('kind') == 'recovered-native-execution-v1':
             need(renewal_witness is None, 'historical witness requires complete successor')
-            if latest.get('kind') == 'recovered-native-execution-v1':
-                recovered_isolated_successor_v1(state, prior, receipt, latest)
+            from deploy_test_native_observation_loss42 import CAPTURE as OBSERVATION_LOSS42
+            if latest.get('token') == OBSERVATION_LOSS42['token']:
+                reconciled_observation_loss42_isolated_successor(state, prior, receipt, latest)
             else:
-                reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
+                recovered_isolated_successor_v1(state, prior, receipt, latest)
+        elif latest is not None and latest.get('complete') is False:
+            need(renewal_witness is None, 'historical witness requires complete successor')
+            reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
         else:
             clean_isolated_successor(state, prior, receipt, latest, renewal_witness, custody_state)
     else:
@@ -3529,7 +4109,7 @@ def renew_isolated_validation(state, request_token, proof, renewal_witness=None)
          {k: v for k, v in prior['proof'].items() if k != 'validation_source'}, 'only validation_source may change')
     need(proof.get('validation_source') == state['source'] == state['plan'].get('source')
          == source(Path(owner['worker_root'])), 'current source binding')
-    entry = validate(receipt, owner, proof)
+    entry = validate_original_obligation(prior, receipt, owner, proof, renewal=True)
     entry['occurrence'] = prior['occurrence']
     if entry != prior:
         state.setdefault('reconciled_owner_history', []).append(copy.deepcopy(prior))
@@ -3617,6 +4197,15 @@ def reconcile(state, occurrence_id, proof, renewal_witness=None):
             if (occurrence_id == prior['token'] or proof != prior.get('proof')
                     or renewal_witness is not None):
                 return renew_isolated_validation(state, prior['token'], proof, renewal_witness)
+        # Existing isolated obligations use the same guarded renewal regardless of
+        # whether the caller supplies the original failure ID or request token.
+        registered = [entry for key, entry in state.get('reconciled_owners', {}).items()
+                      if entry.get('purpose') == 'isolated-validation'
+                      and (key == proof.get('receipt_sha256') or entry.get('token') == proof.get('request_token'))]
+        if failure is not None and registered and proof != registered[0]['proof']:
+            need(len(registered) == 1 and registered[0].get('occurrence') == occurrence_id,
+                 'existing isolated reconciliation identity')
+            return renew_isolated_validation(state, registered[0]['token'], proof, renewal_witness)
         if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
                 and proof.get('purpose') == 'isolated-validation'):
             return renew_isolated_validation(state, occurrence_id, proof, renewal_witness)
@@ -3661,6 +4250,86 @@ def reconcile(state, occurrence_id, proof, renewal_witness=None):
     state.setdefault('reconciled_owners', {})[key] = entry
 
 
+# A retained operation admitted before the bounded-reader contract keeps its
+# exact original verifier. This is versioned debt replay, never fresh admission.
+RETAINED_ISOLATED_VALIDATORS = frozenset({
+    '946e2f88acc6e175cf752f74305120f5578c9faac0bfd266589fc98aff29f550',
+})
+# Bootstrap an earlier accepted obligation only from an independently pinned
+# acceptance body. A mutable local proof cannot authorize its own contract.
+RETAINED_ISOLATED_ACCEPTANCES = {
+    '73057ff465e9d696367f5c0eaceb0a52f8f8bed10a6bfb7abeba632d58975a26': {
+        'head': '52b7cc41f091286ce1c5d21d87aa7523f65b6814',
+        'digest': 'f2ac68cc13f3d93b9c03a81405bcb3055ffddcf990557990b19daabfdb25dc7d',
+    },
+}
+
+
+def original_obligation_contract(entry, receipt, owner):
+    if not (entry.get('kind') == KIND and entry.get('purpose') == 'isolated-validation'
+            and entry.get('credit_granted') is False and entry.get('cleanup_complete') is False
+            and entry.get('obligations_preserved') is True and entry.get('owner') == owner
+            and entry.get('token') == receipt.get('token') and entry.get('gate') == receipt.get('gate')):
+        need('original_obligation_contract' not in entry, 'historical obligation role changed')
+        return None
+    recorded = entry.get('original_obligation_contract')
+    need(recorded is None or isinstance(recorded, dict) and set(recorded) == {
+        'version', 'validation_source', 'validator_sha256', 'proof_body_sha256'}
+         and type(recorded.get('version')) is int and recorded['version'] == 1,
+        'historical obligation contract shape')
+    source = (recorded or {}).get('validation_source', entry.get('validation_source'))
+    need(isinstance(source, dict) and set(source) == {'head', 'digest'}
+         and re.fullmatch('[0-9a-f]{40}', str(source.get('head', '')))
+         and re.fullmatch('[0-9a-f]{64}', str(source.get('digest', ''))), 'historical obligation source')
+    root = Path(owner['worker_root'])
+    command = ['git', '--no-replace-objects', '-C', str(root)]
+    target = source['head'] + ':scripts/deploy_test_native_cleanup.py'
+    try:
+        size = subprocess.check_output([*command, 'cat-file', '-s', target],
+            stderr=subprocess.DEVNULL, timeout=30)
+        need(size.strip().isdigit() and 0 < int(size) <= 1024 * 1024, 'historical verifier size')
+        raw = subprocess.check_output([*command, 'show', target], stderr=subprocess.DEVNULL, timeout=30)
+        need(len(raw) == int(size), 'historical verifier size changed')
+    except (OSError, subprocess.SubprocessError):
+        need(recorded is None, 'historical obligation verifier unavailable')
+        return None
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest not in RETAINED_ISOLATED_VALIDATORS:
+        need(recorded is None, 'unsupported historical obligation verifier')
+        return None
+    proof = entry['proof']
+    need(proof.get('purpose') == 'isolated-validation'
+         and proof.get('validation_source') == entry.get('validation_source'), 'historical obligation binding')
+    body = {k: v for k, v in proof.items() if k != 'validation_source'}
+    body_digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    need(RETAINED_ISOLATED_ACCEPTANCES.get(body_digest) == source,
+         'historical obligation acceptance changed')
+    contract = dict(version=1, validation_source=copy.deepcopy(source), validator_sha256=digest,
+        proof_body_sha256=body_digest)
+    need(recorded is None or recorded == contract, 'historical obligation contract changed')
+    return raw, contract
+
+
+def validate_original_obligation(entry, receipt, owner, proof, *, renewal=False, quarantine_archive=None):
+    contract = original_obligation_contract(entry, receipt, owner)
+    if contract is None:
+        return validate(receipt, owner, proof, quarantine_archive=quarantine_archive)
+    raw, marker = contract
+    body = {k: v for k, v in proof.items() if k != 'validation_source'}
+    need(hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+         == marker['proof_body_sha256'], 'historical obligation proof changed')
+    scope = {'__name__': 'retained_isolated_obligation_v1',
+             '__file__': str(Path(__file__).resolve())}
+    exec(compile(raw, scope['__file__'], 'exec'), scope)
+    actual = scope['validate'](receipt, owner, proof)
+    need(actual.get('credit_granted') is False and actual.get('cleanup_complete') is False
+         and actual.get('obligations_preserved') is True, 'historical obligation changed debt')
+    if renewal or 'original_obligation_contract' in entry:
+        actual['original_obligation_contract'] = marker
+    return actual
+
+
+
 def still_bound(entry, receipt, owner, state=None, *, quarantine_archive=None):
     """Revalidate original quarantine custody and independent current retirement proof."""
     try:
@@ -3670,8 +4339,8 @@ def still_bound(entry, receipt, owner, state=None, *, quarantine_archive=None):
             reconciliation_occurrence(state, origin, receipt)
             need(still_bound(origin, receipt, owner, quarantine_archive=entry['proof'].get('quarantine_archive')),
                  'archived isolated proof changed')
-        actual = validate(receipt, owner, entry['proof'], quarantine_archive=quarantine_archive
-                          if entry.get('purpose') == 'isolated-validation' else None)
+        actual = validate_original_obligation(entry, receipt, owner, entry['proof'], quarantine_archive=quarantine_archive
+                                              if entry.get('purpose') == 'isolated-validation' else None)
         return actual == {k: v for k, v in entry.items()
                           if k not in {'occurrence', 'retired_isolation_sha256'}}
     except (OSError, ValueError, KeyError, TypeError):

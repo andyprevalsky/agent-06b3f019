@@ -706,6 +706,25 @@ def stress_default_environment(requirements: dict[str, object], environment: dic
     return result
 
 
+def controller_identity() -> dict | None:
+    """This campaign controller's PID and birth, in the form cloudbench-scorecard's process_birth reads.
+
+    The shared-inventory owner file records them only when that inventory runs (concurrency > 1),
+    so summary.json carries them too; a concurrency-1 campaign can then prove liveness.
+    """
+    pid = os.getpid()
+    try:
+        if Path("/proc/self/stat").exists():
+            fields = Path("/proc", str(pid), "stat").read_text().rsplit(") ", 1)[1].split()
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            return {"pid": pid, "birth": f"proc-start:{boot}:{fields[19]}"}
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True,
+                                timeout=10, check=False)
+        return {"pid": pid, "birth": result.stdout.strip()} if result.returncode == 0 and result.stdout.strip() else None
+    except (OSError, IndexError, subprocess.TimeoutExpired):
+        return None
+
+
 def cleanup_ticket_module(root: Path) -> ModuleType:
     """Bind and execute the exact immutable helper once in the campaign parent."""
     cached = getattr(cleanup_ticket_module, "_checked", None)
@@ -839,25 +858,24 @@ def task_verdict(task: dict) -> dict[str, object]:
                 "SKIPPED"}}
 
 
-def attempt_verdict(root: Path, job: dict[str, object]) -> dict[str, object]:
-    """The exited attempt's recorded verdict; empty (unknown) when no run record exists."""
-    try:
-        found = terminal_task(root, job)
-        return {} if found is None else task_verdict(found[2])
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
+def unverified_reason(error: Exception) -> str:
+    """Why a recorded result or release seal could not be verified (bounded)."""
+    return f"terminal result or release remains unverified ({type(error).__name__}: {error})"[:240]
 
 
 def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
-    """Read the existing physical result and full-release seal, without regrading."""
+    """Read the existing physical result and full-release seal, without regrading.
+
+    Any unreadable, looping or malformed receipt is an unverified release, never a
+    campaign failure: every exited attempt runs this check, including healthy peers'."""
     try:
         found = terminal_task(root, job)
         if found is None:
             return {"resources_released": False, "retry_blocked": "physical run handle unavailable"}
         fleet, record, task = found
         verdict = task_verdict(task)
-    except (OSError, ValueError, KeyError, TypeError):
-        return {"resources_released": False, "retry_blocked": "terminal result or release remains unverified"}
+    except Exception as error:
+        return {"resources_released": False, "retry_blocked": unverified_reason(error)}
     try:
         run_id = fleet.name
         lifecycle = json.loads((fleet / "_batch/lifecycle.json").read_text())
@@ -888,10 +906,9 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
                 **verdict, "resources_released": closed,
                 "lifecycle_verified": closed and lifecycle.get("status") == "verified",
                 "released_at_epoch": float(epoch_bytes) if closed else None}
-    except (OSError, ValueError, KeyError, TypeError):
+    except Exception as error:
         # The recorded verdict stands; only release remains unverified.
-        return {**verdict, "resources_released": False,
-                "retry_blocked": "terminal result or release remains unverified"}
+        return {**verdict, "resources_released": False, "retry_blocked": unverified_reason(error)}
 
 
 def infra_stop_policy() -> str:
@@ -1525,6 +1542,56 @@ def provider_capacity_refusal(benches: int, tasks: list[str] | None = None) -> i
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
 
 
+# scripts/run-bench run_bench_secret_like_setting, re-applied here because a
+# recorded name list is untrusted input (parity regression in
+# cloudbench_campaign_inventory_test.py).
+SECRET_LIKE_SETTING_NAME = re.compile(
+    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|ACCESS_KEY|AUTH_HEADER|AUTH_CONFIG|AUTH_SOCK|AUTHORIZATION|COOKIE|CREDENTIAL|PRIVATE|OTP|SIGNATURE"
+    r"|(_KEY|_B64|_AUTH|_DSN|_PAT|_PASS|_PWD|_JWT|_PAN|_CVV|_CVC|_PIN|_EXPIRY)\Z"
+)
+SECRET_LIKE_SETTING_VALUE = re.compile(
+    r"://[^/]*@|://[^/]*:[^@]*@|Bearer |FlyV1 |-----BEGIN|ghp_|github_pat_|X-Amz-Signature"
+)
+SWITCH_VALUES = frozenset(("", "0", "1", "true", "false", "yes", "no", "on", "off"))
+ASCII_SPACE = " \t\n\v\f\r"
+OPERATOR_SETTING_VALUE_LIMIT = 1024
+
+
+def secret_like_setting(name: str, value: str) -> bool:
+    switch = value.strip(ASCII_SPACE)
+    if switch.isascii() and switch.lower() in SWITCH_VALUES:
+        return False  # read like _benchmark_env_bool: no secret in a switch
+    return bool(SECRET_LIKE_SETTING_NAME.search(name) or SECRET_LIKE_SETTING_VALUE.search(value))
+
+
+def bounded_setting_value(value: str) -> str:
+    if len(value) <= OPERATOR_SETTING_VALUE_LIMIT:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", "surrogateescape")).hexdigest()
+    return (value[:OPERATOR_SETTING_VALUE_LIMIT] + f"…[truncated: {OPERATOR_SETTING_VALUE_LIMIT} of "
+            f"{len(value)} characters recorded; sha256={digest}]")
+
+
+def banner_setting_value(value: str) -> str:
+    """One shell-quoted line: control characters cannot forge banner lines."""
+    return shlex.quote(re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\\\ud800-\udfff]",
+                              lambda match: match.group().encode("unicode_escape").decode("ascii"), value))
+
+
+def launch_operator_settings(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """Effective non-secret CLOUDBENCH_* settings at launch, or None when unrecorded.
+
+    scripts/run-bench names them with its one secret-like filter (the same one
+    its --durable unit forwarder applies); a direct launch has no such list.
+    """
+    names = environ.get("RUN_BENCH_OPERATOR_SETTING_NAMES")
+    if names is None:
+        return None
+    return {name: bounded_setting_value(environ[name]) for name in sorted(set(names.split()))
+            if name.startswith("CLOUDBENCH_") and name in environ
+            and not secret_like_setting(name, environ[name])}
+
+
 def scorecard_hooks() -> dict | None:
     """The CLI scorecard and experiments ledger, when this script snapshot carries them."""
     here = Path(__file__).resolve().parent
@@ -1701,6 +1768,13 @@ def main() -> int:
         "e2e_timeout_seconds": args.e2e_timeout,
         "e2e_timeout_exceeded": False,
     }
+    identity = controller_identity()
+    if identity is not None:
+        state["controller"] = identity
+    operator_settings = launch_operator_settings(os.environ)
+    if operator_settings is not None:
+        # Unset names use source defaults; a successor relaunches with exactly these.
+        state["operator_settings"] = operator_settings
     for key in ("task_indexes", "group_total", "group_started_at"):
         if shard[key] is not None:
             state[key] = shard[key]
@@ -1764,6 +1838,12 @@ def main() -> int:
         f"jobs={len(jobs)} concurrency={args.concurrency}"
     )
     print(f"   summary: {summary_path}")
+    if operator_settings is None:
+        print("   operator settings: UNRECORDED (launched without scripts/run-bench)")
+    else:
+        print("   operator settings: " + (" ".join(
+            f"{name}={banner_setting_value(value)}" for name, value in operator_settings.items())
+            or "none set (source defaults)"))
     scorecard = scorecard_hooks()
     experiment_goal = os.environ.get("RUN_BENCH_GOAL") or "campaign:" + ",".join(sorted(set(args.task)))[:120]
     record_experiment(scorecard, "launch", campaign_dir, root, goal=experiment_goal, kind="campaign",
@@ -2676,13 +2756,15 @@ def main() -> int:
                     time.monotonic() - float(job.pop("_started_monotonic")), 3
                 )
                 active.pop(process_id)
+                # Every exited attempt records its verdict and release seal from the same
+                # physical receipts; the scorecard and retries read them with or without retries.
+                disposition = released_attempt(workspace, job)
+                for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
+                            "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
+                            "released_at_epoch", "retry_blocked"):
+                    job.pop(key, None)
+                job.update(disposition)
                 if args.retry_infra:
-                    disposition = released_attempt(workspace, job)
-                    for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
-                                "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
-                                "released_at_epoch", "retry_blocked"):
-                        job.pop(key, None)
-                    job.update(disposition)
                     job["attempts"].append({key: job.get(key) for key in (
                         "attempt", "log", "controller_pid", "started_at", "finished_at", "wall_clock_seconds",
                         "controller_exit_code", "status", "run_id", "fleet_dir", "fleet_owner_token", "task_status",
@@ -2707,8 +2789,6 @@ def main() -> int:
                         first_failure = first_failure or exit_code or 1
                 elif exit_code and not first_failure:
                     first_failure = exit_code
-                if not args.retry_infra:
-                    job.update(attempt_verdict(workspace, job))
                 if "infra_stop" not in state and not stop_signal:
                     breach = infra_stop_receipt(jobs, infra_scheduled_total, infra_policy, infra_reached)
                     if breach is not None:

@@ -68,7 +68,7 @@ def validate_campaign(receipt, proof, root, runs, parents, participants, bound, 
     return frozenset(parents)
 
 
-def validate_parent(fleet, life, benches, run, root, bound, document, tree):
+def validate_parent(fleet, life, benches, run, root, bound, document, tree, *, canonical_audit=None):
     from deploy_test_native_cleanup import fields, need
     need(not (fleet / 'execution-provenance.json').exists()
          and not (fleet / 'execution-task-matrix.json').exists(), 'admission has execution metadata')
@@ -85,7 +85,7 @@ def validate_parent(fleet, life, benches, run, root, bound, document, tree):
                  and task.get('failure_reason') == 'no current run artifact produced' for task in tasks),
          'admission must preserve failed unexecuted projection')
     audit = fleet / 'teardown-ownership'
-    canonical = root / '.git/cloudbench-fleet-audits' / life['fleet_owner_token']
+    canonical = canonical_audit or root / '.git/cloudbench-fleet-audits' / life['fleet_owner_token']
     seal = tree(audit)
     need(fields(bound(audit / 'source-audit')) == {'path': str(canonical), 'sha256': seal}
          and tree(canonical) == seal == life['audit_sha256'], 'admission original audit seal')

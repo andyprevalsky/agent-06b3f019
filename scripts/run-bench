@@ -156,6 +156,144 @@ if [[ "${1:-}" == "stability-proof" ]]; then
         --capability "$@"
 fi
 
+# The one secret-like filter (NAME VALUE) for every launch setting run-bench
+# copies out of its environment: the durable unit's --setenv list (readable
+# via systemctl show) and the campaign's recorded operator settings (descend
+# I-31). Credentials come from env files. A plain switch value, read like
+# _benchmark_env_bool (ASCII case-insensitive, whitespace-trimmed), carries no
+# secret; URL userinfo or a credential-shaped value always does. LC_ALL=C
+# matches bytes, so invalid UTF-8 cannot evade it. run-bench-campaign.py
+# secret_like_setting re-applies exactly this (parity regression in
+# cloudbench_campaign_inventory_test.py). No bare *AUTH*: *_AUTHORITY names
+# and the CLOUDBENCH_CODEX_AUTH_* helper settings are ordinary settings.
+run_bench_secret_like_setting() {
+    local LC_ALL=C value="${2-}" switch
+    local secret_values='://[^/]*@|://[^/]*:[^@]*@|Bearer |FlyV1 |-----BEGIN|ghp_|github_pat_|X-Amz-Signature'
+    switch="${value#"${value%%[![:space:]]*}"}"
+    switch="${switch%"${switch##*[![:space:]]}"}"
+    case "$switch" in
+        ''|0|1|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo]|[Oo][Nn]|[Oo][Ff][Ff]) return 1 ;;
+    esac
+    case "$1" in
+        *TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*API_KEY*|*ACCESS_KEY*|*AUTH_HEADER*|*AUTH_CONFIG*|*AUTH_SOCK*|*AUTHORIZATION*|*COOKIE*|*CREDENTIAL*|*PRIVATE*|*OTP*|*SIGNATURE*) return 0 ;;
+        *_KEY|*_B64|*_AUTH|*_DSN|*_PAT|*_PASS|*_PWD|*_JWT|*_PAN|*_CVV|*_CVC|*_PIN|*_EXPIRY) return 0 ;;
+    esac
+    [[ "$value" =~ $secret_values ]]
+}
+
+# --durable: run this exact command as a transient SYSTEM service. setsid/nohup
+# leave the controller in the caller's cgroup; on boxes.dev that is the agent
+# session's boxes_workload.slice scope, and a daemon restart hard-disposes it
+# with a cgroup-wide SIGKILL (no traps, cloud resources left for recovery;
+# RCA 2026-11-07-boxes-session-scope-kill-reaped-setsid-campaign-controller).
+# KillMode=process: stop/exit signals only the controller (MainPID, via exec);
+# its job controllers keep their own exact-owner cleanup.
+RUN_BENCH_DURABLE_REQUESTED=0
+RUN_BENCH_DURABLE_LOG_PATH=""
+durable_kept_args=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --durable) RUN_BENCH_DURABLE_REQUESTED=1; shift ;;
+        --durable-log|--durable-log=*)
+            if [ "$1" = --durable-log ]; then
+                [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "❌ --durable-log requires a file" >&2; exit 2; }
+                RUN_BENCH_DURABLE_LOG_PATH="$2"; shift 2
+            else
+                RUN_BENCH_DURABLE_LOG_PATH="${1#*=}"; shift
+            fi
+            RUN_BENCH_DURABLE_REQUESTED=1
+            ;;
+        *) durable_kept_args+=("$1"); shift ;;
+    esac
+done
+set -- "${durable_kept_args[@]}"
+if [ "$RUN_BENCH_DURABLE_REQUESTED" -eq 1 ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            --detach|--wait|--foreground)
+                echo "❌ --durable runs the controller as the service's main process; omit $arg" >&2
+                exit 2
+                ;;
+        esac
+    done
+    durable_unit="run-bench-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    durable_log="${RUN_BENCH_DURABLE_LOG_PATH:-$ROOT_DIR/.context/benchmarks/durable/$durable_unit.log}"
+    case "$durable_log" in /*) ;; *) durable_log="$CALLER_DIR/$durable_log" ;; esac
+    mkdir -p "$(dirname "$durable_log")"
+    durable_log="$(cd "$(dirname "$durable_log")" && pwd -P)/$(basename "$durable_log")"
+    # systemd opens the log as root; fs.protected_regular refuses that in a
+    # sticky world-writable directory such as /tmp or /var/tmp itself.
+    [ ! -k "$(dirname "$durable_log")" ] || {
+        echo "❌ --durable-log must not be directly inside a sticky directory ($(dirname "$durable_log")); use a private subdirectory" >&2
+        exit 2
+    }
+    touch "$durable_log"  # caller-owned; systemd would otherwise create it root-owned
+    durable_caller_cgroup="$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null || true)"
+    # A service starts with a clean environment: forward the launch's knobs, never secrets.
+    durable_env=(--setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=RUN_BENCH_DURABLE_CONTROLLER="$durable_unit")
+    durable_skipped=()
+    while IFS= read -r name; do
+        case "$name" in
+            CLOUDBENCH_*|RUN_BENCH_*|BENCHMARK_*|PREDEPLOY_*|ROSE_*|BOXES_*|CONDUCTOR_*|CLAUDE_CODE_SESSION_ID|TMPDIR|LANG|LC_*|TZ|NO_PROXY|no_proxy|VIRTUAL_ENV) ;;
+            *) continue ;;
+        esac
+        [ "$name" != RUN_BENCH_DURABLE_CONTROLLER ] || continue
+        if run_bench_secret_like_setting "$name" "${!name}"; then durable_skipped+=("$name"); continue; fi
+        durable_env+=("--setenv=$name=${!name}")
+    done < <(compgen -e)
+    [ "${#durable_skipped[@]}" -eq 0 ] || echo "⚠️  --durable does not forward secret-like variables (${durable_skipped[*]}); controllers read credentials from the env files" >&2
+    # systemd expands $VAR in ExecStart arguments; $$ keeps a literal dollar.
+    durable_argv=()
+    for arg in "$@"; do durable_argv+=("${arg//\$/\$\$}"); done
+    durable_reason=""
+    if ! command -v systemd-run >/dev/null 2>&1; then
+        durable_reason="systemd-run is not installed"
+    elif ! sudo -n true >/dev/null 2>&1; then
+        durable_reason="passwordless sudo is unavailable"
+    elif ! sudo -n systemd-run --unit="$durable_unit" --uid="$(id -u)" --gid="$(id -g)" \
+        --description="scripts/run-bench durable controller ($CALLER_DIR)" \
+        -p KillMode=process -p TimeoutStopSec=2h -p "WorkingDirectory=$CALLER_DIR" -p StandardInput=null \
+        -p "StandardOutput=append:$durable_log" -p "StandardError=append:$durable_log" \
+        -p "ExecStopPost=/bin/sh -c 'echo \"run-bench durable unit $durable_unit exited: result=\$\$SERVICE_RESULT code=\$\$EXIT_CODE status=\$\$EXIT_STATUS\"'" \
+        "${durable_env[@]}" -- "$BASH" "$ROOT_DIR/scripts/run-bench" "${durable_argv[@]}"; then
+        durable_reason="systemd-run could not start the service"
+    fi
+    if [ -z "$durable_reason" ]; then
+        durable_pid=0
+        for _ in 1 2 3 4 5 6; do
+            sleep 0.5
+            durable_state="$(systemctl show -p ActiveState --value "$durable_unit" 2>/dev/null || true)"
+            durable_pid="$(systemctl show -p MainPID --value "$durable_unit" 2>/dev/null || echo 0)"
+            [ "$durable_state" = active ] && [ "${durable_pid:-0}" != 0 ] || break
+        done
+        if [ "$durable_state" != active ] || [ "${durable_pid:-0}" = 0 ]; then
+            durable_result="$(systemctl show -p Result --value "$durable_unit" 2>/dev/null || true)"
+            if [ "$durable_state" = inactive ] && [ "$durable_result" = success ]; then
+                echo "✅ durable unit $durable_unit already completed successfully; log $durable_log"
+                exit 0
+            fi
+            echo "❌ durable unit $durable_unit exited during startup (state=${durable_state:-unknown} result=${durable_result:-unknown}); log $durable_log:" >&2
+            tail -n 40 "$durable_log" >&2 || true
+            exit 1
+        fi
+        echo "🛡️  durable controller: unit=$durable_unit main_pid=$durable_pid log=$durable_log"
+        echo "    cgroup: $(sed -n 's/^0:://p' "/proc/$durable_pid/cgroup" 2>/dev/null || echo unknown) (caller: ${durable_caller_cgroup:-unknown})"
+        echo "    status: systemctl status $durable_unit   (exit marker is appended to the log)"
+        echo "    stop:   sudo -n systemctl stop $durable_unit   (TERM to the controller only; its traps own cleanup)"
+        exit 0
+    fi
+    echo "⚠️  ═══ DURABLE LAUNCH UNAVAILABLE: $durable_reason ═══" >&2
+    echo "⚠️  Falling back to setsid in the caller's cgroup (${durable_caller_cgroup:-unknown})." >&2
+    echo "⚠️  This controller is NOT restart-durable: a boxes.dev session hard-dispose kills the whole cgroup without traps." >&2
+    if command -v setsid >/dev/null 2>&1; then
+        RUN_BENCH_DURABLE_CONTROLLER=setsid setsid "$BASH" "$ROOT_DIR/scripts/run-bench" "$@" >>"$durable_log" 2>&1 </dev/null &
+    else
+        RUN_BENCH_DURABLE_CONTROLLER=nohup nohup "$BASH" "$ROOT_DIR/scripts/run-bench" "$@" >>"$durable_log" 2>&1 </dev/null &
+    fi
+    echo "🛡️  fallback controller: pid=$! log=$durable_log"
+    exit 0
+fi
+
 cd "$ROOT_DIR/agents"
 
 # Use the agents venv interpreter so subprocesses (run_benchmark.py) inherit the full
@@ -323,6 +461,19 @@ Startup reuse:
                      below a selected task's effective timeout. Default covers the
                      longest selected task.
   --wait             Wait for the detached fleet and return its exit status.
+
+Durable launch (boxes.dev and other systemd hosts):
+  --durable          Run this exact command (campaign, fleet, sharded operator or
+                     recovery) as a transient system service via
+                     `sudo -n systemd-run --uid/--gid -p KillMode=process`, outside
+                     the agent session's cgroup, so a session restart cannot kill
+                     it. Prints unit, MainPID (the controller) and log, then
+                     returns. Without systemd-run or passwordless sudo it warns
+                     loudly and falls back to setsid. Stop: sudo -n systemctl stop <unit>.
+                     Forwards non-secret launch settings; a campaign records its
+                     CLOUDBENCH_* settings in summary.json operator_settings.
+  --durable-log FILE Append the service's output to FILE (implies --durable;
+                     default .context/benchmarks/durable/<unit>.log).
 
 Monitoring:
   Launches print the mandatory parent-agent card format and maintenance policy.
@@ -501,6 +652,14 @@ if [ "$INTERNAL_OPERATION" -eq 1 ]; then
     exec bash "$FLEET_MAINTENANCE_BIN" "${FLEET_ARGS[@]}"
 fi
 [ "${#SELECTORS[@]}" -gt 0 ] || { usage >&2; exit 2; }
+# Every cloud route below (full, sharded, ordinary campaign, fleet) and the
+# processes it spawns resolve the Fly CLI by name. Use the same discovery as
+# run-bench-cloud/run-bench-fleet once here, so a shell without ~/.fly/bin
+# needs no PATH patch (descend I-30: the campaign shared relay hit
+# FileNotFoundError flyctl). The operator still pins its version.
+if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
+    export PATH="$HOME/.fly/bin:$PATH"
+fi
 
 # Same Fly CLI discovery as run-bench-cloud/run-bench-fleet, once for every task
 # route below (full, sharded operator, rolling campaign, fleet); the sharded
@@ -815,6 +974,15 @@ if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
         esac
         CAMPAIGN_ARGS+=("--forward-arg=$arg")
     done
+    # The campaign records these effective non-secret CLOUDBENCH_* settings in
+    # summary.json and its banner, so a successor can relaunch it exactly; a
+    # --durable unit's environment is otherwise their only record (I-31).
+    operator_setting_names=()
+    while IFS= read -r name; do
+        case "$name" in CLOUDBENCH_*) ;; *) continue ;; esac
+        run_bench_secret_like_setting "$name" "${!name}" || operator_setting_names+=("$name")
+    done < <(compgen -e)
+    export RUN_BENCH_OPERATOR_SETTING_NAMES="${operator_setting_names[*]}"
     exec "$PY" -u "$ROOT_DIR/scripts/run-bench-campaign.py" "${CAMPAIGN_ARGS[@]}"
 fi
 
@@ -852,6 +1020,9 @@ fi
 # autoscaling with prod's params scoped to that bench's queue. The whole run is
 # shown in ONE aggregated batch dashboard (auto-opened) covering ALL benches.
 # Sim is per-bench and OFF by default — pass --sim-on <a,b> to enable it.
+# A --durable launch keeps exec semantics: the fleet controller stays the
+# service's main process instead of re-detaching inside it.
+[ -z "${RUN_BENCH_DURABLE_CONTROLLER:-}" ] || FLEET_ARGS+=(--foreground)
 if [ -n "${RUN_BENCH_FLEET_BIN_UNDER_TEST:-}" ]; then
     exec bash "$RUN_BENCH_FLEET_BIN_UNDER_TEST" "${RESOLVED_TASKS[@]}" "${FLEET_ARGS[@]}"
 fi

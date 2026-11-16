@@ -193,6 +193,7 @@ Never skip for an unexplained failure, an auth failure our own configuration cau
 10. A failure in the final sweep goes back to step 2; a focused pass is never a deploy pass.
 11. Runners rerun a failed unit once on the same source (FLAKY if it passes, FAIL if not); never rerun anything else blind: each further rerun follows a repro, a fix and its regression.
 12. After merge, dispatch each NOT_INTRODUCED packet as a `/goal` on a new devbox in the Bugs folder at high effort and standard speed.
+13. A test suite or unit that fails its runtime or time budget is work to speed up, not a decision for the user: profile where the time goes, then shard the suite's independent cases into isolated concurrent processes, cut setup repetition, and remove real waits. Running a test suite's own independent cases concurrently is allowed; keep every case, assertion, timeout and benchmark, fleet and shared-stack concurrency limit unchanged. Benchmark or agent timeouts follow CLAUDE.md rule 25 and `/RCA` instead. Restart the five-run stability count on the changed suite. Ask the user for an override only after a measured attempt shows the suite cannot fit, and include that measurement.
 
 Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.md`.
 

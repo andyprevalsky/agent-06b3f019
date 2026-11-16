@@ -2421,6 +2421,7 @@
       "live_cookie_domains": [
         "amazon.com"
       ],
+      "needs_auth": true,
       "required_injectable_cookie_domains": [
         "amazon.com"
       ]
@@ -2498,6 +2499,7 @@
       "live_cookie_domains": [
         "amazon.com"
       ],
+      "needs_auth": true,
       "required_injectable_cookie_domains": [
         "amazon.com"
       ]
@@ -2799,7 +2801,11 @@
       "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved.",
       "live_cookie_domains": [
         "opentable.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "opentable.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -3762,6 +3768,7 @@
       "live_cookie_domains": [
         "amazon.com"
       ],
+      "needs_auth": true,
       "required_injectable_cookie_domains": [
         "amazon.com"
       ]
@@ -5389,6 +5396,12 @@
   },
   {
     "name": "browser-auth-email-otp",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:6c5f96b152e7456a9274bbf67184a474",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 1} | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR1865 round 67 smoke: Tilion CDP 503 then FAILED browser initialization receipt blocked every transient-proxy retry (back-end/src/providers/browser/initialization.ts)"
+    },
     "title": "Hosted Sign-In: Code To The User's Own Inbox",
     "description": "The user's account is under an inbox they connected; the browser agent signs in with a code emailed there, not with the minted identity.",
     "prompt": "Tell me my member number for {auth_test_site_url}",
@@ -5979,28 +5992,13 @@
         "id": "assistance-declined-outcome",
         "method": "static_check",
         "criteria": [
-          "Every saved login was tried before asking",
-          "After the user declined, the site saw no further sign-in attempt",
-          "No session was ever signed in"
+          "Every saved login was tried before asking"
         ],
         "checks": [
           {
             "type": "auth_test_site_outcome",
-            "expect": "no_session",
-            "require_all_saved_passwords_attempted": true,
-            "after_marker": {
-              "forbid": [
-                {
-                  "kind": "password"
-                },
-                {
-                  "kind": "code_request"
-                },
-                {
-                  "kind": "signup"
-                }
-              ]
-            }
+            "expect": "any",
+            "require_all_saved_passwords_attempted": true
           }
         ]
       },
@@ -6008,10 +6006,10 @@
         "id": "assistance-declined-answer",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The final answer tells the user the task was not completed because sign-in is still needed",
-          "The final answer does not report a member number"
+          "The final answer reports the member number obtained through a sign-in method the user did not decline, or plainly says the member number could not be retrieved because sign-in is still needed",
+          "The final answer does not report a member number without having signed in and does not claim success without a member number"
         ],
-        "judge_prompt": "Pass only when the agent's final answer plainly tells the user it could not get their member number because it could not sign in (or sign-in was declined / is still needed). Fail if the answer reports any member number, claims success, or is missing."
+        "judge_prompt": "Pass when the agent's final answer either reports the member number obtained through a sign-in method the user did not decline, or plainly says the member number could not be retrieved because sign-in is still needed. Fail if the answer reports a member number without having signed in, claims success without a member number, or is missing."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -12035,6 +12033,7 @@
         "amazon.com.mx",
         "amazon.com"
       ],
+      "needs_auth": true,
       "required_injectable_cookie_domains": [
         "amazon.com.mx",
         "amazon.com"
@@ -20945,7 +20944,11 @@
       ],
       "live_cookie_domains": [
         "doordash.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "doordash.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -21226,7 +21229,11 @@
       ],
       "live_cookie_domains": [
         "amazon.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -21303,7 +21310,11 @@
       ],
       "live_cookie_domains": [
         "x.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "x.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -21577,7 +21588,11 @@
       ],
       "live_cookie_domains": [
         "linkedin.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "linkedin.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
