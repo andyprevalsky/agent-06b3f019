@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/rca-147bb3eb/20261116T2059Z-terminal-retry-data.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "1512aa1fe113a957fb2439ca6556238c0191fe61cc743bd0ce5defe8ab8c5f88",
+  "gzip_sha256": "3bbb2f6c9aec6dbeec3d9a00b69183ab6ce21d9ff0c0b5e50d32858012bc938c",
+  "stored_bytes": 234686397,
+  "frames": 28,
+  "files": 3626,
+  "original_bytes": 7450015596,
+  "manifest_sha256": "2c47d1ed3f065cd985d5a43a5b9b001371f07cc7fc2c744882f50da3b2112149",
+  "full_readback_verified": true
+}

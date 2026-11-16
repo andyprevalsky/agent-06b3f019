@@ -5,7 +5,7 @@ conversation breadcrumbs and provider-correct fresh Codex allocation, plus
 the independently diagnosed import-boundary, catalog metadata and launch
 custody repairs. Product merge: `562cc8c49008708918d15ee9844ab1c8c333062c`.
 
-All17 selected native product gates passed at exact source
+All 17 selected native product gates passed at exact source
 `4a9d224abd5bf5ab1770237f2a8097762938a876`, digest
 `882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0`.
 The real fresh Codex E2B task and restricted-command native handoff passed in
@@ -13,7 +13,7 @@ that backend gate. CodeRabbit review was **SKIPPED for the organization usage
 cap**, not PASS; the product merged without a substantive CodeRabbit review.
 Independent repair reviews are separate evidence.
 
-Production verification completed2026-11-16T20:48:30Z; native finish exited0
+Production verification completed 2026-11-16T20:48:30Z; native finish exited 0
 at20:49:05Z. Render and Vercel verified exact product562cc8; backend probes
 passed; Mac run43946926015 released v1.1.355. Semantic run
 [43951508861](https://github.com/Rose-Ai-Labs/rose/actions/runs/43951508861)
@@ -27,10 +27,10 @@ SKIPPED-not-applicable, not executed passes.
 The first semantic dispatch at20:22:58Z failed HTTP401 before creating a run.
 Its failed receipt and no-run identity remain alongside successful retry
 evidence. The distinct operational credential-precedence repair was delivered
-as6e249 via `/push`, with91 owning tests and five unchanged focused R1 passes.
+as6e249 via `/push`, with 91 owning tests and five unchanged focused R1 passes.
 Initial review found inherited-token redaction incomplete; its one-line
 follow-up and integration regression received independent PASS on final bytes.
-This operational validation does not replace product4a9's full17-gate proof.
+This operational validation does not replace product4a9's full 17-gate proof.
 
 ## Incident boundaries retained
 
@@ -60,27 +60,31 @@ two uncached durations exactly once. Five cached measurements remain in
 attempt history but are excluded from timeout training. Preserve recorded
 ACTIVE chat status alongside a passed outcome; do not normalize chat state.
 Inputs and source hashes are joined in the history receipt. Generic Hub
-backfill added0 because Hub code was null, not proof of complete history.
+backfill added 0 because Hub code was null, not proof of complete history.
 
 ## Receipt publication and remaining preservation
 
-The parent owns JSON publication. These repository-relative records are
-expected publication targets; this README does not assert that an absent
-target already exists. Final review must check their presence, hashes and scope
-once the parent copies them:
+The records below are published in this follow-up. Native production and source
+receipts retain their original values and qualifications.
 
-- [Production lanes](production-lanes.json) and [production verification](production-verification.json): final native outcomes, initial failure and source bindings.
-- [Source validation](source-validation.json) and [operational CLI repair](operational-cli-repair.json): separate product17 and operations91 evidence and review qualifications.
-- [History write receipt](history-write-receipt.json): seven attempts, two durations and exact-once source joins.
-- [Private archive receipt](private-archive-receipt.json): earlier verified private archive objects and exact covered bytes.
-- [Terminal archive receipt](terminal-archive-receipt.json), [closeout manifest](closeout-manifest.json), and [deletion readiness](deletion-readiness.json): final terminal delta, restore/read-back proofs and native readiness.
+- [Production lanes](production-lanes.json) and [verification](production-verification.json).
+- [Product validation](source-validation.json), [operational correction](operational-cli-repair.json), and [history insertion](history-write-receipt.json).
+- [Closed evidence/config archive](private-archive-receipt.json) and [terminal preservation](terminal-archive-receipt.json).
+- [Terminal data](terminal-data-receipt.json), [controls](terminal-controls-receipt.json), and [format supplement](terminal-supplement-receipt.json): full authenticated read-back, separate verification and isolated restoration passed.
+- [Compact closeout manifest](closeout-manifest.json), [source guard](terminal-source-guard.json), and [normalization recipe](terminal-normalization-recipe.json).
+- [Post-capture reporting derivatives](post-capture-reproducible.json) and [native deletion readiness](deletion-readiness.json).
 
-Final terminal-delta preservation and readiness remain pending until those
-native proofs complete. Earlier private objects do not cover later mutable
-files, new history, this records commit or its review. No READY or whole-box
-deletion claim is made. Private object keys, ciphertext/manifest hashes and
-recovery instructions belong in the receipts. Raw private transcripts,
-credentials and public signed URLs do not belong in this record.
+The terminal capture preserved both failed archive attempts. Its large data and
+control archives verified successfully before a directory-format assertion failed.
+The separately verified finalization adds exactly 48 aliases for already-proven
+generated directories; it changes no existing disposition and grants no test credit.
+The original exit 1 remains in the record. All original input, source, configuration,
+index and ref guards passed again after the format supplement restored. The full
+142,266-entry candidate remains private; this compact manifest contains current
+ignored scopes and exact historical ref/stash preservation entries. The native
+readiness record is finalized and rechecked after the records PR merges. No devbox
+destruction is requested. Later reporting pointers are reproducible public derivatives,
+not new private evidence.
 
 ## Recovery commands
 
