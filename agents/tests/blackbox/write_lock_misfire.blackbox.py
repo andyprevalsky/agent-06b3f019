@@ -34,7 +34,7 @@ CLASSIFIER_SOURCES = (
     AGENTS_ROOT / "browser_tools" / "write_lock.py",
     AGENTS_ROOT / "browser_tools" / "write_lock_probe.py",
 )
-EXPECTED_CASE_COUNT = 21
+EXPECTED_CASE_COUNT = 23
 OUTCOMES = {"none", "purchase", "return", "email_send", "social_post", "payment"}
 
 _PAGE_SHELL = """<!doctype html>
@@ -143,12 +143,22 @@ def _free_port() -> int:
 
 
 class _CorpusServer:
-    """Serves each case page; ``{frame_origin}`` in a case points at another origin's ``frame_html``."""
+    """Serves each case page; ``{frame_origin}`` in a case points at another origin's ``frame_html``.
+
+    ``{frame_origin}`` differs only by port (same site, so Chromium renders the
+    frame in-process); ``{cross_site_frame_origin}`` is another site (an
+    out-of-process frame, like a payment provider's hosted field).
+    """
 
     def __init__(self, cases: list[dict], *, frame_origin: str = "") -> None:
         pages = {}
+        cross_site_frame_origin = frame_origin.replace("://127.0.0.1:", "://localhost:")
         for case in cases:
-            body = case["html"].replace("{frame_origin}", frame_origin)
+            body = (
+                case["html"]
+                .replace("{frame_origin}", frame_origin)
+                .replace("{cross_site_frame_origin}", cross_site_frame_origin)
+            )
             pages[f"/case/{case['id']}"] = _PAGE_SHELL.format(title=case["id"], body=body).encode("utf-8")
             if case.get("frame_html"):
                 frame = _PAGE_SHELL.format(title=f"{case['id']} frame", body=case["frame_html"])
@@ -365,6 +375,27 @@ _EXEMPTION_GUARD_CASES = [
             'src="{frame_origin}/frame/guard-click-into-cross-origin-frame-keeps-page-signal"></iframe>'
         ),
         "frame_html": '<button type="button">Pay with PayPal</button>',
+        "action": {"action": "click", "target": "coordinates"},
+        "expect": "purchase",
+    },
+    {
+        # The frame probe clears only text-field hits; a wallet button inside an
+        # out-of-process frame keeps the page signal. The page is scrolled and a
+        # field sits at the click's document-space point, so a frame probe that
+        # mixed document and viewport coordinates would hit that field and unlock.
+        "id": "guard-click-on-cross-site-wallet-button-keeps-page-signal",
+        "url": "https://www.example-shop.com/checkout/review",
+        "html": (
+            '<input type="email" placeholder="Email" style="display:block;width:1200px;height:900px;margin:0">'
+            '<div style="height:1500px"></div>'
+            "<h2>Review and place order</h2><p>Total $42.10</p>"
+            '<iframe title="Secure express checkout frame" data-wl-target style="width:320px;height:80px;border:0" '
+            'src="{cross_site_frame_origin}/frame/guard-click-on-cross-site-wallet-button-keeps-page-signal"></iframe>'
+        ),
+        "frame_html": (
+            "<style>body{margin:0}button{display:block;width:100%;height:80px;margin:0}</style>"
+            '<button type="button">Pay with PayPal</button>'
+        ),
         "action": {"action": "click", "target": "coordinates"},
         "expect": "purchase",
     },
