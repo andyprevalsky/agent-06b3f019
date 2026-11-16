@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "telemetry": {
+    "schema_version": 1,
+    "observed_at": null,
+    "record_type": "snapshot",
+    "evidence": {},
+    "execution": {
+      "provider": null,
+      "model": null,
+      "reasoning_effort": null,
+      "service_tier": null,
+      "harness": null,
+      "harness_version": null
+    },
+    "usage": {
+      "input_tokens": null,
+      "output_tokens": null,
+      "cached_input_tokens": null,
+      "cost_usd": null
+    },
+    "attribution": {
+      "run_id": null,
+      "assignment_id": null,
+      "thread_id": null,
+      "agent_id": null,
+      "parent_agent_id": null,
+      "configuration_id": null
+    },
+    "timing": {
+      "active_seconds": null,
+      "approval_wait_seconds": null,
+      "queue_wait_seconds": null,
+      "rate_limit_wait_seconds": null,
+      "infrastructure_wait_seconds": null,
+      "other_seconds": null,
+      "time_to_first_token_seconds": null,
+      "output_tokens_per_second": null
+    },
+    "environment": {
+      "os": null,
+      "architecture": null,
+      "runtime_version": null,
+      "resource_class": null,
+      "concurrency": null
+    },
+    "validation": {
+      "source_sha": null,
+      "command_redacted": null,
+      "result": null,
+      "evidence_ref": null
+    }
+  },
+  "run_id": "20261116-174614-1744887",
+  "status": "completed",
+  "started_at": "2026-11-16T17:46:14Z",
+  "started_epoch": 1794851174.6521776,
+  "git_sha": "780ec1dc547dcca4cf9aabd09634c9c4a4c4ac7e",
+  "branch": "fix/coding-agent-navigation-and-template",
+  "finished_at": "2026-11-16T20:49:00Z",
+  "finished_epoch": 1794862140.003364
+}

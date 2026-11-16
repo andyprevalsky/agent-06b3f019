@@ -17,10 +17,11 @@ tags:
   - preflight
   - process-ownership
 sources:
+  - commit 562cc8c49008708918d15ee9844ab1c8c333062c
   - PR #2411
   - commit c04bacf96b8293782ec8810fed66561448f6a289
 repro: scripts/tests/deploy-test-cycle.test.py (Cycle.test_catalog_refusal_preserves_outcomes_and_retires_only_launch_custody)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -66,8 +67,7 @@ credit. Original FAIL, seven UNVERIFIED outcomes, lingering_group=true and no
 result remain immutable. No synthetic result, altered receipt, state reset,
 provider retry or generalized string allowance is permitted. Regression lives
 in the registered deploy-test-cycle owning suite. Golden reference is not
-applicable: ordinary operational validation, no model-visible change. Live
-reconciliation and deployment remain pending.
+applicable: ordinary operational validation, no model-visible change. Live reconciliation and production verification subsequently completed as recorded below.
 
 ## Human feedback
 
@@ -77,3 +77,46 @@ resource, benchmark or financial requirements.
 ## Reusable lesson
 
 Preserve exact failed native outcomes while separately proving pre-admission launch custody, with observation across every original process owner.
+
+## PR2411 delivery evidence
+
+PR #2411 merged as `562cc8c49008708918d15ee9844ab1c8c333062c`.
+The original failures and reproduction assertions above remain unchanged
+historical evidence. Frozen source `4a9d224abd5bf5ab1770237f2a8097762938a876`,
+digest `882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0`,
+passed all 17 selected native deploy gates. The original cycle and report
+are preserved under `.context/rca-147bb3eb/validated-4a9/` and
+`validated-4a9-report.log`; the report command exited 0.
+
+The first production attempt failed semantic workflow dispatch with HTTP401
+at 20:22:58 UTC before creating any workflow run. Its original FAIL and null
+run identity remain in `.context/rca-147bb3eb/production-first-attempt/` and
+the final production receipt's semantic_history. Render, Vercel, backend probes
+and Mac release passed. The credential CLI repair was separately validated
+and pushed as operations commit `6e2496487add55f3416737566873573528474fd3`;
+its 91-test `/push` is not PR2411's 17-gate full deploy.
+
+The normal semantic-only retry exited 0 at 2026-11-16T20:48:30Z. Run
+[43951508861](https://github.com/Rose-Ai-Labs/rose/actions/runs/43951508861)
+completed all five jobs successfully. It is **PASS-verified-by-descendant**,
+not an exact-source PASS: target product merge is562cc8, effective live frontend
+and tested specification source is `1ec28940191764ecf435ffc38b345006269bc95b`,
+and workflow execution head is6e2496487add55f3416737566873573528474fd3.
+The final `.context/deploy-pipeline/production-lanes.json` records all
+applicable lanes satisfied: exact562cc8 Render/Vercel, backend probes, Mac
+run43946926015 (v1.1.355), and descendant-verified semantic. Fly, WMH,
+workflow migration and AgentCard remain SKIPPED-not-applicable, never PASS.
+The native finish command exited0 at20:49:05Z. This resolves this repaired
+boundary's delivery; it does not certify unrelated runtime repairs, original
+paused-session recovery, marker release or whole-workspace deletion readiness.
+
+
+Native reconciliation subsequently exited 0 at 18:41:09 UTC; see
+`.context/rca-147bb3eb/custody-native-reconcile-exit.json` and
+`custody-live-proof.json`. The frozen cycle's reconciled_owners entry for
+request f7bbc7bc6f1441d987a1539684cf0d55 records
+credit_granted=false, financial_cleanup_credit=false and
+original_outcomes_preserved=true. This resolves that pre-admission launch
+custody only. The original exit2, seven UNVERIFIED outcomes, absent result
+and lingering_group record remain intact; the later smoke pass is a distinct
+execution. No provider or financial cleanup credit follows from reconciliation.
