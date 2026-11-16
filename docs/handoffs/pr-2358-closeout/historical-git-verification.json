@@ -1,0 +1,69 @@
+{
+  "native_authenticated_upload_full_readback": true,
+  "separate_full_remote_verify": true,
+  "full_independent_restore": true,
+  "restored_bundle_sha256": "c2fdb201cf4d3bc00edd408a9b857f07299a45e9b9b7245fb9e0bcdbe074eb42",
+  "restored_bundle_verify_empty_repository": true,
+  "restored_pack_strict_index_pass": true,
+  "restored_tip_objects_verified": 19532,
+  "source_inventory_unchanged": true,
+  "checked_fields": [
+    "head",
+    "head_symbolic",
+    "refs_sha256",
+    "index_sha256",
+    "tracked_inventory_sha256",
+    "status_sha256",
+    "config_sha256",
+    "helper_sha256",
+    "stash_entries"
+  ],
+  "before": {
+    "utc": "2026-11-16T17:28:29.336802+00:00",
+    "head": "2074c321c5775bc50f4f7ced53d0fb0fae5a348a",
+    "head_symbolic": "refs/heads/fix/read-only-tx-timeout-regression",
+    "refs": 19532,
+    "namespaces": {
+      "backup": 5,
+      "conductor-archive-heads": 203,
+      "conductor-checkpoints": 16308,
+      "gen": 63,
+      "heads": 602,
+      "remotes": 2123,
+      "stash": 1,
+      "tags": 227
+    },
+    "refs_sha256": "7f564b1b3f45db8f57a8340c37efeb96bfe80ea2bbed8288a48c9199f96a9000",
+    "index_sha256": "e4246f5743c074249cf8c01704d38038ce8a305bd9472ac5ef1b3196b51c2e2a",
+    "tracked_files": 15218,
+    "tracked_inventory_sha256": "72768f177b294c680665387ae902309ec4c3357e4a5f4fa7c3518b099008f492",
+    "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+    "config_sha256": "4c846dc888b571f3ca222da3f72a7d47c518023efcff4fc23e88551c73fa5fbb",
+    "stash_entries": 1
+  },
+  "after": {
+    "utc": "2026-11-16T17:38:01.440999+00:00",
+    "head": "2074c321c5775bc50f4f7ced53d0fb0fae5a348a",
+    "head_symbolic": "refs/heads/fix/read-only-tx-timeout-regression",
+    "refs": 19532,
+    "namespaces": {
+      "backup": 5,
+      "conductor-archive-heads": 203,
+      "conductor-checkpoints": 16308,
+      "gen": 63,
+      "heads": 602,
+      "remotes": 2123,
+      "stash": 1,
+      "tags": 227
+    },
+    "refs_sha256": "7f564b1b3f45db8f57a8340c37efeb96bfe80ea2bbed8288a48c9199f96a9000",
+    "index_sha256": "e4246f5743c074249cf8c01704d38038ce8a305bd9472ac5ef1b3196b51c2e2a",
+    "tracked_files": 15218,
+    "tracked_inventory_sha256": "72768f177b294c680665387ae902309ec4c3357e4a5f4fa7c3518b099008f492",
+    "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+    "config_sha256": "4c846dc888b571f3ca222da3f72a7d47c518023efcff4fc23e88551c73fa5fbb",
+    "stash_entries": 1
+  }
+}
