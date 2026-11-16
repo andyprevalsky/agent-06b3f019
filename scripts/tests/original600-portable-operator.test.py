@@ -3975,6 +3975,63 @@ class RunBenchShardedRouting(unittest.TestCase):
             observed = [json.loads(line) for line in seen.read_text().splitlines()]
             self.assertEqual(observed, [['sharded', str(fly)], ['campaign', str(fly)]])
 
+    def test_durable_rolling_campaign_controller_is_the_system_service_main_process(self):
+        # 2026-11-16: a boxes.dev service restart SIGKILLed two rolling Polar campaigns launched with
+        # setsid nohup (I-21). `--durable` on the rolling route hands the exact campaign command to a
+        # transient system service whose MainPID is the campaign controller itself; the systemd
+        # contract stubs are the ones scripts/tests/run-bench-durable-service.test.py owns.
+        durable = runpy.run_path(str(ROOT/'scripts/tests/run-bench-durable-service.test.py'))
+        names = polar_names(2)
+        with self.checkout() as fx:
+            state, stubs, log = fx.root.parent/'durable-state', fx.root.parent/'durable-bin', fx.root.parent/'logs'/'durable.log'
+            state.mkdir()
+            stubs.mkdir()
+            for name, source in (('sudo', 'FAKE_SUDO'), ('systemd-run', 'FAKE_SYSTEMD_RUN'), ('systemctl', 'FAKE_SYSTEMCTL')):
+                durable['write_exec'](stubs/name, durable[source])
+            # A service starts with a clean environment, so the recorder's state path is baked in.
+            (fx.root/'scripts/run-bench-campaign.py').write_text(
+                'import json,os,sys,time\n'
+                f'state={str(state)!r}\n'
+                'receipt=dict(pid=os.getpid(),argv=sys.argv[1:],controller=os.environ.get("RUN_BENCH_DURABLE_CONTROLLER"),\n'
+                '             settings=os.environ.get("RUN_BENCH_OPERATOR_SETTING_NAMES","").split())\n'
+                'path=os.path.join(state,f"campaign-{os.getpid()}.json")\n'
+                'open(path+".tmp","w").write(json.dumps(receipt)); os.replace(path+".tmp",path)\n'
+                'print("campaign controller recorded",flush=True)\n'
+                'deadline=time.monotonic()+60\n'
+                'while not os.path.exists(os.path.join(state,"release")) and time.monotonic()<deadline: time.sleep(0.1)\n')
+            fx.env.update(PATH=f'{stubs}{os.pathsep}{fx.env.get("PATH", os.defpath)}', FIXTURE_STATE=str(state),
+                          CLOUDBENCH_FIXTURE_KNOB='7')
+            try:
+                result, ops, fleets = fx.run(*names, '--concurrency', '2', '--timeout', '480', '--durable-log', str(log))
+                self.assertEqual((result.returncode, ops, fleets), (0, [], []), result.stdout + result.stderr)
+                match = durable['LAUNCH'].search(result.stdout)
+                self.assertIsNotNone(match, result.stdout)
+                unit, main_pid = match.group(1), int(match.group(2))
+                argv = json.loads((state/'systemd-run.json').read_text())
+                options, command = argv[:argv.index('--')], argv[argv.index('--') + 1:]
+                for expected in (f'--unit={unit}', 'KillMode=process', f'WorkingDirectory={fx.root}',
+                                 '--setenv=CLOUDBENCH_FIXTURE_KNOB=7', f'--setenv=RUN_BENCH_DURABLE_CONTROLLER={unit}'):
+                    self.assertIn(expected, options)
+                self.assertEqual(Path(command[1]).resolve(), (fx.root/'scripts/run-bench').resolve())
+                self.assertEqual(command[2:], [*names, '--concurrency', '2', '--timeout', '480'])
+                receipts = durable['wait_for'](lambda: list(state.glob('campaign-*.json')))
+                self.assertEqual(len(receipts), 1, log.read_text() if log.exists() else '<no log>')
+                receipt = json.loads(receipts[0].read_text())
+                # exec semantics: the service MainPID is the campaign controller, which keeps its own
+                # foreground-owned lifecycle and still records the forwarded CLOUDBENCH_* settings (I-31).
+                self.assertEqual((receipt['pid'], receipt['controller']), (main_pid, unit))
+                self.assertEqual(receipt['argv'][:4], [f'--root={fx.root}', '--runs=1', '--concurrency=2', '--retry-infra=0'])
+                self.assertEqual([a for a in receipt['argv'] if a.startswith(('--task=', '--forward-arg='))],
+                                 [*(f'--task={name}' for name in names), '--forward-arg=--timeout', '--forward-arg=480'])
+                self.assertIn('CLOUDBENCH_FIXTURE_KNOB', receipt['settings'])
+                self.assertTrue(durable['wait_for'](lambda: 'campaign controller recorded' in log.read_text()))
+            finally:
+                (state/'release').touch()
+                for receipt_path in state.glob('campaign-*.json'):
+                    pid = json.loads(receipt_path.read_text())['pid']
+                    if not durable['wait_for'](lambda: not durable['pid_alive'](pid), 15):
+                        os.kill(pid, signal.SIGKILL)
+
     def test_concurrency_below_the_copies_runs_one_batch_of_bounded_waves(self):
         # descend I3: 40 tasks x K3 at --concurrency 70 is one batch of task-aligned sharded
         # waves (23 + 17 tasks), each bound to the batch's 120 scheduled copies.

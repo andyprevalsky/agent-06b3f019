@@ -402,6 +402,8 @@ Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inve
 
 Each rolling campaign claims its Fly config dir's single WireGuard peer (`FLY_CONFIG_DIR`, default `~/.fly`). To run a second rolling campaign on the same devbox, launch it with its own directory, e.g. `FLY_CONFIG_DIR=$HOME/.fly-campaign-2 scripts/run-bench <task> -k K --concurrency N`; flyctl then starts a separate agent and peer. Never share one config dir between two campaigns.
 
+Use `--durable` for any launch that must survive a boxes session restart (rolling campaign, fleet, sharded operator or recovery), never `setsid`/`nohup`: `scripts/run-bench <task...> --concurrency N --durable` runs the controller as a transient system service (prints unit, MainPID and log; stop with `sudo -n systemctl stop <unit>`).
+
 For this explicitly requested 50-copy cached stress run, use the command-scoped
 Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
 Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
