@@ -10,16 +10,22 @@ first_bad_boundary: fly_wait unconditionally recovered an original job before cu
 symptoms:
   - exact deployment job was not recovered
   - 0 'Queued production worker deployment <id>' lines
-tags: [deploy, production, fly, prequeue, descendant, qualified-retirement]
+tags:
+  - deploy
+  - production
+  - fly
+  - prequeue
+  - descendant
+  - qualified-retirement
 sources:
-  - PR2289 merge e42554d8e06e43adb932a14b4984fecb7153abfb
-  - GitHub Actions run 43912276966 attempt 1
-  - native terminal-fly-recheck exit 1
+  - PR #2289
+  - commit e42554d8e06e43adb932a14b4984fecb7153abfb
+  - fleet run deploy-agents 43912276966 attempt 1
 repro: scripts/tests/run-deploy-pipeline.test.py check_production_fly_wait
 status: open
 ---
 
-## Boundary and scope
+## Problem
 
 The original run failed during the Docker npm install, before enqueue. Its
 recovery job reported no queued worker deployment. Its failed CI conclusion,
@@ -43,7 +49,12 @@ flowchart LR
   F --> G[Qualified descendant receipt with original failure retained]
 ```
 
-## Repair and refusal contract
+## Diagnosis
+
+The first bad boundary was unconditional original job recovery, before the
+existing physical verifier could inspect qualified descendant evidence.
+
+## Solution
 
 A terminal failed workflow may enter this path only when the complete exact
 attempt archive is readable, ZIP integrity passes, no queued identity appears,
@@ -79,3 +90,16 @@ case. An unmerged diagnostic is supporting evidence only.
 The added CLI and tests do not match the committed deploy-agents push filter;
 this tooling release must not launch a worker cutover. Both original webdecoy
 runtime incidents and their repair owners remain independent open history.
+
+## Human feedback
+
+The coordinator required an actual supported production qualifier, preserving
+the original failed workflow and absent job, with no competing cutover. Fresh
+adversarial review identified Git replacement reads and post-monitor snapshot
+races; both received explicit regression controls before source acceptance.
+
+## Reusable lesson
+
+Separate original execution history from positive physical descendant proof.
+An absent job must require complete authenticated logs and durable evidence,
+and every source/identity proof must use the real immutable Git objects.
