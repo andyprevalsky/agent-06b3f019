@@ -395,16 +395,18 @@ def show(argv: list[str], *, cwd: Path, root: Path, extra: dict | None = None, d
 def gh_setup(root: Path, environ: dict, exists: Callable[[Path], bool]) -> tuple[str, dict, dict]:
     """Step 13b's override, used for every gh call and child env: the boxes.dev
     gh wrapper swaps GH_TOKEN for an App token that cannot dispatch workflows,
-    so call its real binary with back-end/.env's workflow-scoped GITHUB_TOKEN
+    so call its real binary with the explicit process token, falling back to
+    back-end/.env's workflow-scoped GITHUB_TOKEN
     and export DEPLOY_GH_BIN for run_deploy_pipeline.py. Returns
     (gh binary, child env overrides, values read)."""
     if not exists(DEVBOX_GH):
         return environ.get('DEPLOY_GH_BIN') or 'gh', {}, {}
     values = _dotenv_values(root / 'back-end' / '.env')
     overrides = {'DEPLOY_GH_BIN': str(DEVBOX_GH)}
-    if values.get('GITHUB_TOKEN'):
-        overrides['GH_TOKEN'] = values['GITHUB_TOKEN']
-    return str(DEVBOX_GH), overrides, {'GITHUB_TOKEN': values.get('GITHUB_TOKEN', '')}
+    token = environ.get('GH_TOKEN') or environ.get('GITHUB_TOKEN') or values.get('GITHUB_TOKEN', '')
+    if token:
+        overrides['GH_TOKEN'] = token
+    return str(DEVBOX_GH), overrides, {'GITHUB_TOKEN': token}
 
 
 # ── Lane commands (shared by --dry-run and execution) ─────────────────────────
@@ -1333,7 +1335,9 @@ def dry_run(ctx: Ctx, changed: list[str], pr: int | None, selected: set[str]) ->
     out = ctx.io.out
     out(f'DEPLOY_PRODUCTION DRY-RUN sha={ctx.sha[:12]} pr={f"#{pr}" if pr else "-"} changed={len(changed)} '
         f'state-dir={ctx.state_dir}')
-    token = 'GH_TOKEN=back-end/.env GITHUB_TOKEN' + ('' if 'GH_TOKEN' in ctx.gh_env else ' (MISSING)')
+    source = ('process GH_TOKEN' if ctx.environ.get('GH_TOKEN') else
+              'process GITHUB_TOKEN' if ctx.environ.get('GITHUB_TOKEN') else 'back-end/.env GITHUB_TOKEN')
+    token = f'GH_TOKEN={source}' + ('' if 'GH_TOKEN' in ctx.gh_env else ' (MISSING)')
     out(f'gh: {ctx.gh}' + (f' ({token}; DEPLOY_GH_BIN exported to children)' if ctx.gh_env else ''))
     for name in LANES:
         lane = ctx.plan[name]

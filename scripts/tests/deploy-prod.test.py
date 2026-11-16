@@ -1616,6 +1616,28 @@ class OtherLanesTest(Base):
                                                          'GH_TOKEN': SECRETS['GITHUB_TOKEN']}))
         self.assertEqual(dp.gh_setup(self.root, {'DEPLOY_GH_BIN': '/x/gh'}, lambda path: False), ('/x/gh', {}, {}))
         self.assertEqual(dp.gh_setup(self.root, {}, lambda path: False), ('gh', {}, {}))
+        # Explicit process credentials win; GH_TOKEN retains gh CLI precedence when both are set.
+        for supplied, expected in (
+            ({'GITHUB_TOKEN': 'process-github'}, 'process-github'),
+            ({'GH_TOKEN': 'process-gh'}, 'process-gh'),
+            ({'GH_TOKEN': 'process-gh', 'GITHUB_TOKEN': 'process-github'}, 'process-gh'),
+            ({'GH_TOKEN': '', 'GITHUB_TOKEN': 'process-github'}, 'process-github'),
+            ({'GH_TOKEN': '', 'GITHUB_TOKEN': ''}, SECRETS['GITHUB_TOKEN']),
+        ):
+            with self.subTest(supplied=supplied):
+                gh, env, values = dp.gh_setup(self.root, supplied, lambda path: path == dp.DEVBOX_GH)
+                self.assertEqual(gh, str(dp.DEVBOX_GH))
+                self.assertEqual(env, {'DEPLOY_GH_BIN': str(dp.DEVBOX_GH), 'GH_TOKEN': expected})
+                self.assertEqual(values, {'GITHUB_TOKEN': expected})
+        # Without the boxes wrapper, the caller's environment and explicit binary remain untouched.
+        self.assertEqual(dp.gh_setup(self.root, {'GH_TOKEN': 'process-gh', 'DEPLOY_GH_BIN': '/x/gh'},
+                                     lambda path: False), ('/x/gh', {}, {}))
+        (self.root / 'back-end' / '.env').unlink()
+        self.assertEqual(dp.gh_setup(self.root, {}, lambda path: path == dp.DEVBOX_GH),
+                         (str(dp.DEVBOX_GH), {'DEPLOY_GH_BIN': str(dp.DEVBOX_GH)}, {'GITHUB_TOKEN': ''}))
+        self.assertEqual(dp.gh_setup(self.root, {'GH_TOKEN': 'process-gh'}, lambda path: path == dp.DEVBOX_GH),
+                         (str(dp.DEVBOX_GH), {'DEPLOY_GH_BIN': str(dp.DEVBOX_GH), 'GH_TOKEN': 'process-gh'},
+                          {'GITHUB_TOKEN': 'process-gh'}))
 
 
 if __name__ == '__main__':
