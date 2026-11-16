@@ -274,11 +274,22 @@ def build(args) -> None:
                             forensic["verify_original_volume_provenance"](meta, entry, originals)
                             for relative, data in wrappers.items():
                                 add(relative, data)
-                            for relative in (services_name, "repo/.context/cloudbench/stack.log",
-                                             "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"):
+                            absent = [services_name, "repo/.context/cloudbench/stack.log",
+                                      "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"]
+                            if forensic["pre_backend_native_stop"](out, owner, meta["run_id"], entry):
+                                # The stack launcher ran but the backend never
+                                # started: stack.log is original evidence. The
+                                # exact native stop and zero-session recovery
+                                # receipt are retained with the originals.
+                                entry["phase"] = "pre-backend-exit"
+                                assert "repo/.context/cloudbench/stack.log" in seen
+                                absent.remove("repo/.context/cloudbench/stack.log")
+                                for relative, source in forensic["PRE_BACKEND_RECEIPTS"].items():
+                                    add(relative, read(out / source, 1048576))
+                            for relative in absent:
                                 assert relative not in seen and relative in entry["missing"]
                         ack = f"cloudbench-driver-clean-{run_token}.ack"
-                        if ack not in seen:
+                        if ack not in seen and ack not in entry["missing"]:
                             entry["missing"].append(ack)
                 if fresh:
                     entry["runtime_evidence_complete"] = False
