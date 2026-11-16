@@ -92,6 +92,27 @@ def publish_rebuilt_packet(destination: Path, canonical: Path, rejected: Path, h
     sync(canonical.parent)
 
 
+def preserve_failed_partial(canonical: Path) -> None:
+    """Move a failed build's manifest-less partial archive aside, never deleting it.
+
+    A failed build keeps its partial originals.tar.gz for diagnosis but never
+    publishes a manifest. Left in place, it blocked every retry. Only that exact
+    shape is preserved under a digest-named sibling; anything else still refuses.
+    """
+    if not os.path.lexists(canonical):
+        return
+    info = canonical.lstat()
+    assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(), "existing forensic packet is unsafe"
+    assert {entry.name for entry in canonical.iterdir()} == {"originals.tar.gz"}, \
+        "a forensic packet already exists; use --rebuild-existing"
+    partial = canonical / "originals.tar.gz"
+    assert stat.S_ISREG(partial.lstat().st_mode)
+    digest = hashlib.sha256(partial.read_bytes()).hexdigest()
+    helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-original-volume-capture.py")))
+    helper["rename_noreplace"](canonical, canonical.with_name(f"_forensic.partial-{digest[:16]}"))
+    helper["fsync_directory"](canonical.parent)
+
+
 def build(args) -> None:
     registry = args.registry.resolve()
     owner = registry.name
@@ -139,6 +160,7 @@ def build(args) -> None:
         run_identity = run_info.st_dev, run_info.st_ino
     else:
         destination = canonical
+        preserve_failed_partial(canonical)
         destination.mkdir(mode=0o700, exist_ok=False)
     archive_path = destination / "originals.tar.gz"
     rows = []
@@ -274,11 +296,22 @@ def build(args) -> None:
                             forensic["verify_original_volume_provenance"](meta, entry, originals)
                             for relative, data in wrappers.items():
                                 add(relative, data)
-                            for relative in (services_name, "repo/.context/cloudbench/stack.log",
-                                             "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"):
+                            absent = [services_name, "repo/.context/cloudbench/stack.log",
+                                      "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"]
+                            if forensic["pre_backend_native_stop"](out, owner, meta["run_id"], entry):
+                                # The stack launcher ran but the backend never
+                                # started: stack.log is original evidence. The
+                                # exact native stop and zero-session recovery
+                                # receipt are retained with the originals.
+                                entry["phase"] = "pre-backend-exit"
+                                assert "repo/.context/cloudbench/stack.log" in seen
+                                absent.remove("repo/.context/cloudbench/stack.log")
+                                for relative, source in forensic["PRE_BACKEND_RECEIPTS"].items():
+                                    add(relative, read(out / source, 1048576))
+                            for relative in absent:
                                 assert relative not in seen and relative in entry["missing"]
                         ack = f"cloudbench-driver-clean-{run_token}.ack"
-                        if ack not in seen:
+                        if ack not in seen and ack not in entry["missing"]:
                             entry["missing"].append(ack)
                 if fresh:
                     entry["runtime_evidence_complete"] = False

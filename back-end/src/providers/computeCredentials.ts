@@ -27,7 +27,7 @@ export type ComputeCodeCredentialType = 'claude' | 'gpt';
  * Where a served compute token comes from, in lease order:
  *   user  the caller's own subscription
  *   team  a teammate's subscription shared with one of the caller's teams
- *         (docs/plans/active/share-all-integrations.md); `userId` is its owner
+ *         (docs/plans/completed/share-all-integrations.md); `userId` is its owner
  *   pool  a pooled subscription
  */
 export type ComputeTokenSource = 'user' | 'team' | 'pool';

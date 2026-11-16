@@ -793,6 +793,142 @@ async def test_browser_verifier_target_attempt_survives_admission_and_provider_b
         assert "Unrelated Resend code label" not in step
 
 
+async def test_phone_canonical_receipts_survive_window_and_observation_budget():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    history = ActionHistory()
+    sent = {"step": 47, "action": "phone",
+            "params": {"mode": "operation", "operation": "input.tap", "args": {"x": 654, "y": 1252}},
+            "result": {"success": True, "operation": {"id": "original-input-receipt", "cursor": 47,
+                       "operation": "input.tap", "status": "SUCCEEDED", "errorCode": None, "result": True}}}
+    rows = [sent] + [
+        {"step": step, "action": "phone",
+         "params": {"mode": "operation", "operation": "screen.text", "args": {"min_confidence": 0.3}},
+         "result": {"success": True, "operation": {"id": f"observation-{step}", "cursor": step,
+                    "operation": "screen.text", "status": "SUCCEEDED", "result": "x" * 1000}}}
+        for step in range(48, 123)
+    ]
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Inspect the already completed input without repeating it", current_url="https://example.test",
+            browser_state={"dom_tree": "Independent contradictory current browser observation"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    compact = next(m["text"] for m in context if m.get("metadata", {}).get("toolName") == "action_history")
+    assert "Step 47:" not in compact
+    receipts = [m for m in context if m.get("metadata", {}).get("toolName") == "phone"]
+    assert len(receipts) == len(rows)
+    assert next(m["metadata"]["structured_response"] for m in receipts
+                if m["metadata"]["browser_action_step"] == 47) == {k: sent[k] for k in ("step", "params", "result")}
+    body = build_verifier_context_messages(context, "Verify", call_site="verifier_browser")
+    text = json.dumps(body)
+    admitted = {}
+    for message in body:
+        if isinstance(message.get("content"), str):
+            for line in message["content"].splitlines():
+                if line.startswith("TOOL_RESULT "):
+                    try:
+                        payload = json.loads(line[len("TOOL_RESULT "):])
+                    except ValueError:
+                        continue
+                    if payload.get("tool_name") == "phone":
+                        admitted[payload["result"]["step"]] = payload["result"]
+    assert admitted[47] == {k: sent[k] for k in ("step", "params", "result")}
+    assert admitted[48] == {k: rows[1][k] for k in ("step", "params", "result")}
+    assert "observation-48" in text, "First post-input observation must survive later read traffic"
+    assert "observation-122" in text and "Independent contradictory current browser observation" in text
+    tool_lines = [line for message in body if isinstance(message.get("content"), str)
+                  for line in message["content"].splitlines() if line.startswith("TOOL_RESULT ")]
+    assert sum(map(len, tool_lines)) <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+
+async def test_phone_receipt_capacity_limit_keeps_latest_without_inventing_old_evidence():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    rows = [{"step": 47, "action": "phone",
+             "params": {"mode": "operation", "operation": "input.tap", "args": {}},
+             "result": {"success": True, "operation": {"id": "old-input", "status": "SUCCEEDED", "result": True}}}]
+    rows += [{"step": step, "action": "phone",
+              "params": {"mode": "operation", "operation": "screen.text", "args": {}},
+              "result": {"success": True, "operation": {"id": f"read-{step}", "status": "SUCCEEDED", "result": "x" * 7000}}}
+             for step in range(48, 123)]
+    history = ActionHistory()
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Inspect", current_url="https://example.test", browser_state={"dom_tree": "Current browser"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    messages = build_verifier_context_messages(context, "Verify", call_site="verifier_browser")
+    text = json.dumps(messages)
+    assert "read-122" in text and "verifier truncated" in text
+    assert "old-input" not in text, "Capacity exhaustion must not fabricate an omitted receipt"
+    tool_lines = [line for message in messages if isinstance(message.get("content"), str)
+                  for line in message["content"].splitlines() if line.startswith("TOOL_RESULT ")]
+    assert sum(map(len, tool_lines)) <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+
+async def test_phone_latest_screen_survives_alternating_inputs_and_non_screen_read():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages
+
+    rows = [
+        {"step": step, "action": "phone",
+         "params": {"mode": "operation", "operation": "screen.text" if step % 2 == 0 else "input.tap", "args": {}},
+         "result": {"success": True, "operation": {"id": f"operation-{step}",
+                    "status": "SUCCEEDED", "result": "x" * 7000 if step % 2 == 0 else True}}}
+        for step in range(1, 123)
+    ]
+    rows.append({"step": 123, "action": "phone",
+                 "params": {"mode": "operation", "operation": "apps.list", "args": {}},
+                 "result": {"success": True, "operation": {"id": "app-list", "status": "SUCCEEDED", "result": []}}})
+    history = ActionHistory()
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Inspect", current_url="https://example.test", browser_state={"dom_tree": "Native conflict"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    text = json.dumps(build_verifier_context_messages(context, "Verify", call_site="verifier_browser"))
+    assert "operation-122" in text, "A later non-screen read must not displace the latest phone screen"
+    assert "operation-121" in text and "Native conflict" in text
+
+
+async def test_phone_canonical_receipts_preserve_failures_duplicates_and_privacy():
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages
+
+    policy = DOMService("ws://unused.test")
+    policy.register_secret_refs({"secret:fixture": "private-phone-secret"})
+    history = ActionHistory()
+    history.bind_dom_service(policy)
+    rows = [
+        {"step": step, "action": "phone",
+         "params": {"mode": "operation", "operation": "input.text", "args": {"s": "private-phone-secret"}},
+         "result": {"success": False, "operation": {"id": "duplicate-receipt", "cursor": step,
+                    "operation": "input.text", "status": status, "errorCode": "private-phone-secret", "result": None}}}
+        for step, status in [(1, "FAILED"), (2, "UNKNOWN")]
+    ]
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Inspect", current_url="https://example.test", browser_state={"dom_tree": "Native conflict"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    receipts = [m for m in context if m.get("metadata", {}).get("toolName") == "phone"]
+    assert len(receipts) == 2
+    assert all(m["metadata"]["toolStatus"] == "ERROR" for m in receipts)
+    assert [m["metadata"]["structured_response"]["result"]["operation"]["status"] for m in sorted(receipts, key=lambda m: m["metadata"]["browser_action_step"])] == ["FAILED", "UNKNOWN"]
+    assert all(m["metadata"]["structured_response"]["result"]["operation"]["result"] is None for m in receipts)
+    text = json.dumps(build_verifier_context_messages(context, "Verify", call_site="verifier_browser"))
+    assert "private-phone-secret" not in text
+    assert text.count("duplicate-receipt") >= 2
+    assert "Native conflict" in text and "not browser DOM confirmation" in text
+
+
 async def test_browser_evaluate_receipts_survive_compact_history_truncation():
     from browser_tools.dom_service import ActionHistory
     from domains.spawn_browser_agent_v3 import service as bsvc
@@ -16086,7 +16222,8 @@ async def test_private_numeric_credentials_preserve_only_trusted_browser_mechani
         visible_args = json.loads(message["tool_calls"][0]["function"]["arguments"])
         for target in targets:
             assert visible_args[target] == arguments[target], f"prior {name} call lost trusted target {target}"
-        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_value(
+        # The model's own arguments use the observation policy it was shown under.
+        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_observation(
             {key: value for key, value in arguments.items() if key not in targets}
         )
         assert message["content"] == "{{secret:card_cvv}}"
@@ -16139,6 +16276,13 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     newer = "synthetic-new-realm-password"
     all_values = [*refs.values(), newer]
     echoed = " | ".join(all_values)
+    # The rendered page holds a typed card name, expiry or CVV as a field
+    # value; prose matching those short values is ordinary page text. Long
+    # secrets are protected anywhere in it. Script readbacks stay strict.
+    field_echo = (
+        f"<input value={refs['card_name']} /> <input value={refs['card_expiry']} /> "
+        f"<input value={refs['card_cvv']} /> {refs['card_number']} | {refs['pwd:fixture']} | {newer}"
+    )
     dom = DOMService("ws://unused-private-observation-fixture")
     dom.register_secret_refs(refs)
     dom.mark_secret_used()
@@ -16146,7 +16290,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     state = SimpleNamespace(
         url="https://checkout.fixture.test/",
         title=refs["card_cvv"],
-        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: echoed),
+        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: field_echo),
         tabs=[
             SimpleNamespace(target_id="fixture-tab", url="https://checkout.fixture.test/", title=refs["card_number"])
         ],
@@ -16927,6 +17071,134 @@ async def test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label
             assert await page.locator("#seat").is_checked()
         finally:
             await browser.close()
+
+
+async def test_dom_service_cross_origin_iframe_coordinates_include_frame_offset():
+    """Regression for b4466499 (prod agent-payment-production-purchase, 2026-11-15).
+
+    Stripe's /g/pay/ Checkout renders its whole Payment Element inside one
+    offset cross-origin js.stripe.com iframe. ``get_element_rect`` measured each
+    control with getBoundingClientRect() in the iframe's own session, so the
+    humanizer clicked iframe-local points on the top page: Email, Card and Pay
+    missed for 12 minutes and Pay was sent to y=830 in a 625px viewport.
+    Indexed coordinates must be top-level viewport points that hit the control.
+    """
+    import functools
+    import http.server
+    import socketserver
+
+    from playwright.async_api import async_playwright
+
+    from browser_tools.dom_service import DOMService
+
+    pages = {
+        "/top": (
+            "<style>body{margin:0}iframe{position:absolute;left:700px;top:40px;width:400px;"
+            "height:900px;border:2px solid #000;padding:0}</style>"
+            '<iframe src="http://127.0.0.1:{port}/frame"></iframe>'
+        ),
+        "/frame": (
+            "<style>body{margin:0}#email{position:absolute;left:20px;top:120px;width:200px;height:30px}"
+            "#pay{position:absolute;left:20px;top:800px;width:200px;height:40px}</style>"
+            '<input id="email"><button id="pay" onclick="this.dataset.clicked=1">Pay</button>'
+        ),
+    }
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = pages.get(self.path, "").replace("{port}", str(self.server.server_address[1])).encode()
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True, args=["--site-per-process"])
+            try:
+                page = await browser.new_page(viewport={"width": 1366, "height": 625})
+                await page.goto(f"http://localhost:{port}/top")
+                frame = next(f for f in page.frames if f.url.endswith("/frame"))
+                await frame.wait_for_selector("#pay")
+                top_cdp = await page.context.new_cdp_session(page)
+                frame_cdp = await page.context.new_cdp_session(frame)  # OOPIF target session
+
+                async def _backend_id(cdp, selector):
+                    document = await cdp.send("DOM.getDocument")
+                    node = await cdp.send(
+                        "DOM.querySelector", {"nodeId": document["root"]["nodeId"], "selector": selector}
+                    )
+                    described = await cdp.send("DOM.describeNode", {"nodeId": node["nodeId"]})
+                    return described["node"]["backendNodeId"]
+
+                def _session(name, cdp):
+                    async def _send(method, *, params, session_id):
+                        assert session_id == name
+                        return await cdp.send(method, params)
+
+                    def domain(prefix):
+                        methods = ("scrollIntoViewIfNeeded", "resolveNode", "callFunctionOn")
+                        return SimpleNamespace(**{m: functools.partial(_send, f"{prefix}.{m}") for m in methods})
+
+                    return SimpleNamespace(
+                        session_id=name,
+                        cdp_client=SimpleNamespace(send=SimpleNamespace(DOM=domain("DOM"), Runtime=domain("Runtime"))),
+                    )
+
+                sessions = {"top": _session("top", top_cdp), "frame": _session("frame", frame_cdp)}
+                owner = SimpleNamespace(
+                    backend_node_id=await _backend_id(top_cdp, "iframe"), node_name="IFRAME", parent_node=None,
+                    session="top",
+                )
+                document = SimpleNamespace(
+                    backend_node_id=None, node_name="#document", parent_node=owner, session="frame"
+                )
+                owner.content_document = document
+                email = SimpleNamespace(
+                    backend_node_id=await _backend_id(frame_cdp, "#email"), node_name="INPUT", parent_node=document,
+                    session="frame",
+                )
+                pay = SimpleNamespace(
+                    backend_node_id=await _backend_id(frame_cdp, "#pay"), node_name="BUTTON", parent_node=document,
+                    session="frame",
+                )
+
+                class _FakeSession:
+                    agent_focus_target_id = "page"
+
+                    async def cdp_client_for_node(self, node):
+                        return sessions[node.session]
+
+                dom = DOMService(cdp_url="")
+                dom._session = _FakeSession()
+                dom._selector_map = {email.backend_node_id: email, pay.backend_node_id: pay}
+
+                coords = await dom.get_click_coordinates(email.backend_node_id)
+                # Email box in top-level viewport: (722..922, 162..192), center (822, 177).
+                assert coords is not None
+                assert abs(coords[0] - 822) <= 12 and abs(coords[1] - 177) <= 8, coords
+                await page.mouse.click(*coords)
+                await page.keyboard.type("a@roselabs.ai")
+                assert await frame.locator("#email").input_value() == "a@roselabs.ai"
+
+                coords = await dom.get_click_coordinates(pay.backend_node_id)
+                assert coords is not None
+                assert 0 <= coords[0] < 1366 and 0 <= coords[1] < 625, coords
+                await page.mouse.click(*coords)
+                assert await frame.locator("#pay").get_attribute("data-clicked") == "1", coords
+            finally:
+                await browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 async def test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser():
@@ -25532,6 +25804,7 @@ class _FakeDomService:
     restore_secret_redaction_state = _PrivacyPolicyDOMService.restore_secret_redaction_state
     model_visible_value = _PrivacyPolicyDOMService.model_visible_value
     model_visible_action_result = _PrivacyPolicyDOMService.model_visible_action_result
+    model_visible_observation = _PrivacyPolicyDOMService.model_visible_observation
 
     def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
         self.cdp_url = cdp_url
@@ -40021,6 +40294,10 @@ async def run_all_tests():
         test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label,
     )
     await r.record_async(
+        "dom_service_cross_origin_iframe_coordinates_include_frame_offset",
+        test_dom_service_cross_origin_iframe_coordinates_include_frame_offset,
+    )
+    await r.record_async(
         "dom_service_disconnect_stops_session",
         test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser,
     )
@@ -41639,6 +41916,10 @@ async def run_all_tests():
     await r.record_async("browser_required_file_delivery_cancellation", test_browser_required_file_delivery_cancellation_propagates)
     r.record("browser_file_delivery_schema_boundaries", test_browser_file_delivery_schema_boundaries)
     await r.record_async("browser_replayed_verifier_requires_explicit_completion_before_terminal", test_browser_replayed_verifier_requires_explicit_completion_before_terminal)
+    await r.record_async("phone_canonical_receipts_survive_window_and_observation_budget", test_phone_canonical_receipts_survive_window_and_observation_budget)
+    await r.record_async("phone_receipt_capacity_limit_keeps_latest_without_inventing_old_evidence", test_phone_receipt_capacity_limit_keeps_latest_without_inventing_old_evidence)
+    await r.record_async("phone_latest_screen_survives_alternating_inputs_and_non_screen_read", test_phone_latest_screen_survives_alternating_inputs_and_non_screen_read)
+    await r.record_async("phone_canonical_receipts_preserve_failures_duplicates_and_privacy", test_phone_canonical_receipts_preserve_failures_duplicates_and_privacy)
     await r.record_async("browser_evaluate_receipts_survive_compact_history_truncation", test_browser_evaluate_receipts_survive_compact_history_truncation)
     await r.record_async("browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets", test_browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets)
     await r.record_async("browser_receipt_budget_keeps_recent_evaluations_and_native_authority", test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority)

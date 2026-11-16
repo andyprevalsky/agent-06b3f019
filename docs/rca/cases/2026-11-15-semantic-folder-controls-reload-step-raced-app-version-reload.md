@@ -25,6 +25,8 @@ sources:
   - PR #2158
   - commit 6e2977bc0c690cdfc90380e8fea391a123a22fb3
   - commit ab6c05dbbb
+  - PR #2213
+  - commit e9c14566335160277dc077e5c5b71aa67817f20b
   - PR #1657
 repro: front-end/tests-e2e/project-folder-controls.spec.ts
 status: fixed
@@ -145,6 +147,14 @@ semantic lane. The spec does run in the deploy semantic stack lane
 `tests-e2e/*.spec.ts`) and in the production semantic gate, where this failure
 occurred. 10k-agent behavior: one DOM attribute write per version check per tab;
 no server or per-agent work.
+
+Shipped in PR #2213 (merge e9c1456633, 2026-11-15):
+- Deploy gates passed 13/13 on 7c8cd14d4977. Semantic-stack ran 68 expected, 0
+  unexpected, 0 flaky, including both widths of this spec and the new helper
+  tests.
+- On the merge SHA, the production semantic gate (`scripts/deploy production`,
+  the originally failing command) passed: chat-lifecycle-ratchet run 43690723065.
+- Vercel passed. The Mac release was verified by its descendant run 43690647847.
 
 ## Human feedback
 

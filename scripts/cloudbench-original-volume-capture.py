@@ -687,7 +687,8 @@ def local_identity(args: argparse.Namespace) -> dict:
     if regular_bytes(out / "post-config-start.accepted", 256) != (machine + "\n").encode():
         raise Refusal("guest was never admitted with its boot config; not a post-start capture")
     if undelivered:
-        native_stop = undelivered_native_stop_record(out, owner, run_id, args.bench, machine, args.volume_id)
+        native_stop = undelivered_native_stop_record(out, owner, run_id, args.bench, machine, args.volume_id,
+                                                     token)
     else:
         native_stop = None
         record = {"version": 1, "machine_id": machine, "run_token": token}
@@ -744,13 +745,31 @@ UNDELIVERED_RECOVERY_OUTPUTS = (
 
 
 def undelivered_native_stop_record(out: Path, owner: str, run_id: str, bench: str, machine: str,
-                                   volume: str) -> dict:
-    """The controller's exact verified native stop of a never-delivered guest."""
+                                   volume: str, token: str | None = None) -> dict:
+    """The controller's exact verified native stop of a never-delivered guest.
+
+    Also admits the recovery's native stop of a delivered guest whose driver
+    exited before its backend started (delivery_receipt "pre-backend-exit"),
+    bound to its sealed guest-state receipt by the session-cleanup helper.
+    """
     path = out / "guest-native-stop.json"
     if not lexists(path):
         raise Refusal("no guest-native-stop.json: this guest was not natively stopped as undelivered")
     data = regular_bytes(path, 65536)
-    record = json.loads(data)
+    try:
+        delivery = json.loads(data).get("delivery_receipt")
+    except (ValueError, AttributeError):
+        raise Refusal("guest-native-stop.json is malformed") from None
+    if delivery == "pre-backend-exit":
+        helper = sibling("cloudbench-exact-session-cleanup.py")
+        try:
+            helper["native_stop_record"](str(out), owner, run_id, bench, machine, token or "", volume)
+        except helper["CleanupEvidenceError"] as error:
+            raise Refusal(f"guest-native-stop.json is not an exact verified pre-backend stop: {error}") from None
+        for name in UNDELIVERED_RECOVERY_OUTPUTS:
+            if lexists(out / name):
+                raise Refusal(f"{name} already exists; run exact-owner recovery instead")
+        return {"sha256": sha(data)}
     expected = {
         "version": 1, "kind": "guest-native-stop", "fleet_owner_token": owner, "run_id": run_id,
         "bench": bench, "machine_id": machine, "volume_id": volume, "ownership": "fresh",
