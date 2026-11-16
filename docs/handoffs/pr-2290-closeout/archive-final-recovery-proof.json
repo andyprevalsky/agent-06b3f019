@@ -1,0 +1,12 @@
+{
+  "verified_at": "2026-11-16T18:19:36.788250+00:00",
+  "authenticated_full_readback": true,
+  "independent_normal_helper_restore_exit": 0,
+  "new_content_members_verified": 959,
+  "capture_manifest_sha256": "fd643ba1a81f0d3edec2658dd7ef94e6a7d1dd06ea0081850a3e9b039538253f",
+  "freeze_manifest_sha256": "36f8ae4b39bef0c63f1bb18d52ffb9fbf282f31783771e9a0f97f7dfa7e23cbb",
+  "logical_sources_rehashed": 86648,
+  "changed_sources": [],
+  "capture_changed": [],
+  "not_deletion_ready": true
+}

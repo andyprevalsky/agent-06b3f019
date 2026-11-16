@@ -21,8 +21,11 @@ sources:
   - agent 118fff32-2388-4636-ae74-fec935326548
   - commit e54032c7fba36b09b58b5a83fef7754f89df716f
   - PR #1636
+  - PR #2290
+  - commit cc7a39b2846aa385320386bbb1374e74c989e6a4
+  - agent df99c21a-058b-4f70-955c-adade7d530bd
 repro: agents/tests/blackbox/spawn_claude_code_agent.blackbox.py::test_native_handoff_preserves_single_command_task
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -91,12 +94,38 @@ contracts matter, but descriptions were intact here. The 2026-10-18 auth-handoff
 score case is a relative only; these verdicts are consistent, not ambiguous.
 No same-cause archived case found.
 
+### Related captured occurrence and secondary transport evidence
+
+A separately investigated root, `30030a75-a650-404e-89ce-3c41f8f5f5d8`, has the
+same first bad boundary. Its Context7 resolution returned `/vercel/next.js` at
+2026-11-15 06:55:43.202 UTC. The child then followed mandatory handoff commands
+through four shell invocations, violating the explicit no-shell constraint.
+The verifier correctly rejected at 50%; the actual pause arrived at
+06:57:58.678738 and the last substantive message was 204.698 seconds after
+creation. Cost was 5 cents against a 1,000-cent cap, with no requested feedback
+or user-input wait. This is an additional captured occurrence, not a fresh
+post-repair result. Its original root was not resumed. The complete private
+investigator report and source hashes are preserved in the D05 archive.
+
+Read-only inspection of all eight original 118fff32 failing-request dumps also
+found paired 88-character `completed-child-attempt-completion-...` identifiers
+in actual tool-call and tool-result fields. The related investigation isolated
+the same generated-ID shape through its original client: provider validation
+rejected an 88-character call ID against a 64-character maximum, while a paired
+control that shortened only the IDs succeeded. That causal replay belongs to
+root 30030a75. For root 118fff32, no new model replay was made and the historical
+provider error bodies remain unavailable. The captured invalid identifiers
+corroborate a separate transport defect downstream of the first handoff
+violation; they do not replace the primary diagnosis or turn its historical
+400 responses into directly observed provider-body evidence. The separate open
+case is recorded by the related RCA owner; this repair does not change IDs.
+
 ## Solution
 
 The repair separates worker-owned result instructions with an explicit marker.
 Only native Codex with a supported strict output schema replaces that section
-with transport-owned persistence instructions. Its existing host writer creates
-and validates the declared handoff from the final structured response. The
+with transport-owned persistence instructions. Its existing host writer persists
+the final structured response as the declared handoff. The
 original task, native thread goal, model, schema and root verifier stay intact.
 Unsupported schemas and other transports retain their existing file protocol;
 this case does not claim to solve their restricted-action incompatibility.
@@ -127,8 +156,10 @@ capability-specific protocol while the shared file-exists condition remains.
 The final native regression was run unchanged against an isolated main adapter
 and the repaired adapter:
 `node --test --test-name-pattern='native handoff honors task constraints' e2b-templates/codex-code/app-server.test.mjs`.
-Before: exit 1, native persistence instruction absent (0.194s). After: exit 0
-(0.170s). Real reader controls cover complete/blocked/failed, invalid and missing
+The earlier recorded run returned exit 1, native persistence instruction absent
+(0.194s), then exit 0 (0.170s). The final unchanged-test capture is recorded
+below with its separate measured timings. Real reader controls cover
+complete/blocked/failed, invalid and missing
 results. Additional controls cover stale prior tasks, valid result retention
 through commentary continuations and native goal ordering. The original private
 `replay.py --acceptance` was a historical diagnostic with contradictory fixed
@@ -157,8 +188,8 @@ with provenance, covering both native Codex and Claude listeners. A new waiter
 test also violated the fixed-sleep ratchet; an event barrier replaced the timer.
 Both independent causes have separate RCA cases. Final local checks after these
 repairs passed 48/48 native transport tests, 13/13 backend regression cases and
-15/15 condition-wait checks. Deployment-wide reruns and production proof remain
-required; the case stays open until shipping.
+15/15 condition-wait checks. At that historical checkpoint, deployment-wide
+reruns and production proof remained required; the case was still open.
 
 The 546e44015464 local post-harness eval completed a Collatz root in 149.7s;
 its card remains INCOMPLETE because the eval route omitted lifecycle ownership
@@ -184,8 +215,9 @@ are rejected by the worker. Existing completed/blocked/failed/new-task controls
 remain. The complete local native suites pass57 assertions; the full owning
 worker suite passes190 checks, including all eight actual validator receipts.
 The full live Codex domain passed34/34, no skips, in102.365s on the bounded
-retention revision and terminated both owned sandboxes. Renewed grounding and
-deployment-wide verification remain required.
+retention revision and terminated both owned sandboxes. At that checkpoint,
+renewed grounding and deployment-wide verification remained required; the
+later landed proof is recorded below.
 
 The required post-harness eval on runtime 2a2c99 completed its Collatz root in
 136.5 seconds, one attempt, with its verifier confirming 111 steps and 112
@@ -201,6 +233,61 @@ all cost, cache, timing and publication qualifications.
 
 The original paused root has never been resumed or changed. Open PR1636 must
 retain the capability-specific invariant if later merged.
+
+### Landed repair and exact-goal production proof (2026-11-16)
+
+PR #2290 landed as `cc7a39b2846aa385320386bbb1374e74c989e6a4` after
+all 17 native gates passed on source `96d12280d3438f764b0c098ab4f9547eb763b3fd`,
+including the corrected full 285-check backend inventory. Golden review 3's
+NOT_GROUNDED result above was preserved; Golden review 4 was GROUNDED after
+those defects were repaired. CodeRabbit was skipped because of the confirmed
+organization usage cap: the PR merged unreviewed by CodeRabbit, not with a
+claimed successful review. The identical final native regression's recorded
+before/after exits were 1/0 and wall times 0.187059649/0.159985798 seconds;
+test SHA256 `2dd7df04c9d73bd36ab6cf7c93385d033efb1a76dd00e6a5f8e94a96bf2d07ab`.
+
+A separately authorized fresh normal production root,
+`df99c21a-058b-4f70-955c-adade7d530bd`, used the exact original goal and settings
+(request SHA256 `65048d98ed23b06ef5032fca370b09f5fcda06971ec5586b50c421dc2d71b5b7`).
+It was created at 17:38:50.418 UTC. The verified code-session checkpoint and
+complete root transcript show exactly one cloud code spawn and one actual
+CommandExecution: `yc me --json`, represented by `/bin/bash -c`, exit 0 in
+3.352491091 seconds. Output identifies Andy Prevalsky, username
+`andyprevalsky`. The CLI's token refresh was internal to this allowed command;
+no model-issued install, login, retry or bookkeeping shell command occurred.
+A second native tool call completed the goal without executing a shell.
+The native adapter persisted the result; strict provider output and the
+unchanged worker reader supplied schema validation. The root's first
+completion attempt received verifier score 100%. Final answer was recorded
+159.757 seconds after creation, and terminal status persisted after 168.698
+seconds. These are distinct clocks, not interchangeable durations.
+
+The child actually served GPT-6.1 Sol, xhigh, standard, CLI 0.169.0. The
+requested parent model and task/goal/schema/verifier semantics were not changed
+by this repair. The exact image ID and per-sandbox server-file hash were not
+recorded by this audit; runtime provenance additionally uses the live deployed
+source's byte-identical handoff files and the native transport goal transcript.
+The root's recorded own cost was 0.227 cents; tree cost 0 is a separate meter,
+not a zero-cost claim.
+
+This closes the targeted handoff defect, not the entire deployment. Full
+production was still NOT SHIPPED: Fly verification remained blocked by the
+separately owned PR #2407 multiline-JSON parser defect, with workflow-migration
+and semantic lanes blocked on Fly. The main agent authorized the targeted
+check from independent verified runtime evidence; it did not count as a pass
+of those blocked production lanes.
+The original `118fff32` root remains paused and was never resumed or modified.
+The fresh result's code task is CLOSED; its persistent application sandbox is
+normally retained PAUSED with verified checkpoint 1, not described as released.
+All benchmark fleets were released separately. The production repository and
+checkpoint are retained user assets, not abandoned local test resources.
+
+Private proof is in `/tmp/rca-118fff32-root-outcome/audit/` and the unchanged-test
+receipt in `/tmp/rca-118fff32-parent-test-repair/candidate4-native-receipt.json`.
+The canonical last-verifier publication was HTTPS GET/hash verified, with
+signed URL and raw data kept private. The case includes no signed link and
+makes no fresh FE browser-render claim. Historical failed attempts and the
+initial diagnosis-ready outcome remain intact above.
 
 ## Human feedback
 

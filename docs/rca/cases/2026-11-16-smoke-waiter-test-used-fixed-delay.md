@@ -20,7 +20,7 @@ sources:
   - commit 546e440154645f394ddb683bf6dd019fe8f44474
   - PR #2290 deploy gate deploy-command-structural, occurrence 6963913c123946998be741fd48bc9369
 repro: scripts/tests/condition-waits.test.py RatchetCase.test_current_tree_passes
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -56,6 +56,13 @@ event-driven barrier. The identical ratchet invocation changed from exit 1
 real-WebSocket probe still rejects the older waiter and accepts the repair.
 No timeout, assertion, concurrency setting, scanner or sleep baseline changed.
 The full deployment gates remain required; this case is open pending shipping.
+
+### Landed qualification (2026-11-16)
+
+The event-barrier regression and unchanged ratchet checks landed in PR #2290,
+merge cc7a39b2846aa385320386bbb1374e74c989e6a4. All 17 final native gates passed
+on 96d12280, including the owning backend and structural gates. This closes the
+fixed-delay test defect; it grants no broader production-lane credit.
 
 ## Human feedback
 

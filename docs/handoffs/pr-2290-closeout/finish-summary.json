@@ -1,0 +1,20 @@
+{
+  "run_id": "20261116-031450-812436",
+  "start": "2026-11-16T03:14:50.812436Z",
+  "native_finish": "PASS",
+  "native_finish_exit": 0,
+  "outcome": "completed",
+  "outcome_qualification": "Controlling NOT_INTRODUCED post-merge delegation exception; native Fly FAIL and semantic refusal retained, no all-lanes PASS claim.",
+  "factory_rows_published": 68,
+  "root_rca_outcome": "fixed",
+  "root_rca_event_at": "2026-11-16T18:07:11.219065Z",
+  "initial_unbound_diagnosis_ready": "Historical event2026-11-16T03:02:56.909731Z retained; not a fixed claim.",
+  "unknown_observation_gap": {
+    "start": "2026-11-16T09:34:40Z",
+    "end": "2026-11-16T17:27:21Z",
+    "cause": "UNKNOWN; not counted as active work"
+  },
+  "finish_log_sha256": "47cd8bd051ebe2cbff518227c05ff821ac35720f1a45486ebfea1703b30aec0f",
+  "parent_usage": "UNKNOWN; no inferred model, effort, tier, tokens or billed cost",
+  "timing_summary_qualification": "Native timing summary has incomplete stage instrumentation. Final visualization reconstructs automation from actual gate/native receipts, factory intervals and known unrecorded gaps; no elapsed-as-active assumption."
+}

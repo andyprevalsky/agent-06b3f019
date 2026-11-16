@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr2290/20261116T1819Z-final-overlay.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "34065a2bc5e9419a3e0161de56d4c7a8dbcdd9dbf246688151685762a855c7aa",
+  "gzip_sha256": "caead1ec1cc908e209ee09cce92aa7dfaafbe4ef5c579db489a49c243eb31e78",
+  "stored_bytes": 18572668,
+  "frames": 3,
+  "files": 961,
+  "original_bytes": 136378552,
+  "manifest_sha256": "5cc8da908cd1ae7a9a2a54fd3d6f6e0f827a63da8d9b0709134a34d6aee48b77",
+  "full_readback_verified": true
+}

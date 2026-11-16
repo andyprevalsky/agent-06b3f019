@@ -1,0 +1,9 @@
+{
+  "remote_restore_files": 698,
+  "all_file_hashes_verified_by_existing_helper": true,
+  "restored_bundle_sha256": "f892e2fb49bdababe51e4af1d5fe20fb16e0fd3409685d6c5482c8ad52327510",
+  "git_refs_restored_verified": 74,
+  "prerequisite_origin_main": "bd35eaedaa110ada19e79ef802161f9467cb8fa3",
+  "prerequisite_source": "local existing repository (public origin/main commit; remote fetching not needed for this object recovery test)",
+  "recovery_repository": "/tmp/rca-118fff32-preservation/recovered.git"
+}
