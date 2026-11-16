@@ -61,6 +61,13 @@ async function openSidebarPreview(page: Page, width: number) {
     status: 'ACTIVE',
     created_at: now,
   });
+  // Fixture pages ignore live deploys. Another merge promoted mid-test made a fixture document
+  // reload itself onto that build (appVersion.ts) and abort the next page.goto with
+  // net::ERR_ABORTED (prod semantic run 43686929632, :317); without a build id it never reloads.
+  await page.route(
+    (url) => url.pathname === '/version.json',
+    (route) => route.fulfill({ status: 404, body: 'Not found' }),
+  );
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (!path.startsWith('/api/')) return route.continue();
@@ -388,4 +395,43 @@ test('mobile composer is twenty percent shorter and preserves typing and safe ar
   expect(
     await box.evaluate((el) => parseFloat(getComputedStyle(el).paddingBottom)),
   ).toBeGreaterThanOrEqual(34 - 8 + 12);
+});
+
+// Prod semantic run 43686929632 (:317): c3efd5060f went live while the preview document was
+// open, and its load check reloaded it just as the test navigated home (page.goto
+// net::ERR_ABORTED). Every live /version.json here names a newer build; neither fixture
+// document may act on it.
+test('the sidebar fixture pages never reload onto a build promoted mid-test', async ({ page }) => {
+  const live = (await (
+    await page.request.get(`${FRONTEND_URL}/version.json`)
+  )
+    .json()
+    .catch(() => null)) as { buildId?: string } | null;
+  // The Vite dev server has no build id, so the app never version-reloads there.
+  test.skip(!live?.buildId, 'frontend is not a production build');
+  // Registered before the fixture's own routes, so it answers only what they let through.
+  let promotedAnswers = 0;
+  await page.route(
+    (url) => url.pathname === '/version.json',
+    (route) => {
+      promotedAnswers++;
+      return route.fulfill({ json: { buildId: `${live?.buildId}-promoted` } });
+    },
+  );
+  const documents: string[] = [];
+  let versionChecks = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/version.json') versionChecks++;
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame())
+      documents.push(new URL(request.url()).search);
+  });
+  await openSidebarPreview(page, 320);
+  await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+  await expect(
+    page.getByTestId('query-model-selector').filter({ visible: true }).last(),
+  ).toBeVisible();
+  // The home document's own load check has run too.
+  await expect.poll(() => versionChecks, { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
+  expect(promotedAnswers).toBe(0);
+  expect(documents).toEqual([`?agent-id=${ROOT}`, '']);
 });

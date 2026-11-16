@@ -174,11 +174,13 @@ const LATE_RELOAD_WINDOW_MS = 5_000;
  * Production semantic runs start right after a deploy goes live, and later merges go live
  * while they run. The app then reloads itself once onto the newer build (AppVersion 'load'
  * check, or the index.html entry-load recovery), and an evaluate/reload that straddles that
- * navigation fails with "Execution context was destroyed". Retry `operation` only when a new
- * main-frame document is involved: one requested during the call beyond the operation's own
- * `ownNavigations` (wait for it to load), or one whose request started just before the call
- * and that loads within LATE_RELOAD_WINDOW_MS of the failure. At most APP_RELOAD_RETRIES
- * retries; any other error still fails the test.
+ * navigation fails with "Execution context was destroyed" (a page.goto/reload it cancels, with
+ * net::ERR_ABORTED). Retry `operation` only when a new main-frame document is
+ * involved: one requested beyond the operation's own `ownNavigations` during the call or
+ * within LATE_RELOAD_WINDOW_MS of the failure (wait for it to load; a cancelled goto rejects
+ * before Playwright reports the reload that cancelled it, prod semantic run 43686929632), or
+ * one whose request started just before the call and that loads within that window. At most
+ * APP_RELOAD_RETRIES retries; any other error still fails the test.
  */
 export async function acrossAppReload<T>(
   page: Page,
@@ -205,18 +207,19 @@ export async function acrossAppReload<T>(
       return await operation();
     } catch (error) {
       if (retry >= APP_RELOAD_RETRIES) throw error;
+      // A reload requested just before the call is visible only once its document loads, and
+      // one that cancelled the operation's own navigation may be reported just after it. (A
+      // failed navigation of its own can still load: Chrome commits an error page.)
+      const deadline = Date.now() + LATE_RELOAD_WINDOW_MS;
+      while (documents <= ownNavigations && loads <= ownNavigations && Date.now() < deadline)
+        await page.waitForTimeout(100);
       if (documents > ownNavigations) {
         // The old document's context dies before the new one is parsed: wait for the latest
         // requested document itself, not the load state the old document already reached.
         await expect
           .poll(() => awaitingDocument, { message: 'reloaded document never loaded' })
           .toBe(false);
-      } else {
-        // A reload requested just before the call is visible only once its document loads.
-        const deadline = Date.now() + LATE_RELOAD_WINDOW_MS;
-        while (loads <= ownNavigations && Date.now() < deadline) await page.waitForTimeout(100);
-        if (loads <= ownNavigations) throw error;
-      }
+      } else if (loads <= ownNavigations) throw error;
     } finally {
       page.off('request', onRequest);
       page.off('domcontentloaded', onLoaded);
