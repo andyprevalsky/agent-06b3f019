@@ -139,9 +139,11 @@ export async function retryOnTransientTransactionStart<T>(
  * A transaction that Postgres itself holds read-only (`SET TRANSACTION READ
  * ONLY`), so replaying it after the body started cannot duplicate a write.
  * Unlike runTransactionWithRetry it therefore also retries a database error
- * raised mid-body (a pooler or server dropping the connection, run
- * 43785616839). Errors the body throws itself (plain `Error`s such as a lost
- * lease) are decisions, not transport failures, and are never retried.
+ * raised mid-body (run 43785616839: a cutover ownership check died on its
+ * database connection while ownership itself held). Errors the body throws
+ * itself (plain `Error`s such as a lost lease) are decisions, not transport
+ * failures, and are never retried. Defaults keep the worst case (5 x (3 s
+ * wait + 5 s body) + 3.75 s backoff, about 44 s) inside a 60 s caller budget.
  */
 export async function runReadOnlyTransactionWithRetry<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
@@ -154,7 +156,7 @@ export async function runReadOnlyTransactionWithRetry<T>(
           await tx.$executeRaw`SET TRANSACTION READ ONLY`;
           return fn(tx);
         },
-        { maxWait: 5_000, timeout: 10_000 }
+        { maxWait: 3_000, timeout: 5_000 }
       ),
     {
       maxRetries: normalizeMaxRetries(options.maxRetries ?? 5),

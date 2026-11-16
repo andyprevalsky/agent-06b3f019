@@ -1,9 +1,10 @@
 /**
  * Run 43785616839 (2026-11-16): the cutover controller's drain-loop `assert`
- * exited 1 while the parent still renewed the lease every second and the job
- * was FIFO head, so ownership was intact and the assertion died on the
- * database. Hold the lease lock so the assertion is parked mid-body, kill its
- * backend, and require the read-only assertion to retry instead of failing.
+ * exited 1 while ownership held (the parent's lease renewals and its failure
+ * mutation passed the same lease, job and FIFO-head checks within 330 ms), so
+ * by elimination the assertion died on its database connection. Hold the
+ * lease lock so the assertion is parked mid-body, kill its backend, and
+ * require the read-only assertion to retry instead of failing.
  */
 import assert from 'node:assert/strict';
 import { PrismaClient } from '@prisma/client';
@@ -40,24 +41,26 @@ export async function transientAssertionCase({ api, owner, appFor, identity, pla
       () => null,
       (error: unknown) => error
     );
-    // Wait (bounded) until the assertion is parked inside its transaction on the lease lock.
-    const victim = await retryWithBackoff(
-      async () =>
-        (
-          await holder.$queryRaw<Array<{ pid: number }>>`
-            SELECT pid FROM pg_stat_activity
-            WHERE datname = current_database() AND pid <> ${pid} AND wait_event_type = 'Lock'
-              AND query LIKE '%pg_advisory_xact_lock%'`
-        )[0]?.pid,
+    // Wait (bounded) until exactly the assertion is parked behind the held lease lock.
+    const waiters = await retryWithBackoff(
+      () =>
+        holder.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`,
       {
         maxRetries: 400,
         fixedDelays: Array(400).fill(25),
-        shouldRetryResult: (found) => found === undefined,
+        shouldRetryResult: (rows) => rows.length === 0,
         component: 'TransientAssertFixture',
       }
     );
-    assert.ok(victim, 'assertion never parked on the lease lock');
-    await holder.$queryRaw`SELECT pg_terminate_backend(${victim}::int)`;
+    assert.equal(
+      waiters.length,
+      1,
+      `expected only the assertion behind the lease lock: ${JSON.stringify(waiters)}`
+    );
+    const [{ terminated }] = await holder.$queryRaw<Array<{ terminated: boolean }>>`
+      SELECT pg_terminate_backend(${waiters[0].pid}::int) AS terminated`;
+    assert.equal(terminated, true, 'the parked assertion backend was not terminated');
     releaseLock();
     await holding;
     const error = await settled;

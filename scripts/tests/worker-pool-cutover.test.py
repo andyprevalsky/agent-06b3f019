@@ -260,6 +260,20 @@ class WorkerPoolCutoverTests(unittest.TestCase):
             self.assertEqual(stderr.getvalue(), "")
         self.assertEqual([command[4] for command in calls], ["assert", "read"])
 
+        def timeout(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, 60, output=b"", stderr=reason.encode())
+
+        stderr = io.StringIO()
+        with (
+            patch.dict(cutover.os.environ, env),
+            patch.object(cutover.subprocess, "run", timeout),
+            patch.object(sys, "stderr", stderr),
+            self.assertRaises(subprocess.TimeoutExpired),
+        ):
+            cutover.Ledger().assert_owned()
+        self.assertIn("Deployment queue assert timed out", stderr.getvalue())
+        self.assertIn(reason, stderr.getvalue())
+
     def run_job(self, ledger, native):
         with (
             patch.object(cutover, "backend_command", self.command),

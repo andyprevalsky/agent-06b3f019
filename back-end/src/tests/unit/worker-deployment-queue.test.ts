@@ -457,9 +457,16 @@ async function main() {
       preparedAbort(lease.ownerId));
     await test('unstarted queued releases coalesce into a proven git descendant only', () =>
       coalesceCases({ api, owner: lease.ownerId, appFor, identity, plan }));
-    await test('a connection lost inside the read-only ownership assertion is retried, not fatal', () =>
-      transientAssertionCase({ api, owner: lease.ownerId, appFor, identity, plan }));
     await lease.release();
+    await test('a connection lost inside the read-only ownership assertion is retried, not fatal', async () => {
+      // A fresh lease keeps its 59 s heartbeat far from the held lease lock.
+      const own = await acquireWorkflowDeploymentLease({ leaseMs: 60000, heartbeatMs: 59000 });
+      try {
+        await transientAssertionCase({ api, owner: own.ownerId, appFor, identity, plan });
+      } finally {
+        await own.release();
+      }
+    });
     await test(
       'parent idle admission, interrupted wait and actual owned child lease loss',
       processSafety

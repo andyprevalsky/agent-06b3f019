@@ -91,9 +91,15 @@ class Ledger:
                 path.write_text(json.dumps(payload), encoding="utf-8")
                 path.chmod(0o600)
                 command += ["--plan", str(path)]
-            result = subprocess.run(
-                command, cwd=ROOT / "back-end", check=False, capture_output=True, text=True, timeout=60
-            )
+            try:
+                result = subprocess.run(
+                    command, cwd=ROOT / "back-end", check=False, capture_output=True, text=True, timeout=60
+                )
+            except subprocess.TimeoutExpired as error:
+                stderr = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else error.stderr
+                print(f"Deployment queue {action} timed out; its stderr follows:\n{stderr or ''}",
+                      file=sys.stderr, flush=True)
+                raise
         if result.returncode != 0:
             # The queue CLI reports why (a lost lease, a FIFO change, a database
             # error) only on stderr; run 43785616839 died with that reason captured
