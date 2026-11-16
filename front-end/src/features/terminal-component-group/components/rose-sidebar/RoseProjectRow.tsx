@@ -1,19 +1,21 @@
 /**
- * STATE MACHINE: RoseProjectRow (Rose left bar project row, UI ledger rows 57/60)
+ * STATE MACHINE: RoseProjectRow (Rose left bar folder row, UI ledger rows 57/60)
  *
- *   [REST]  icon · name · [+ new agent here] · [⚙ settings]
+ *   Folders only organize agents (Andy, 2026-11-15): no project settings, repo
+ *   or avatar here. A code agent's project is picked when it is spawned, and
+ *   repositories live in Integrations › GitHub Repositories.
+ *
+ *   [REST]  folder icon · name · [+ new agent here] · [folder-plus]
  *           every "+" (Home's too): tooltip and aria-label "Create Super Agent"
- *           icon = ProjectIcon: the GitHub repo owner's avatar when repoUrl is a
- *           GitHub repo, else (or after a load error) the folder (UI item 32)
  *   [REST] --folder-plus--> parent opens a one-level subfolder name editor
- *   [REST] --right-click--> [MENU] Rename folder | Folder settings | Delete folder (red)
+ *   [REST] --right-click--> [MENU] Rename folder | Delete folder (red)
  *   [MENU] --Rename--> [RENAMING] inline input --Enter (non-empty)--> onRename(name) --> [REST]
  *                                              --Escape | blur--> [REST]
  *   [MENU] --Delete--> onRequestDelete (parent confirms in a dialog)
  *
  * Shown in both bar widths: collapsed (64px) keeps only the icon at the agent
  * icons' x (name faded out, no buttons), expanded shows the full row. Active
- * (its settings open, or it holds the selected agent) = rose color + semibold.
+ * (it holds the selected agent) = rose color + semibold.
  *
  * Clicking a project's icon toggles its contents; Home has the same control.
  * The composer labels the next agent's destination without decorating the icon.
@@ -33,7 +35,6 @@ import {
   Home,
   Pencil,
   Plus,
-  Settings as SettingsIcon,
   Trash2,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
@@ -49,7 +50,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { Project } from '@/lib/api/projects';
 import { cn } from '@/lib/utils';
 
-import ProjectIcon from './ProjectIcon';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 
 const MENU_SURFACE =
@@ -127,7 +127,6 @@ export interface RoseProjectRowProps {
   contentsToggleDisabled?: boolean;
   onToggleContents?: () => void;
   onCreateFolder?: () => void;
-  onOpenSettings: () => void;
   onStartRename: () => void;
   onRename: (name: string) => void;
   onCancelRename: () => void;
@@ -150,10 +149,6 @@ function ProjectRowMenu(props: RoseProjectRowProps) {
       <ContextMenuItem onSelect={props.onStartRename} className={MENU_ROW}>
         <Pencil className={icon} strokeWidth={1.7} />
         Rename folder
-      </ContextMenuItem>
-      <ContextMenuItem onSelect={props.onOpenSettings} className={MENU_ROW}>
-        <SettingsIcon className={icon} strokeWidth={1.7} />
-        Folder settings
       </ContextMenuItem>
       <ContextMenuSeparator className="mx-1.5 my-1 bg-gray-200/95 dark:bg-white/[0.07]" />
       <ContextMenuItem
@@ -238,7 +233,7 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
             disabled={props.contentsToggleDisabled}
             className="flex-none rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:bg-muted"
           >
-            <ProjectIcon repoUrl={project.repoUrl} />
+            <Folder className="h-5 w-5 flex-none" strokeWidth={1.7} />
           </button>
           {props.isRenaming && isExpanded ? (
             <InlineNameInput
@@ -264,15 +259,6 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
                   <FolderPlus className="h-[15px] w-[15px]" strokeWidth={1.7} />
                 </button>
               )}
-              <button
-                type="button"
-                aria-label={`${project.name} folder settings`}
-                title="Folder settings"
-                onClick={props.onOpenSettings}
-                className={cn(ICON_BUTTON, 'ml-1')}
-              >
-                <SettingsIcon className="h-[15px] w-[15px]" strokeWidth={1.7} />
-              </button>
             </>
           )}
         </div>

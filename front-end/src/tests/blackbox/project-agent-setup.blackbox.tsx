@@ -1,176 +1,112 @@
 /**
- * Blackbox tests for project settings → "Set up with your coding agent": the
- * copy-paste prompt (boxes.dev wording, Rose's CLI) with a one-time login
- * code minted by POST /api/projects/cli-login-codes { projectId } (MSW).
- *
- * Covers: exact prompt text, the mint request body, Copy (exact clipboard
- * text, "Copied", a fresh single-use code minted right after), refresh before
- * expiry, failure + Try again, and dark-mode styling of the prompt block.
+ * Blackbox tests for project settings → "Sync from your computer": no
+ * copy-paste. In the Rose Mac app, Choose folder… opens the native picker, the
+ * app runs the signed-in local agent read-only (`rose import scan`) with a login
+ * code bound to THIS project (POST /api/projects/cli-login-codes { projectId }),
+ * shows the plan for approval and applies it to this project. Outside the Mac
+ * app the section links Download for Mac and mints nothing.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
 import RoseProjectSettingsPanel from '@/features/terminal-component-group/components/rose-sidebar/RoseProjectSettingsPanel';
-import { agentInitPrompt } from '@/lib/agentInitPrompt';
 
 import { mockSession } from './app-sidebar.fixtures';
+import {
+  PICKED_FOLDER,
+  installImportBridge,
+  makePlan,
+  removeImportBridge,
+} from './local-import.fixtures';
 import { server } from './msw/server';
 import { makeProject, mockProjectsApi } from './rose-sidebar.fixtures';
 import { renderWithProviders } from './test-wrapper';
 
 const API_BASE = 'http://localhost:3001/api';
-function exactPrompt(code: string): string {
-  return `Install the Rose CLI with \`npm i -g @roselabs.ai/cli\`, then set up this project on Rose by running \`rose agent-init --login-code ${code}\` and following its instructions. Run these commands yourself and ask for my approval when needed.`;
-}
+const CODE = `rlc_${'b'.repeat(32)}`;
 
-function codeFor(n: number): string {
-  return `rlc_${String(n).padStart(32, 'x')}`;
-}
-
-/** Each mint returns the next code; `ttlMs` sets how long it lives. */
-function mockMint(ttlMs = 30 * 60_000, failFirst = false) {
+function mockMint() {
   const bodies: unknown[] = [];
-  let calls = 0;
   server.use(
     http.post(`${API_BASE}/projects/cli-login-codes`, async ({ request }) => {
       bodies.push(await request.json());
-      calls += 1;
-      if (failFirst && calls === 1) return HttpResponse.json({ error: 'boom' }, { status: 500 });
       return HttpResponse.json(
         {
-          code: codeFor(calls),
-          expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+          code: CODE,
+          expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
           project: { id: 'p-rose', name: 'Rose' },
         },
         { status: 201 },
       );
     }),
   );
-  return { bodies, calls: () => calls };
+  return bodies;
 }
 
 function renderPanel() {
   const project = makeProject();
   mockProjectsApi([project]);
-  renderWithProviders(
-    <RoseProjectSettingsPanel project={project} barExpanded={false} onClose={vi.fn()} embedded />,
-  );
-  return screen.getByRole('region', { name: 'Set up with your coding agent' });
+  renderWithProviders(<RoseProjectSettingsPanel project={project} />);
+  return screen.getByRole('region', { name: 'Sync from your computer' });
 }
 
-let writeText: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   localStorage.clear();
   mockSession();
-  writeText = vi.fn().mockResolvedValue(undefined);
-  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
 });
-afterEach(() => {
-  vi.useRealTimers();
-});
+afterEach(() => removeImportBridge());
 
-describe('Set up with your coding agent', () => {
-  it('shows the exact boxes.dev-style prompt with a code minted for this project', async () => {
-    const mint = mockMint();
-    const section = renderPanel();
-    const prompt = await within(section).findByTestId('agent-setup-prompt');
-    expect(prompt.textContent).toBe(exactPrompt(codeFor(1)));
-    expect(agentInitPrompt(codeFor(1))).toBe(exactPrompt(codeFor(1)));
-    expect(mint.bodies).toEqual([{ projectId: 'p-rose' }]);
-    expect(section).toHaveTextContent('expires in 30 minutes');
-    // Clean in dark mode: the prompt block carries its own dark surface + text.
-    expect(prompt.className).toMatch(/dark:bg-\[#2f2f2c\]/);
-    expect(prompt.className).toMatch(/dark:text-\[#ecece8\]/);
-    expect(prompt.className).toMatch(/dark:border-white/);
-  });
-
-  it('copies the exact prompt, confirms, and mints a fresh single-use code', async () => {
-    const mint = mockMint();
-    const section = renderPanel();
-    await within(section).findByText(exactPrompt(codeFor(1)));
-    fireEvent.click(within(section).getByRole('button', { name: 'Copy prompt' }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(exactPrompt(codeFor(1))));
-    expect(await within(section).findByRole('button', { name: 'Copied' })).toBeVisible();
-    expect(await within(section).findByText(exactPrompt(codeFor(2)))).toBeVisible();
-    expect(mint.calls()).toBe(2);
-    fireEvent.click(within(section).getByRole('button', { name: /Copied|Copy prompt/ }));
-    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(exactPrompt(codeFor(2))));
-  });
-
-  it('refreshes the code before it expires', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    const mint = mockMint(65_000);
-    const section = renderPanel();
-    await within(section).findByText(exactPrompt(codeFor(1)));
-    expect(mint.calls()).toBe(1);
-    await act(async () => {
-      vi.advanceTimersByTime(5_100);
+describe('Sync from your computer', () => {
+  it('picks the folder, scans with a code bound to this project and syncs the approved plan', async () => {
+    const mints = mockMint();
+    const fake = installImportBridge({
+      plan: makePlan({ projectName: 'Rose' }),
+      project: { id: 'p-rose', name: 'Rose' },
     });
-    expect(await within(section).findByText(exactPrompt(codeFor(2)))).toBeVisible();
-    expect(mint.calls()).toBe(2);
-  });
-
-  it('reports a failed mint and recovers with Try again', async () => {
-    mockMint(30 * 60_000, true);
+    const user = userEvent.setup();
     const section = renderPanel();
-    const alert = await within(section).findByRole('alert');
-    expect(alert).toHaveTextContent('Could not create a setup code.');
-    expect(within(section).getByRole('button', { name: 'Copy prompt' })).toBeDisabled();
-    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
-    expect(await within(section).findByText(exactPrompt(codeFor(2)))).toBeVisible();
-    expect(within(section).getByRole('button', { name: 'Copy prompt' })).toBeEnabled();
+    expect(section).toHaveTextContent('Rose reads it with Codex or Claude Code');
+    await user.click(within(section).getByRole('button', { name: 'Choose folder…' }));
+    const review = await within(section).findByTestId('local-import-review');
+    expect(review).toHaveTextContent('Codex read acme-api.');
+    expect(mints).toEqual([{ projectId: 'p-rose' }]);
+    expect(fake.requests[1]).toMatchObject({
+      action: 'scan',
+      folder: PICKED_FOLDER,
+      loginCode: CODE,
+      project: 'p-rose',
+    });
+    await user.click(within(review).getByRole('button', { name: 'Import' }));
+    expect(await within(section).findByText('Rose is ready')).toBeVisible();
+    expect(fake.requests[2]).toMatchObject({ action: 'apply', folder: PICKED_FOLDER });
+    // Nothing to copy or paste anywhere.
+    expect(section).not.toHaveTextContent(/agent-init|npm i|Copy prompt/);
   });
 
-  it('never shows one project’s code while another project mints', async () => {
-    const bodies: Array<{ projectId: string }> = [];
-    let release: (() => void) | null = null;
-    server.use(
-      http.post(`${API_BASE}/projects/cli-login-codes`, async ({ request }) => {
-        const body = (await request.json()) as { projectId: string };
-        bodies.push(body);
-        if (body.projectId === 'p-two')
-          await new Promise<void>((resolve) => {
-            release = resolve;
-          });
-        return HttpResponse.json(
-          {
-            code: body.projectId === 'p-two' ? codeFor(2) : codeFor(1),
-            expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
-            project: { id: body.projectId, name: body.projectId },
-          },
-          { status: 201 },
-        );
-      }),
-    );
-    const first = makeProject({ id: 'p-one', name: 'One' });
-    const second = makeProject({ id: 'p-two', name: 'Two' });
-    mockProjectsApi([first, second]);
-    const view = renderWithProviders(
-      <RoseProjectSettingsPanel project={first} barExpanded={false} onClose={vi.fn()} embedded />,
-    );
-    await screen.findByText(exactPrompt(codeFor(1)));
-    view.rerender(
-      <RoseProjectSettingsPanel project={second} barExpanded={false} onClose={vi.fn()} embedded />,
-    );
-    await waitFor(() => expect(bodies.map((b) => b.projectId)).toEqual(['p-one', 'p-two']));
-    const section = screen.getByRole('region', { name: 'Set up with your coding agent' });
-    expect(within(section).queryByTestId('agent-setup-prompt')).toBeNull();
-    expect(within(section).getByRole('button', { name: 'Copy prompt' })).toBeDisabled();
-    await waitFor(() => expect(release).not.toBeNull());
-    act(() => release?.());
-    expect(await within(section).findByText(exactPrompt(codeFor(2)))).toBeVisible();
-  });
-
-  it('asks the user to copy by hand when the clipboard is unavailable', async () => {
+  it('Cancel stops the sync while the local agent is reading', async () => {
     mockMint();
-    writeText.mockRejectedValueOnce(new Error('denied'));
+    const fake = installImportBridge({ holdScan: true });
+    const user = userEvent.setup();
     const section = renderPanel();
-    await within(section).findByText(exactPrompt(codeFor(1)));
-    fireEvent.click(within(section).getByRole('button', { name: 'Copy prompt' }));
-    expect(await within(section).findByRole('alert')).toHaveTextContent(
-      'Copy failed. Select the prompt and copy it instead.',
+    await user.click(within(section).getByRole('button', { name: 'Choose folder…' }));
+    expect(await within(section).findByText('Reading acme-api with Codex…')).toBeVisible();
+    await user.click(within(section).getByRole('button', { name: 'Cancel' }));
+    expect(fake.bridge.cancelImport).toHaveBeenCalledWith('run-2');
+    expect(within(section).getByRole('button', { name: 'Choose folder…' })).toBeVisible();
+  });
+
+  it('outside the Mac app it links Download for Mac and mints nothing', async () => {
+    const mints = mockMint();
+    const section = renderPanel();
+    expect(within(section).getByRole('link', { name: 'Download for Mac' })).toHaveAttribute(
+      'href',
+      '/download',
     );
-    expect(within(section).getByText(exactPrompt(codeFor(1)))).toBeVisible();
+    expect(section).toHaveTextContent('Open the Rose Mac app to sync');
+    expect(within(section).queryByRole('button', { name: 'Choose folder…' })).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mints).toEqual([]);
   });
 });

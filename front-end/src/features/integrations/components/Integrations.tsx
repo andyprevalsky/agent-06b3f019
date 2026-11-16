@@ -35,12 +35,13 @@
  * and wires up modals. All business logic lives in ../hooks/.
  */
 
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { hasIntegrationSearchResults, integrationMatchesSearch } from '../hooks/integrationSearch';
 import IntegrationSearch from './IntegrationSearch';
 import { Loader2 } from 'lucide-react';
 
 import { IntegrationTeamSharing } from '@/components/teams/TeamSharing';
+import type { Project } from '@/lib/api/projects';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import {
@@ -58,7 +59,6 @@ import {
   useAuth,
 } from '../hooks';
 import { usePlaidIntegration } from '../hooks/usePlaidIntegration';
-import { useGithubRepos } from '../hooks/useGithubRepos';
 import { useMeetingNotes } from '../hooks/useMeetingNotes';
 
 import DesktopIntegrations from './DesktopIntegrations';
@@ -141,7 +141,14 @@ function usePageActions({
   });
 }
 
-export default function Integrations({ initialSearch = '' }: { initialSearch?: string } = {}) {
+export default function Integrations({
+  initialSearch = '',
+  projectSettings,
+}: {
+  initialSearch?: string;
+  /** Project settings under a project row's ⚙ (the Rose apps panel passes them in). */
+  projectSettings?: (project: Project) => ReactNode;
+} = {}) {
   const handlers = useIntegrationHandlers();
   const { isFullySignedIn, user, loading: authLoading } = useAuth();
 
@@ -189,7 +196,7 @@ export default function Integrations({ initialSearch = '' }: { initialSearch?: s
             </div>
           ) : (
             <IntegrationSectionsSwitch
-              userId={user?.id ?? null}
+              projectSettings={projectSettings}
               search={search}
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
               isPasskeysAvailable={!!handlers.passkeys?.isAvailable}
@@ -223,16 +230,11 @@ export default function Integrations({ initialSearch = '' }: { initialSearch?: s
 /** Stock cards with the flag off; the Rose Desktop list with it on. */
 function IntegrationSectionsSwitch({
   accordion,
-  userId,
   ...rest
-}: Omit<React.ComponentProps<typeof IntegrationSections>, 'meetingNotes' | 'github'> & {
-  /** Signed-in user: keys the GitHub repo and folder caches to this account. */
-  userId: string | null;
-}) {
+}: Omit<React.ComponentProps<typeof IntegrationSections>, 'meetingNotes'>) {
   const granola = useMeetingNotes('granola', rest.isFullySignedIn, rest.data.fetchIntegrations);
   const fireflies = useMeetingNotes('fireflies', rest.isFullySignedIn, rest.data.fetchIntegrations);
-  const github = useGithubRepos(rest.isFullySignedIn, userId);
-  const props = { ...rest, meetingNotes: { granola, fireflies }, github };
+  const props = { ...rest, meetingNotes: { granola, fireflies } };
   if (useRoseDesktop()) return <DesktopIntegrations {...props} />;
   return <IntegrationSections accordion={accordion} {...props} />;
 }

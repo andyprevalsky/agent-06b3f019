@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { after, test } from 'node:test';
+import { registerGithubCliCases } from './repo-onboarding-github.cases';
 const run = promisify(execFile);
 const root = mkdtempSync(join(tmpdir(), 'rose-onboarding-'));
 const cli = process.env.ROSE_SYNC_TEST_CLI ?? resolve('../scripts/rose-sync');
@@ -239,7 +240,9 @@ test('onboarded workspace restores keys and runs dependency setup', async () => 
   });
 });
 
-// ── `rose agent-init --login-code` (Set up with your coding agent) ──
+// ── `rose agent-init --login-code` (Integrations › GitHub Repositories › Import from your computer) ──
+const PROMPT_LOCATION =
+  'Integrations › GitHub Repositories › Import from your computer, in the Rose Mac app';
 const LOGIN_CODE = `rlc_${'a'.repeat(32)}`;
 const CREDENTIAL = `rose_cli_${'c'.repeat(43)}`;
 async function withLoginApi<T>(
@@ -316,14 +319,15 @@ test('agent-init exchanges the code, saves it 0600 outside the repo and prints t
     assert.equal(record.apiUrl, api);
     assert(!result.stdout.includes(CREDENTIAL), 'the credential is never printed');
     assert(!result.stdout.includes(secret), 'env values are never printed');
+    // boxes.dev's agent-driven setup: detect → plan → GitHub access → approval → upload → verify → where.
     const steps = [
       '1. Detect the repository.',
-      '2. Confirm or create the Rose project.',
-      '3. List the environment files.',
+      '2. Plan the setup with the user.',
+      '3. Check GitHub access.',
       '4. APPROVAL: ask before uploading secrets.',
-      '5. Upload through rose-sync.',
-      '6. Propose setup commands.',
-      '7. Verify.',
+      '5. Upload.',
+      '6. Verify.',
+      '7. Tell the user where to find it.',
     ].map((step) => result.stdout.indexOf(step));
     assert(
       steps.every((at, i) => at >= 0 && (i === 0 || at > steps[i - 1])),
@@ -333,6 +337,18 @@ test('agent-init exchanges the code, saves it 0600 outside the repo and prints t
     assert.match(result.stdout, /Wait for\s+an explicit yes/);
     assert.match(result.stdout, /Fixture" only/);
     assert.match(result.stdout, /push --project '11111111-2222-4333-8444-555555555555'/);
+    assert.match(result.stdout, /--branch <remote default branch>/, 'starts on the remote default');
+    assert.match(result.stdout, /github status/);
+    assert.match(
+      result.stdout,
+      /APPROVAL[^\n]*\n[^\n]*github import/,
+      'the credential needs a yes'
+    );
+    for (const unsupported of [/database dumps/, /home directory/, /conversation/]) {
+      assert.match(result.stdout, unsupported, `says ${unsupported} is not supported`);
+    }
+    assert.match(result.stdout, /Integrations › GitHub Repositories/);
+    assert(result.stdout.includes(`'${cli}' github status`), 'commands use the CLI path it ran as');
     assert.deepEqual(seen(), ['POST /api/projects/cli-login-codes/exchange ']);
 
     const again = await agentInit(dir, api, configDir);
@@ -349,6 +365,7 @@ test('agent-init exchanges the code, saves it 0600 outside the repo and prints t
       /Not signed in to Rose/,
       'a saved credential is never sent to another backend'
     );
+    assert((elsewhere as { stderr: string }).stderr.includes(`(${PROMPT_LOCATION})`));
   });
 });
 test('agent-init refuses a used code and never stores a credential inside the checkout', async () => {
@@ -356,11 +373,15 @@ test('agent-init refuses a used code and never stores a credential inside the ch
     const dir = fixture('agent-init-refuse');
     await assert.rejects(
       agentInit(dir, api, join(root, 'refuse-config'), '--login-code', `rlc_${'b'.repeat(32)}`),
-      /copy a fresh setup prompt/i
+      (error: Error) =>
+        /start the import again/i.test(error.message) &&
+        error.message.includes(`(${PROMPT_LOCATION})`)
     );
     await assert.rejects(
       agentInit(dir, api, join(root, 'refuse-config'), '--login-code', 'not-a-code'),
-      /not a Rose login code/
+      (error: Error) =>
+        /not a Rose login code/.test(error.message) &&
+        error.message.includes(`(${PROMPT_LOCATION})`)
     );
     const inside = join(dir, '.rose');
     await assert.rejects(
@@ -375,9 +396,19 @@ test('agent-init refuses a used code and never stores a credential inside the ch
       JSON.stringify({ apiUrl: api, credential: CREDENTIAL, expiresAt: '2000-01-01T00:00:00Z' }),
       { mode: 0o600 }
     );
-    await assert.rejects(agentInit(dir, api, expiredDir), /Not signed in to Rose/);
+    await assert.rejects(
+      agentInit(dir, api, expiredDir),
+      (error: Error) =>
+        /Not signed in to Rose/.test(error.message) &&
+        error.message.includes(`(${PROMPT_LOCATION})`)
+    );
     const status = await agentInit(dir, api, expiredDir, 'status', '--json');
     assert.equal(JSON.parse(status.stdout).stage, 'signed_out');
+    assert(JSON.parse(status.stdout).next.includes(`(${PROMPT_LOCATION})`), status.stdout);
+    assert(
+      !/project settings/i.test(status.stdout),
+      'the prompt no longer lives in project settings'
+    );
   });
 });
 test('agent-init rejects malformed saved logins without using their credential', async () => {
@@ -443,18 +474,24 @@ test('agent-init rejects in-checkout config before any exchange request', async 
   });
 });
 
-test('the rose package exposes the bin the onboarding prompt tells agents to install', async () => {
+registerGithubCliCases({
+  root,
+  cli,
+  fixture,
+  decrypt,
+  publicKeyPem: () => publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+});
+test('the rose package exposes the bin the Mac app runs', async () => {
   const pkgDir = resolve('../scripts/lib/rose-sync');
   const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
   assert.equal(pkg.name, '@roselabs.ai/cli', 'the scope Andy owns on npm');
-  assert.equal(pkg.private, undefined, 'the prompt installs it from the public registry');
+  assert.equal(pkg.private, undefined, 'still publishable to the public registry');
   assert.equal(pkg.publishConfig?.access, 'public', 'scoped packages publish private by default');
   assert.deepEqual(Object.keys(pkg.bin), ['rose']);
   for (const file of pkg.files) statSync(join(pkgDir, file));
   const help = await run(process.execPath, [join(pkgDir, pkg.bin.rose), 'help']);
   assert.match(help.stdout, /^usage: rose /);
   assert.match(help.stdout, /rose agent-init --login-code CODE/);
-  const prompt = readFileSync(resolve('../front-end/src/lib/agentInitPrompt.ts'), 'utf8');
-  assert(prompt.includes(`'${pkg.name}'`), `front-end prompt installs ${pkg.name}`);
-  assert(prompt.includes(`'${Object.keys(pkg.bin)[0]}'`), 'front-end prompt runs the rose bin');
+  // The Mac app runs the bundled CLI's import (no copy-paste prompt).
+  assert.match(help.stdout, /rose import detect\|scan\|apply/);
 });

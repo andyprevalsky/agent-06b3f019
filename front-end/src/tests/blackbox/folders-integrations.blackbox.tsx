@@ -1,162 +1,29 @@
 /**
- * Blackbox tests: Folders replace Projects in the left bar, and GitHub repos are
- * connected on the Integrations panel (foundation contract: /api/folders and
- * /api/integrations/github/repos).
+ * Blackbox tests: Folders in the left bar (foundation contract: /api/folders).
+ * Folders only organize agents (Andy, 2026-11-15); repositories are connected
+ * or imported in Integrations › GitHub Repositories, never from the bar.
  *
  *   - folders keep existing project content: same ids, agents, subfolders and
  *     navigation after a rename (PATCH /api/folders/:id) and across a reload
  *   - creating a folder POSTs /api/folders with { name } only: never a repo
- *   - folder settings show the connected repo read-only and link to Integrations
- *   - the GitHub Repos section lists the auto-imported Rose repo without a
- *     reconnect, connects a repo with an optional folder, and disconnects
- *   - a connect survives a refresh (the server list is the source of truth) and
- *     the folder's settings show the new repo
- *   - refusals are inline: 403 access denied, 409 folder conflict, 400 invalid,
- *     503 rate limited; nothing is added
- *   - the repo and folder caches are keyed by the signed-in user: another account
- *     signing in on the same device never sees the previous account's repos
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
 
-import Integrations from '@/pages/Integrations';
-import { GITHUB_REPOS_SECTION_ID, focusIntegrationsSection } from '@/lib/integrationsSection';
-import { useRoseApps } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { RoseMobileAgentList } from '@/features/terminal-component-group/components/rose-sidebar/RoseMobileAgentList';
-import type { GithubRepo } from '@/features/integrations/api/githubRepos';
-import { useGithubRepos } from '@/features/integrations/hooks/useGithubRepos';
 
 import { makeAgent, mockSession } from './app-sidebar.fixtures';
 import { capturedRequests, clearCaptures } from './msw/capture';
-import { server } from './msw/server';
-import { makeProject, mockProjectsApi, type MockProjectsApi } from './rose-sidebar.fixtures';
+import { makeProject, mockProjectsApi } from './rose-sidebar.fixtures';
 import { renderWithProviders } from './test-wrapper';
 
-const API_BASE = 'http://localhost:3001/api';
 const ROSE_URL = 'https://github.com/Rose-Ai-Labs/rose';
 
 function requests(method: string, path: string) {
   return capturedRequests.filter(
     (r) => r.method === method && new URL(r.url).pathname === `/api${path}`,
   );
-}
-
-function repo(overrides: Partial<GithubRepo>): GithubRepo {
-  return {
-    canonical_ref: 'gh:rose-ai-labs/rose',
-    repo_name: 'rose',
-    repo_url: ROSE_URL,
-    owner: 'rose-ai-labs',
-    default_branch: 'main',
-    connected_rose_project_ref: 'p-rose',
-    integration_id: 'int-rose',
-    source: 'legacy_project',
-    connected_at: '2026-11-12T00:00:00.000Z',
-    ...overrides,
-  };
-}
-
-/**
- * Stateful GitHub repo backend over the folders mock: the Rose repo is already
- * connected (auto-imported from its project). A connect with a folder sets that
- * folder's repo, as the server does for a folder without one.
- */
-function githubReposBackend(folders: MockProjectsApi) {
-  const repos: GithubRepo[] = [repo({})];
-  server.use(
-    http.get(`${API_BASE}/integrations/github/repos`, () => HttpResponse.json({ repos })),
-    http.post(`${API_BASE}/integrations/github/repos`, async ({ request }) => {
-      const body = (await request.json()) as {
-        repo_url: string;
-        connected_rose_project_ref?: string | null;
-        replace?: boolean;
-      };
-      const match = /github\.com\/([^/]+)\/([^/.]+)/i.exec(body.repo_url);
-      if (match === null)
-        return HttpResponse.json(
-          { error: 'INVALID_GITHUB_REPO', message: 'Not a GitHub repository' },
-          { status: 400 },
-        );
-      const [, owner, name] = match;
-      if (owner === 'private-org')
-        return HttpResponse.json(
-          { error: 'GITHUB_ACCESS_DENIED', message: 'Access denied' },
-          { status: 403 },
-        );
-      if (owner === 'busy-org')
-        return HttpResponse.json(
-          { error: 'GITHUB_RATE_LIMITED', message: 'GitHub rate limit reached' },
-          { status: 503, headers: { 'Retry-After': '120' } },
-        );
-      const folder = folders.projects.find((p) => p.id === body.connected_rose_project_ref);
-      const canonical = `gh:${owner}/${name}`.toLowerCase();
-      if (body.replace === true && folder !== undefined) {
-        // Switch: another folder lets go of the repo; this folder's old repos stay
-        // connected but unassociated; the folder points at the repo (server contract).
-        const existing = repos.find((r) => r.canonical_ref === canonical);
-        const other = folders.projects.find(
-          (p) => p.id === existing?.connected_rose_project_ref && p.id !== folder.id,
-        );
-        if (other !== undefined) other.repoUrl = null;
-        for (const r of repos)
-          if (r.connected_rose_project_ref === folder.id) r.connected_rose_project_ref = null;
-        folder.repoUrl = body.repo_url;
-        folder.githubConnected = true;
-        const switched =
-          existing ??
-          repo({
-            canonical_ref: canonical,
-            repo_name: name,
-            repo_url: body.repo_url,
-            owner: owner.toLowerCase(),
-            integration_id: `int-${name}`,
-            source: 'connect',
-          });
-        switched.connected_rose_project_ref = folder.id;
-        if (existing === undefined) repos.push(switched);
-        return HttpResponse.json(switched, { status: 201 });
-      }
-      if (
-        folder?.repoUrl != null &&
-        !folder.repoUrl.toLowerCase().includes(`/${owner}/${name}`.toLowerCase())
-      )
-        return HttpResponse.json(
-          { error: 'PROJECT_HAS_OTHER_REPO', message: 'Already connected' },
-          { status: 409 },
-        );
-      if (folder !== undefined && folder.repoUrl === null) {
-        folder.repoUrl = body.repo_url;
-        folder.githubConnected = true;
-      }
-      const connected = repo({
-        canonical_ref: `gh:${owner}/${name}`.toLowerCase(),
-        repo_name: name,
-        repo_url: body.repo_url,
-        owner: owner.toLowerCase(),
-        connected_rose_project_ref: folder?.id ?? null,
-        integration_id: `int-${name}`,
-        source: 'connect',
-      });
-      repos.push(connected);
-      return HttpResponse.json(connected, { status: 201 });
-    }),
-    http.delete(`${API_BASE}/integrations/github/repos/:ref`, ({ params }) => {
-      const ref = decodeURIComponent(String(params.ref));
-      const index = repos.findIndex((r) => r.canonical_ref === ref);
-      if (index < 0)
-        return HttpResponse.json(
-          { error: 'GITHUB_REPO_NOT_CONNECTED', message: 'Repo not connected' },
-          { status: 404 },
-        );
-      repos.splice(index, 1);
-      return HttpResponse.json({ disconnected: true, canonical_ref: ref });
-    }),
-  );
-  return repos;
 }
 
 const agents = [
@@ -170,41 +37,30 @@ const agents = [
   }),
 ];
 
-function OpenAppProbe() {
-  return <span data-testid="open-app">{useRoseApps()?.openApp ?? 'none'}</span>;
-}
-
-function sidebar(onClose: () => void = vi.fn()) {
+function sidebar() {
   return (
-    <>
-      <RoseMobileAgentList
-        agents={agents}
-        selectedAgentId={null}
-        onSelectAgent={vi.fn()}
-        onClose={onClose}
-        handlers={{
-          onRenameAgent: vi.fn(),
-          onCopyAgentLink: vi.fn(),
-          onToggleAgentPin: vi.fn(),
-          onArchiveAgent: vi.fn(),
-        }}
-        query=""
-        contentMatchAgentIds={new Set()}
-        isLoading={false}
-        isSearching={false}
-        searchError={null}
-      />
-      <OpenAppProbe />
-    </>
+    <RoseMobileAgentList
+      agents={agents}
+      selectedAgentId={null}
+      onSelectAgent={vi.fn()}
+      onClose={vi.fn()}
+      handlers={{
+        onRenameAgent: vi.fn(),
+        onCopyAgentLink: vi.fn(),
+        onToggleAgentPin: vi.fn(),
+        onArchiveAgent: vi.fn(),
+      }}
+      query=""
+      contentMatchAgentIds={new Set()}
+      isLoading={false}
+      isSearching={false}
+      searchError={null}
+    />
   );
 }
 
 function roseFolder() {
   return makeProject({ folders: [{ id: 'f-ui', name: 'Interface', projectId: 'p-rose' }] });
-}
-
-function websiteFolder() {
-  return makeProject({ id: 'p-site', name: 'Website', repoUrl: null, githubConnected: false });
 }
 
 beforeEach(() => {
@@ -263,418 +119,5 @@ describe('Folders in the left bar', () => {
     expect(requests('POST', '/projects')).toHaveLength(0);
     expect(requests('POST', '/integrations/github/repos')).toHaveLength(0);
     expect(folders.projects[1]).toMatchObject({ name: 'Website', repoUrl: null });
-  });
-
-  it('folder settings show the repo read-only and link to the Integrations panel', async () => {
-    mockProjectsApi([roseFolder(), websiteFolder()]);
-    // Installed before the click: the drawer the link opens is lazy and may mount (and
-    // consume the deep link) while the click is still settling.
-    const scrolled = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-      configurable: true,
-      value: scrolled,
-    });
-    try {
-      const user = userEvent.setup();
-      renderWithProviders(sidebar());
-      await user.click(await screen.findByRole('button', { name: 'Website folder settings' }));
-      const section = screen.getByRole('region', { name: 'GitHub repo' });
-      await waitFor(() => expect(requests('GET', '/folders').length).toBeGreaterThan(0));
-      expect(within(section).getByTestId('folder-github-repo')).toHaveTextContent('No repository');
-      expect(within(section).queryByRole('textbox', { name: 'Repository URL' })).toBeNull();
-      expect(screen.getByTestId('open-app')).toHaveTextContent('none');
-      scrolled.mockClear();
-      await user.click(within(section).getByRole('button', { name: 'Connect in Integrations' }));
-      expect(screen.getByTestId('open-app')).toHaveTextContent('integrations');
-      // The Integrations drawer the link opened lands on its GitHub Repos section
-      // (deep link consumed on mount).
-      const github = await screen.findByRole('region', { name: 'GitHub Repos' }, { timeout: 5000 });
-      await waitFor(() => expect(scrolled).toHaveBeenCalled());
-      expect(scrolled.mock.contexts[0]).toBe(github);
-      expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
-      // A folder without a repo has nothing to switch: no folder is pre-selected.
-      // The switch form renders once the panel's own folders list has loaded.
-      expect(await within(github).findByRole('combobox', { name: 'Folder to switch' })).toHaveValue(
-        '',
-      );
-      // ... and the connect form connects into this folder.
-      await waitFor(() =>
-        expect(within(github).getByRole('combobox', { name: 'Folder (optional)' })).toHaveValue(
-          'p-site',
-        ),
-      );
-    } finally {
-      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
-    }
-  });
-});
-
-describe("Switching a folder's repo", () => {
-  it('switch repo sends replace with the folder id; the folder then shows the new repo', async () => {
-    const folders = mockProjectsApi([roseFolder(), websiteFolder()]);
-    const repos = githubReposBackend(folders);
-    const user = userEvent.setup();
-    const view = renderWithProviders(<Integrations />, { roseDesktop: false });
-    const section = await screen.findByRole('region', { name: 'GitHub Repos' });
-    const form = await within(section).findByRole('form', { name: "Switch a folder's repo" });
-    const picker = within(form).getByRole('combobox', { name: 'Folder to switch' });
-    // Only folders that already have a repo can be switched.
-    expect(within(picker).queryByRole('option', { name: 'Website' })).toBeNull();
-    await user.selectOptions(picker, 'p-rose');
-    expect(within(form).getByTestId('switch-current-repo')).toHaveTextContent(
-      'gh:rose-ai-labs/rose',
-    );
-    await user.type(
-      within(form).getByRole('textbox', { name: 'New GitHub repository URL' }),
-      'https://github.com/acme/rose-next',
-    );
-    await user.click(within(form).getByRole('button', { name: 'Switch repo' }));
-
-    await waitFor(() => expect(requests('POST', '/integrations/github/repos')).toHaveLength(1));
-    expect(requests('POST', '/integrations/github/repos')[0].body).toEqual({
-      repo_url: 'https://github.com/acme/rose-next',
-      connected_rose_project_ref: 'p-rose',
-      replace: true,
-    });
-    await waitFor(() =>
-      expect(within(form).getByTestId('switch-current-repo')).toHaveTextContent(
-        'gh:acme/rose-next',
-      ),
-    );
-    expect(within(form).queryByRole('alert')).toBeNull();
-    // The old repo stays connected, now without a folder.
-    expect(repos.map((r) => [r.canonical_ref, r.connected_rose_project_ref])).toEqual([
-      ['gh:rose-ai-labs/rose', null],
-      ['gh:acme/rose-next', 'p-rose'],
-    ]);
-    const list = within(section).getByRole('list', { name: 'Connected GitHub repos' });
-    await waitFor(() => expect(list).toHaveTextContent('Folder: Rose'));
-    expect(list).toHaveTextContent('No folder');
-
-    // The folder's settings read the new repo.
-    view.unmount();
-    renderWithProviders(sidebar());
-    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-    await waitFor(() =>
-      expect(screen.getByTestId('folder-github-repo')).toHaveTextContent('gh:acme/rose-next'),
-    );
-  });
-
-  it('switch repo refusals show inline (403) and change nothing', async () => {
-    const folders = mockProjectsApi([roseFolder()]);
-    const repos = githubReposBackend(folders);
-    const user = userEvent.setup();
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const form = await screen.findByRole('form', { name: "Switch a folder's repo" });
-    await user.selectOptions(
-      within(form).getByRole('combobox', { name: 'Folder to switch' }),
-      'p-rose',
-    );
-    await user.type(
-      within(form).getByRole('textbox', { name: 'New GitHub repository URL' }),
-      'https://github.com/private-org/secret',
-    );
-    await user.click(within(form).getByRole('button', { name: 'Switch repo' }));
-    expect(await within(form).findByRole('alert')).toHaveTextContent(
-      /cannot access this repository/,
-    );
-    expect(folders.projects[0].repoUrl).toBe(ROSE_URL);
-    expect(repos).toHaveLength(1);
-  });
-
-  it('folder settings "Switch repo in Integrations" opens the panel with that folder pre-selected', async () => {
-    mockProjectsApi([roseFolder(), websiteFolder()]);
-    const user = userEvent.setup();
-    const closeMenu = vi.fn();
-    renderWithProviders(sidebar(closeMenu));
-    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-    expect(closeMenu).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole('button', { name: 'Switch repo in Integrations' }));
-    expect(screen.getByTestId('open-app')).toHaveTextContent('integrations');
-    // Mobile: the menu holding the folder settings closes, so the opened panel is visible.
-    expect(closeMenu).toHaveBeenCalledTimes(1);
-    // The Integrations drawer the link opened (whether its GitHub section was already
-    // mounted, via the focus event, or mounts after, via the stored deep link).
-    const form = await screen.findByRole(
-      'form',
-      { name: "Switch a folder's repo" },
-      { timeout: 5000 },
-    );
-    await waitFor(() =>
-      expect(within(form).getByRole('combobox', { name: 'Folder to switch' })).toHaveValue(
-        'p-rose',
-      ),
-    );
-    expect(within(form).getByTestId('switch-current-repo')).toHaveTextContent(
-      'gh:rose-ai-labs/rose',
-    );
-    expect(within(form).getByRole('textbox', { name: 'New GitHub repository URL' })).toBeVisible();
-    expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
-  });
-
-  it('a deep link stored before the panel mounts pre-selects on mount', async () => {
-    mockProjectsApi([roseFolder(), websiteFolder()]);
-    focusIntegrationsSection(GITHUB_REPOS_SECTION_ID, { folderId: 'p-rose' });
-    expect(sessionStorage.getItem('rose:integrations-section-focus')).not.toBeNull();
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const form = await screen.findByRole('form', { name: "Switch a folder's repo" });
-    await waitFor(() =>
-      expect(within(form).getByRole('combobox', { name: 'Folder to switch' })).toHaveValue(
-        'p-rose',
-      ),
-    );
-    expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
-  });
-
-  it('pre-selects the folder when the Integrations panel is already open', async () => {
-    mockProjectsApi([roseFolder(), websiteFolder()]);
-    const user = userEvent.setup();
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const form = await screen.findByRole('form', { name: "Switch a folder's repo" });
-    const picker = within(form).getByRole('combobox', { name: 'Folder to switch' });
-    expect(picker).toHaveValue('');
-    renderWithProviders(sidebar());
-    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-    await user.click(await screen.findByRole('button', { name: 'Switch repo in Integrations' }));
-    await waitFor(() => expect(picker).toHaveValue('p-rose'));
-    expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
-  });
-
-  it('a folder without a repo is pre-selected in the connect form, and the connect uses it', async () => {
-    const folders = mockProjectsApi([roseFolder(), websiteFolder()]);
-    githubReposBackend(folders);
-    const user = userEvent.setup();
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const section = await screen.findByRole('region', { name: 'GitHub Repos' });
-    const connectPicker = within(section).getByRole('combobox', { name: 'Folder (optional)' });
-    await waitFor(() =>
-      expect(within(connectPicker).getByRole('option', { name: 'Website' })).toBeTruthy(),
-    );
-    expect(connectPicker).toHaveValue('');
-    renderWithProviders(sidebar());
-    await user.click(await screen.findByRole('button', { name: 'Website folder settings' }));
-    await user.click(await screen.findByRole('button', { name: 'Connect in Integrations' }));
-    await waitFor(() => expect(connectPicker).toHaveValue('p-site'));
-    await user.type(
-      within(section).getByRole('textbox', { name: 'GitHub repository URL' }),
-      'https://github.com/acme/website',
-    );
-    await user.click(within(section).getByRole('button', { name: 'Connect GitHub repo' }));
-    await waitFor(() => expect(requests('POST', '/integrations/github/repos')).toHaveLength(1));
-    expect(requests('POST', '/integrations/github/repos')[0].body).toEqual({
-      repo_url: 'https://github.com/acme/website',
-      connected_rose_project_ref: 'p-site',
-    });
-  });
-});
-
-describe('GitHub Repos on the Integrations panel', () => {
-  it('lists the auto-imported Rose repo without a reconnect, with its folder', async () => {
-    const folders = mockProjectsApi([roseFolder()]);
-    githubReposBackend(folders);
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const section = await screen.findByRole('region', { name: 'GitHub Repos' });
-    const list = await within(section).findByRole('list', { name: 'Connected GitHub repos' });
-    expect(within(list).getByText('rose-ai-labs/rose')).toBeVisible();
-    await waitFor(() => expect(list).toHaveTextContent('Folder: Rose'));
-    expect(within(list).getByTestId('github-repo-source')).toHaveTextContent('connected project');
-    expect(requests('POST', '/integrations/github/repos')).toHaveLength(0);
-  });
-
-  it('connects a repo to a folder, keeps it after a refresh, and the folder settings show it', async () => {
-    const folders = mockProjectsApi([roseFolder(), websiteFolder()]);
-    const repos = githubReposBackend(folders);
-    const user = userEvent.setup();
-    const view = renderWithProviders(<Integrations />, { roseDesktop: false });
-    const section = await screen.findByRole('region', { name: 'GitHub Repos' });
-    await user.type(
-      within(section).getByRole('textbox', { name: 'GitHub repository URL' }),
-      'https://github.com/acme/website',
-    );
-    const picker = within(section).getByRole('combobox', { name: 'Folder (optional)' });
-    await waitFor(() =>
-      expect(within(picker).getByRole('option', { name: 'Website' })).toBeTruthy(),
-    );
-    await user.selectOptions(picker, 'p-site');
-    await user.click(within(section).getByRole('button', { name: 'Connect GitHub repo' }));
-
-    await waitFor(() => expect(requests('POST', '/integrations/github/repos')).toHaveLength(1));
-    expect(requests('POST', '/integrations/github/repos')[0].body).toEqual({
-      repo_url: 'https://github.com/acme/website',
-      connected_rose_project_ref: 'p-site',
-    });
-    const list = within(section).getByRole('list', { name: 'Connected GitHub repos' });
-    await waitFor(() => expect(list).toHaveTextContent('acme/website'));
-    expect(list).toHaveTextContent('Folder: Website');
-    expect(
-      within(list)
-        .getAllByTestId('github-repo-source')
-        .map((b) => b.textContent),
-    ).toEqual(['connected project', 'manual']);
-    // The input clears once connect settles (after the repos/folders refetch).
-    await waitFor(() =>
-      expect(within(section).getByRole('textbox', { name: 'GitHub repository URL' })).toHaveValue(
-        '',
-      ),
-    );
-    expect(within(section).queryByRole('alert')).toBeNull();
-    expect(repos).toHaveLength(2);
-
-    // Refresh: the server's list still has both repos.
-    view.unmount();
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const again = await screen.findByRole('list', { name: 'Connected GitHub repos' });
-    await waitFor(() => expect(again).toHaveTextContent('acme/website'));
-    expect(again).toHaveTextContent('rose-ai-labs/rose');
-
-    // The folder's settings read the new repo from GET /api/folders.
-    renderWithProviders(sidebar());
-    await user.click(await screen.findByRole('button', { name: 'Website folder settings' }));
-    await waitFor(() =>
-      expect(screen.getByTestId('folder-github-repo')).toHaveTextContent('gh:acme/website'),
-    );
-    expect(screen.getByRole('button', { name: 'Switch repo in Integrations' })).toBeVisible();
-  });
-
-  it('disconnects a repo from its row', async () => {
-    const folders = mockProjectsApi([roseFolder()]);
-    const repos = githubReposBackend(folders);
-    const user = userEvent.setup();
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const list = await screen.findByRole('list', { name: 'Connected GitHub repos' });
-    await user.click(within(list).getByRole('button', { name: 'Disconnect rose-ai-labs/rose' }));
-    await waitFor(() => expect(repos).toHaveLength(0));
-    expect(requests('DELETE', '/integrations/github/repos/gh%3Arose-ai-labs%2Frose')).toHaveLength(
-      1,
-    );
-    await waitFor(() =>
-      expect(screen.queryByRole('list', { name: 'Connected GitHub repos' })).toBeNull(),
-    );
-  });
-
-  it.each([
-    [
-      '403 access denied',
-      'https://github.com/private-org/secret',
-      null,
-      /cannot access this repository/,
-    ],
-    [
-      '409 folder already has another repo',
-      'https://github.com/acme/other',
-      'p-rose',
-      /already connected to a different repository/,
-    ],
-    [
-      '400 not a GitHub repo',
-      'https://gitlab.com/acme/site',
-      null,
-      /Enter a GitHub repository URL/,
-    ],
-    ['503 rate limited', 'https://github.com/busy-org/site', null, /rate limiting.*2 minutes/],
-  ])('shows %s inline and adds nothing', async (_label, url, folderId, message) => {
-    const folders = mockProjectsApi([roseFolder()]);
-    const repos = githubReposBackend(folders);
-    const user = userEvent.setup();
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const section = await screen.findByRole('region', { name: 'GitHub Repos' });
-    const input = within(section).getByRole('textbox', { name: 'GitHub repository URL' });
-    await user.type(input, url);
-    if (folderId !== null) {
-      const picker = within(section).getByRole('combobox', { name: 'Folder (optional)' });
-      await waitFor(() =>
-        expect(within(picker).getByRole('option', { name: 'Rose' })).toBeTruthy(),
-      );
-      await user.selectOptions(picker, folderId);
-    }
-    await user.click(within(section).getByRole('button', { name: 'Connect GitHub repo' }));
-    expect(await within(section).findByRole('alert')).toHaveTextContent(message);
-    expect(input).toHaveValue(url);
-    expect(input).toHaveAttribute('aria-invalid', 'true');
-    expect(repos).toHaveLength(1);
-    // Editing the URL clears the error.
-    await user.type(input, 'x');
-    expect(within(section).queryByRole('alert')).toBeNull();
-  });
-
-  it('shows 404 not connected inline when a repo was already disconnected elsewhere', async () => {
-    const folders = mockProjectsApi([roseFolder()]);
-    const repos = githubReposBackend(folders);
-    const user = userEvent.setup();
-    renderWithProviders(<Integrations />, { roseDesktop: false });
-    const list = await screen.findByRole('list', { name: 'Connected GitHub repos' });
-    repos.splice(0, repos.length); // disconnected in another tab
-    await user.click(within(list).getByRole('button', { name: 'Disconnect rose-ai-labs/rose' }));
-    const section = screen.getByRole('region', { name: 'GitHub Repos' });
-    expect(await within(section).findByRole('alert')).toHaveTextContent(
-      'This repository is not connected.',
-    );
-  });
-
-  it("never shows the previous account's repos or folders after another account signs in", async () => {
-    // One QueryClient for the whole page, as in the app: account A signs out, B signs in.
-    const owner = { current: 'user-a' };
-    let releaseB: () => void = () => {};
-    const bReady = new Promise<void>((resolve) => {
-      releaseB = resolve;
-    });
-    const reposOf = (user: string) =>
-      user === 'user-a'
-        ? [repo({ canonical_ref: 'gh:a-org/a-secret', repo_name: 'a-secret', owner: 'a-org' })]
-        : [repo({ canonical_ref: 'gh:b-org/b-app', repo_name: 'b-app', owner: 'b-org' })];
-    server.use(
-      http.get(`${API_BASE}/integrations/github/repos`, async () => {
-        const user = owner.current;
-        if (user === 'user-b') await bReady; // B's response is still in flight
-        return HttpResponse.json({ repos: reposOf(user) });
-      }),
-      http.get(`${API_BASE}/folders`, () =>
-        HttpResponse.json({
-          folders: [
-            { id: `${owner.current}-folder`, name: `${owner.current} folder`, github_repo: null },
-          ],
-        }),
-      ),
-    );
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
-    );
-    const { result, rerender } = renderHook(
-      ({ userId }: { userId: string | null }) => useGithubRepos(true, userId),
-      { wrapper, initialProps: { userId: 'user-a' as string | null } },
-    );
-    await waitFor(() =>
-      expect(result.current.repos.map((r) => r.canonical_ref)).toEqual(['gh:a-org/a-secret']),
-    );
-    await waitFor(() => expect(result.current.folders.map((f) => f.id)).toEqual(['user-a-folder']));
-
-    // Signed out: nothing of A's is shown, and nothing is fetched.
-    clearCaptures();
-    rerender({ userId: null });
-    expect(result.current.repos).toEqual([]);
-    expect(result.current.folders).toEqual([]);
-    expect(requests('GET', '/integrations/github/repos')).toHaveLength(0);
-
-    // B signs in: while B's list loads, A's cached repos and folders never render.
-    owner.current = 'user-b';
-    rerender({ userId: 'user-b' });
-    expect(result.current.repos).toEqual([]);
-    expect(result.current.loading).toBe(true);
-    await waitFor(() => expect(result.current.folders.map((f) => f.id)).toEqual(['user-b-folder']));
-    expect(result.current.repos).toEqual([]);
-    releaseB();
-    await waitFor(() =>
-      expect(result.current.repos.map((r) => r.canonical_ref)).toEqual(['gh:b-org/b-app']),
-    );
-  });
-
-  it('shows the section in the Rose Desktop list too', async () => {
-    const folders = mockProjectsApi([roseFolder()]);
-    githubReposBackend(folders);
-    renderWithProviders(<Integrations />);
-    const desktop = await screen.findByTestId('rose-desktop-integrations');
-    const section = await within(desktop).findByRole('region', { name: 'GitHub Repos' });
-    expect(await within(section).findByText('rose-ai-labs/rose')).toBeVisible();
   });
 });

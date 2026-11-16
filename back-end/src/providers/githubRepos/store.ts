@@ -7,6 +7,7 @@
  *              + GithubRepoConnection{canonicalRef, repo details, connectedRoseProjectRef}
  *   disconnect ─► connection row deleted, Integration kept as NOT_CONNECTED
  *                 (tombstone: the legacy project import never re-adds it)
+ *   project deleted ─► the same for every connection linked to it
  *
  * Clone permission is still the GithubRepoAccess grant (checkGithubRepoAccess);
  * a connection is what makes a granted repo part of the user's inventory and
@@ -18,6 +19,7 @@
  */
 import { IntegrationStatus, IntegrationType, type Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
+import { createLogger } from '../logger';
 import {
   GITHUB_REPO_INTEGRATION_NAME,
   githubRepoIdentity,
@@ -26,6 +28,8 @@ import {
 } from './refs';
 
 export const GITHUB_REPO_LIST_LIMIT = 200;
+
+const log = createLogger('GithubRepoStore');
 
 export type GithubRepoConnectionSource = 'connect' | 'legacy_project';
 
@@ -154,6 +158,34 @@ export async function disconnectGithubRepo(userId: string, canonicalRef: string)
     });
     return deleted.count > 0;
   });
+}
+
+/**
+ * Inside a project's delete transaction: disconnect every repo connected
+ * through it (a connected repo is a project; its connection would otherwise
+ * outlive it unlinked and get a new project on the next list).
+ */
+export async function disconnectProjectRepos(
+  tx: Prisma.TransactionClient,
+  projectId: string
+): Promise<number> {
+  const linked = await tx.githubRepoConnection.findMany({
+    where: { connectedRoseProjectRef: projectId },
+    select: { id: true, integrationId: true },
+  });
+  if (linked.length === 0) return 0;
+  await tx.githubRepoConnection.deleteMany({
+    where: { id: { in: linked.map((row) => row.id) } },
+  });
+  await tx.integration.updateMany({
+    where: { id: { in: linked.map((row) => row.integrationId) } },
+    data: { status: IntegrationStatus.NOT_CONNECTED, isActive: false },
+  });
+  log.info('GitHub repos disconnected with their deleted project', {
+    projectId,
+    connectionIds: linked.map((row) => row.id).join(','),
+  });
+  return linked.length;
 }
 
 export async function listGithubRepoConnections(

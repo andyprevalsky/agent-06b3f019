@@ -11,6 +11,8 @@
     "agent-init.mjs",
     "capture.mjs",
     "cli.mjs",
+    "github.mjs",
+    "import.mjs",
     "onboarding.mjs"
   ],
   "engines": {

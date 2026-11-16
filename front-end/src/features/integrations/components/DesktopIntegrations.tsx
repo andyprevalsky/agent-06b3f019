@@ -3,8 +3,9 @@
  *
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
- *     · Socials · File System · GitHub Repos (signed in; GithubReposSection: connect
- *     with an optional folder, disconnect) · Meeting note taker (Granola, Fireflies)
+ *     · Socials · File System · Projects (signed in; ProjectsSection: projects = repos,
+ *     import from your computer, connect a GitHub repo, settings under ⚙)
+ *     · Meeting note taker (Granola, Fireflies)
  *     · Other (Pebble Index 01, whose Connect opens its setup modal) · CLIs
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
@@ -38,7 +39,7 @@ import {
   useSyncRefresh,
 } from '../hooks/useSyncProgress';
 import DesktopComputeRow from './DesktopComputeRow';
-import GithubReposSection from './GithubReposSection';
+import ProjectsSection from './ProjectsSection';
 import SearchGroup from './IntegrationSearchGroup';
 import { type DesktopIntegrationsProps, desktopSectionViews } from './desktopSectionViews';
 import DesktopIntegrationRow, {
@@ -105,10 +106,8 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
         {sections.map(({ catalogKey, title, description, rows }) => (
           <Fragment key={title}>
             {catalogKey === 'meetingNotes' && props.isFullySignedIn && (
-              <SearchGroup catalogKey="githubRepos" search={props.search}>
-                <div className="my-3">
-                  <GithubReposSection github={props.github} />
-                </div>
+              <SearchGroup catalogKey="projects" search={props.search}>
+                <ProjectsSection projectSettings={props.projectSettings} />
               </SearchGroup>
             )}
             <Section

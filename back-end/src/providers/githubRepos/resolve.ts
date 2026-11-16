@@ -8,11 +8,23 @@
  * A ref the user has no connection for resolves to null: a foreign user's repo,
  * a disconnected repo and a missing one are indistinguishable.
  *
+ * A spawn's explicit project ref (resolveProjectRepoRef) selects EXACTLY that
+ * owned project: its workspace restores (checkout, env files, startup script)
+ * and its repo's connection applies when it has a GitHub repo; a project
+ * without one (imported by `rose push`) restores from its synced bundle. A
+ * project a team shares with the caller (projects/sharedProjects.ts) is
+ * selectable too: its code and settings restore, never the owner's env files
+ * or credentials. A GitHub repo with no connection yet is usable when the
+ * caller can reach it themselves (their own GitHub credential, a grant, or a
+ * public repo: checkGithubRepoAccess); otherwise the ref is refused.
+ *
  * Agent creation (resolveAgentRepoRef) precedence, highest first:
  *   explicit `github_repo_ref` (null = explicitly none) > trusted server repo URL >
  *   explicit project placement's repo > parent agent's ref > inherited project's repo.
  */
+import { checkGithubRepoAccess } from '../github';
 import { resolveSessionProject } from '../projects/session';
+import { findSharedProject } from '../projects/sharedProjects';
 import type { ProjectWorkspace } from '../projects/types';
 import {
   ROSE_PROJECT_REPO_PREFIX,
@@ -37,18 +49,72 @@ export class GithubRepoRefNotFoundError extends Error {
   }
 }
 
+/** The project id a ref names (`<uuid>` or `rose-project:<uuid>`), else null. */
+export function projectIdOfRepoRef(ref: string): string | null {
+  const value = ref.trim();
+  const projectId = value.startsWith(ROSE_PROJECT_REPO_PREFIX)
+    ? value.slice(ROSE_PROJECT_REPO_PREFIX.length)
+    : value;
+  return UUID.test(projectId) ? projectId : null;
+}
+
+/** Connection of the GitHub repo an owned project carries; imports a legacy connection once. */
+async function connectionOfProject(
+  userId: string,
+  project: { id: string; repoUrl: string | null }
+): Promise<GithubRepoConnectionRecord | null> {
+  const ref = canonicalGithubRepoRef(project.repoUrl);
+  if (ref === null) return null;
+  const connection = await findGithubRepoConnection(userId, ref);
+  if (connection !== null) return connection;
+  if ((await importLegacyProjectConnections(userId, [project.id])) === 0) return null;
+  return findGithubRepoConnection(userId, ref);
+}
+
 /** Connection of the repo a project (folder) carries; imports a legacy connection once. */
 export async function projectRepoConnection(
   userId: string,
   projectId: string
 ): Promise<GithubRepoConnectionRecord | null> {
   const project = await findOwnedProjectRepo(userId, projectId);
-  const ref = canonicalGithubRepoRef(project?.repoUrl);
-  if (ref === null) return null;
-  const connection = await findGithubRepoConnection(userId, ref);
-  if (connection !== null) return connection;
-  if ((await importLegacyProjectConnections(userId, [projectId])) === 0) return null;
-  return findGithubRepoConnection(userId, ref);
+  return project === null ? null : connectionOfProject(userId, project);
+}
+
+export interface ProjectRepoRefSelection {
+  projectId: string;
+  /** The project's GitHub repo connection; null when the project has no GitHub repo. */
+  connection: GithubRepoConnectionRecord | null;
+}
+
+/**
+ * A ref naming a project selects exactly that project, owned or shared with
+ * the caller (null: not a project ref). Its GitHub repo, when it has one, needs
+ * the caller's connection or the caller's own access to it (no connection is
+ * then returned: the session clones with that access); a project without a
+ * GitHub repo needs neither. Otherwise, and for a missing or foreign project,
+ * GithubRepoRefNotFoundError.
+ */
+export async function resolveProjectRepoRef(
+  userId: string,
+  ref: string
+): Promise<ProjectRepoRefSelection | null> {
+  const projectId = projectIdOfRepoRef(ref);
+  if (projectId === null) return null;
+  const owned = await findOwnedProjectRepo(userId, projectId);
+  const project = owned ?? (await findSharedProject(userId, projectId));
+  if (project === null) throw new GithubRepoRefNotFoundError(ref);
+  const canonicalRef = canonicalGithubRepoRef(project.repoUrl);
+  if (canonicalRef === null) return { projectId: project.id, connection: null };
+  const connection =
+    owned !== null
+      ? await connectionOfProject(userId, owned)
+      : await findGithubRepoConnection(userId, canonicalRef);
+  if (connection !== null) return { projectId: project.id, connection };
+  // No connection yet: the caller's own access (their GitHub credential, a grant, a public repo).
+  const access = await checkGithubRepoAccess(userId, project.repoUrl!);
+  if (!access.allowed) throw new GithubRepoRefNotFoundError(ref);
+  const imported = owned !== null ? await connectionOfProject(userId, owned) : null;
+  return { projectId: project.id, connection: imported };
 }
 
 /** Any ref spelling (canonical, URL, legacy project id) → the user's connection, or null. */
@@ -57,10 +123,8 @@ export async function resolveGithubRepoRef(
   ref: string
 ): Promise<GithubRepoConnectionRecord | null> {
   const value = ref.trim();
-  const projectId = value.startsWith(ROSE_PROJECT_REPO_PREFIX)
-    ? value.slice(ROSE_PROJECT_REPO_PREFIX.length)
-    : value;
-  if (UUID.test(projectId)) return projectRepoConnection(userId, projectId);
+  const projectId = projectIdOfRepoRef(value);
+  if (projectId !== null) return projectRepoConnection(userId, projectId);
   const identity = githubRepoIdentity(value);
   if (identity === null) return null;
   const connection = await findGithubRepoConnection(userId, identity.canonicalRef);
@@ -108,6 +172,13 @@ export async function resolveAgentRepoRef(
 ): Promise<AgentRepoRefFields> {
   if (input.explicitRef === null) return {};
   if (input.explicitRef !== undefined) {
+    // A project ref is also the placement (agentProject.ts): the project restore owns the checkout.
+    const selected = await resolveProjectRepoRef(userId, input.explicitRef);
+    if (selected !== null) {
+      return selected.connection === null
+        ? {}
+        : { githubRepoRef: selected.connection.canonicalRef };
+    }
     const connection = await requireGithubRepoRef(userId, input.explicitRef);
     return { githubRepoRef: connection.canonicalRef, githubRepoUrl: connection.repoUrl };
   }
@@ -154,8 +225,9 @@ export interface CodeSessionRepoInput {
 }
 
 export interface CodeSessionRepoOverride {
-  repoUrl: string;
-  canonicalRef: string;
+  /** Null: an explicit project ref whose project has no GitHub repo (its workspace restores). */
+  repoUrl: string | null;
+  canonicalRef: string | null;
   /** True when the session's own project restore does not apply (different repo or none). */
   skipProject: boolean;
   /** Folder (Rose project) the repo is connected through; its settings restore instead. */
@@ -188,6 +260,20 @@ async function overrideFor(
   };
 }
 
+/** An explicit project ref: exactly that project restores, with its repo when it has one. */
+function projectRefOverride(
+  selected: ProjectRepoRefSelection,
+  sessionProjectId: string | undefined
+): CodeSessionRepoOverride {
+  const skipProject = selected.projectId !== sessionProjectId;
+  return {
+    repoUrl: selected.connection?.repoUrl ?? null,
+    canonicalRef: selected.connection?.canonicalRef ?? null,
+    skipProject,
+    repoProjectId: skipProject ? selected.projectId : null,
+  };
+}
+
 /**
  * A code session's repo from canonical refs: an explicit spawn ref, or an
  * agent ref that differs from its project's repo (an override persisted at
@@ -196,7 +282,8 @@ async function overrideFor(
  * tree never falls back to a throwaway `agent-<id>` repo. Whenever the
  * session's own project is skipped, the folder the repo is connected through
  * (`repoProjectId`) restores instead, so its startup script, env files and
- * commands still apply. Legacy `github_repo_url` keeps its old rule when there
+ * commands still apply. An explicit project ref restores exactly that project.
+ * Legacy `github_repo_url` keeps its old rule when there
  * is a project (the project restore ignores it), so the agent prompts stay true.
  * Null: no override (legacy resolution runs unchanged).
  */
@@ -212,6 +299,10 @@ export async function resolveCodeSessionRepoOverride(
   if (userId === undefined || userId === '') {
     if (ref !== '') throw new GithubRepoRefNotFoundError(ref);
     return null;
+  }
+  if (ref !== '') {
+    const selected = await resolveProjectRepoRef(userId, ref);
+    if (selected !== null) return projectRefOverride(selected, input.projectId);
   }
   const project = noProject ? null : await findOwnedProjectRepo(userId, input.projectId!);
   const projectRepoUrl = project?.repoUrl ?? null;
@@ -239,7 +330,8 @@ export async function resolveCodeSessionRepoOverride(
 /**
  * The project workspace a code session restores plus its canonical-ref repo
  * override. When the override replaces the session's project, the repo's own
- * connected folder restores (null when the repo has none).
+ * connected folder restores (null when the repo has none); an explicit project
+ * ref restores exactly that project.
  */
 export async function resolveCodeSessionWorkspace(
   userId: string | undefined,
@@ -249,5 +341,5 @@ export async function resolveCodeSessionWorkspace(
   const projectId =
     override?.skipProject === true ? (override.repoProjectId ?? undefined) : input.projectId;
   const projectWorkspace = await resolveSessionProject(userId, projectId);
-  return { projectWorkspace, repoOverrideUrl: override?.repoUrl };
+  return { projectWorkspace, repoOverrideUrl: override?.repoUrl ?? undefined };
 }

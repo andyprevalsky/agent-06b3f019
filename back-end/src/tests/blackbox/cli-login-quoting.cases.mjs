@@ -54,10 +54,10 @@ export async function verifyAgentInitShellWords(modulePath, hostileCli = true) {
       "--json",
     ]);
     execute(
-      commandBetween("5. Upload through rose-sync.\n   Run: ", " [--include"),
+      commandBetween("5. Upload.\n   Run: ", " [--branch"),
       ["push", "--project", name],
     );
-    execute(commandBetween("7. Verify.\n   Run: ", "\n   Every env file"), [
+    execute(commandBetween("6. Verify.\n   Run: ", "\n   Every env file"), [
       "agent-init",
       "status",
       "--project",
@@ -75,12 +75,12 @@ export async function verifyAgentInitShellWords(modulePath, hostileCli = true) {
       cli,
     });
     const boundStart =
-      boundGuide.indexOf("5. Upload through rose-sync.\n   Run: ") +
-      "5. Upload through rose-sync.\n   Run: ".length;
+      boundGuide.indexOf("5. Upload.\n   Run: ") +
+      "5. Upload.\n   Run: ".length;
     execute(
       boundGuide.slice(
         boundStart,
-        boundGuide.indexOf(" [--include", boundStart),
+        boundGuide.indexOf(" [--branch", boundStart),
       ),
       ["push", "--project", untrustedId],
     );

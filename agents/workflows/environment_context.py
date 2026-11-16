@@ -10,10 +10,10 @@
            {now, tz, agents} (deterministic workflow state) ──▶ call_llm_activity
            renders <environment-status> after the cached prefix (never persisted)
 
-A root also renders its user's connected GitHub repos: one live inventory
-activity (GET /api/integrations/github/repos) per sync, nothing cached; a
-failed fetch keeps the listing of the latest environment row, and a list that
-empties after it was shown is retracted explicitly.
+A root also renders its user's projects (``# Available projects``): one live
+activity (GET /api/projects) per sync, nothing cached; a failed fetch keeps the
+listing of the latest environment row, and a list that empties after it was
+shown is retracted explicitly.
 
 Sources (no other workflow I/O): ``_background_tasks`` records (path, type,
 started_at, child ids), ``_environment_activity`` (latest IN_PROGRESS title a
@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 from temporalio import workflow
 
 from domains.agent_messaging.handler import resolve_own_task_path
-from domains.github_repo_inventory.handler import fetch_root_github_repos
+from domains.github_repo_inventory.handler import fetch_root_projects
 from helpers.environment_context import (
     environment_context_metadata,
     latest_environment_block_text,
@@ -114,7 +114,7 @@ class EnvironmentContextMixin:
             own_path=own_path,
             is_root=is_root,
             agents=self._environment_running_agents(),
-            github_repos=await fetch_root_github_repos(self) if is_root else [],
+            projects=await fetch_root_projects(self) if is_root else [],
             previous_block=latest,
         )
         if latest == text:

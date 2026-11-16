@@ -1,6 +1,11 @@
 /**
- * Blackbox tests for Rose Desktop projects in the left bar (UI ledger rows
+ * Blackbox tests for Rose Desktop folders in the left bar (UI ledger rows
  * 19/30/57/60) and the agent right-click menu (row 37), flag on.
+ *
+ * Folders only organize agents (Andy, 2026-11-15): no settings ⚙, no "Folder
+ * settings" menu item and no repo avatar in the bar, and a repository connected
+ * or imported in Integrations (isFolder: false) is not a folder. Project
+ * settings are covered by project-settings.blackbox.tsx (Integrations ⚙).
  *
  * Projects API = backend contract feat/rose-user-ui @ ea032a02a (MSW in-memory
  * mock in rose-sidebar.fixtures.tsx, strict like the server):
@@ -72,11 +77,6 @@ function requests(method: string, path: string) {
   );
 }
 
-async function openSettings(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-  return screen.getByTestId('rose-project-settings');
-}
-
 describe('Rose projects in the left bar', () => {
   let api: ReturnType<typeof mockProjectsApi>;
   beforeEach(() => {
@@ -96,6 +96,31 @@ describe('Rose projects in the left bar', () => {
     expect(
       within(screen.getByTestId('rose-group-home')).getByTestId('rose-agent-row-a-home'),
     ).toBeInTheDocument();
+  });
+
+  it('a repository from Integrations (isFolder: false) is not a folder; its agents show under Home', async () => {
+    api = mockProjectsApi([
+      makeProject(),
+      makeProject({ id: 'p-repo', name: 'marketing-site', isFolder: false }),
+    ]);
+    renderBar({
+      agents: [
+        makeAgent({ agent_id: 'a-rose', goal: 'Rose UI polish', project_id: 'p-rose' }),
+        makeAgent({ agent_id: 'a-repo', goal: 'Pricing copy', project_id: 'p-repo' }),
+      ],
+      user: signedInUser(),
+    });
+    const rose = await screen.findByTestId('rose-project-row-p-rose');
+    expect(screen.queryByTestId('rose-project-row-p-repo')).toBeNull();
+    expect(screen.queryByText('marketing-site')).toBeNull();
+    expect(
+      within(screen.getByTestId('rose-group-home')).getByTestId('rose-agent-row-a-repo'),
+    ).toBeInTheDocument();
+    // The folder row itself: plain folder icon, + and new subfolder, no settings.
+    expect(within(rose).queryByRole('button', { name: /settings/i })).toBeNull();
+    expect(rose.querySelector('img')).toBeNull();
+    expect(rose.querySelector('svg.lucide-folder')).not.toBeNull();
+    expect(screen.queryByTestId('rose-project-settings')).toBeNull();
   });
 
   it('+ New project heads the list, above every project; projects come before Home agents', async () => {
@@ -169,18 +194,14 @@ describe('Rose projects in the left bar', () => {
     expect(await screen.findByTestId('rose-project-row-p-2')).toHaveTextContent('Rose 2');
   });
 
-  it('right-click a folder: Rename folder (inline, PATCH /folders), Folder settings, Delete folder (red)', async () => {
+  it('right-click a folder: exactly Rename folder (inline, PATCH /folders) | Delete folder (red)', async () => {
     const user = userEvent.setup();
     renderBar();
     const row = await screen.findByTestId('rose-project-row-p-rose');
     const menu = await openContextMenu(row, 'rose-project-menu');
     const items = within(menu).getAllByRole('menuitem');
-    expect(items.map((i) => i.textContent)).toEqual([
-      'Rename folder',
-      'Folder settings',
-      'Delete folder',
-    ]);
-    expect(items[2].className).toContain('text-[#e5484d]');
+    expect(items.map((i) => i.textContent)).toEqual(['Rename folder', 'Delete folder']);
+    expect(items[1].className).toContain('text-[#e5484d]');
 
     await user.click(items[0]);
     const rename = await screen.findByRole('textbox', { name: 'Rename Rose' });
@@ -241,246 +262,6 @@ describe('Rose projects in the left bar', () => {
     renderBar({ roseActions: { onCreateAgentInProject } });
     await user.click(await findCreateAgentButton('p-rose'));
     expect(onCreateAgentInProject).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-rose' }));
-  });
-
-  it('⚙ opens project settings beside the bar with every section; ⚙ again closes it', async () => {
-    const user = userEvent.setup();
-    renderBar();
-    const panel = await openSettings(user);
-    expect(panel.style.left).toBe('236px');
-    expect(panel.className).toContain('dark:bg-[#262624]');
-    expect(within(panel).getByRole('heading', { level: 2 })).toHaveTextContent('Rose');
-
-    const repo = within(panel).getByRole('region', { name: 'GitHub repo' });
-    // Read-only: the folder's connected repo; connect / change happens on Integrations.
-    expect(await within(repo).findByText('gh:rose-ai-labs/rose')).toBeInTheDocument();
-    expect(within(repo).queryByRole('textbox', { name: 'Repository URL' })).toBeNull();
-    expect(within(repo).queryByRole('button', { name: 'Change' })).toBeNull();
-    expect(within(repo).getByRole('textbox', { name: 'Default branch' })).toHaveValue('main');
-    expect(within(repo).getByTestId('project-github-status')).toHaveTextContent('Connected');
-    expect(within(repo).getByTestId('project-last-synced').querySelector('time')).toHaveAttribute(
-      'dateTime',
-      '2026-10-20T17:05:00.000Z',
-    );
-
-    expect(within(panel).getByRole('textbox', { name: 'Startup script' })).toHaveValue(
-      'sudo service postgresql start || true',
-    );
-    expect(
-      within(panel).getByRole('spinbutton', { name: 'Startup timeout (seconds)' }),
-    ).toHaveValue(120);
-
-    const env = within(panel).getByRole('region', { name: 'Environment files' });
-    expect(env).toHaveTextContent('Environment files · 2');
-    expect(await within(env).findAllByTestId('project-env-file')).toHaveLength(2);
-    expect(within(env).getByRole('button', { name: '+ Add a file' })).toBeInTheDocument();
-
-    const lifecycle = within(panel).getByRole('region', { name: 'Lifecycle' });
-    expect(within(lifecycle).getByRole('button', { name: 'Auto-wake' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
-    expect(lifecycle).toHaveTextContent('Startup script');
-    expect(lifecycle).toHaveTextContent('set');
-    // No checkout-import/setup-helper block (Andy, 2026-10-26: "wtf is this part?").
-    expect(within(panel).queryByRole('region', { name: 'Development environment' })).toBeNull();
-    expect(within(panel).queryByRole('button', { name: 'Download setup helper' })).toBeNull();
-    expect(panel).not.toHaveTextContent(
-      /Import your working checkout|Not imported yet|Checkout imported/,
-    );
-
-    // Working in the panel collapses the bar (pointer left it); hover back to reach ⚙.
-    expandBar();
-    await user.click(screen.getByRole('button', { name: 'Rose folder settings' }));
-    expect(screen.queryByTestId('rose-project-settings')).toBeNull();
-  });
-
-  it('githubConnected false reads "Not connected" (never an error); never synced reads Never', async () => {
-    const user = userEvent.setup();
-    api = mockProjectsApi([
-      makeProject({
-        repoUrl: null,
-        githubConnected: false,
-        startupScript: null,
-        sync: { revision: 0, lastSyncedAt: null },
-      }),
-    ]);
-    renderBar();
-    const panel = await openSettings(user);
-    const repo = within(panel).getByRole('region', { name: 'GitHub repo' });
-    expect(within(repo).getByTestId('project-github-status')).toHaveTextContent('Not connected');
-    expect(within(repo).getByTestId('project-last-synced')).toHaveTextContent('Never');
-    expect(repo).toHaveTextContent('No repository');
-    expect(within(panel).queryByRole('alert')).toBeNull();
-    expect(within(panel).getByRole('textbox', { name: 'Startup script' })).toHaveValue('');
-    expect(within(panel).getByRole('region', { name: 'Lifecycle' })).toHaveTextContent('not set');
-  });
-
-  it('Environment files load from GET …/env-files; rows expand to variable NAMES only', async () => {
-    // The fixture answers with the backend's { envFiles, query } envelope
-    // (envFileService.listEnvFiles); reading it as a bare array crashed the
-    // whole app on opening project settings (FE-13 visual pass, :3902).
-    const user = userEvent.setup();
-    renderBar();
-    const panel = await openSettings(user);
-    const env = within(panel).getByRole('region', { name: 'Environment files' });
-    const rows = await within(env).findAllByTestId('project-env-file');
-    expect(requests('GET', '/projects/p-rose/env-files')).toHaveLength(1);
-    expect(rows.map((r) => r.textContent)).toEqual([
-      expect.stringContaining('agents/.env'),
-      expect.stringContaining('back-end/.env'),
-    ]);
-    expect(rows[0]).toHaveTextContent('Agent worker secrets');
-    expect(within(env).queryByText('BACKEND_API_KEY')).toBeNull();
-
-    await user.click(within(env).getByRole('button', { name: 'Expand agents/.env' }));
-    const vars = within(env).getByRole('list', { name: 'Variables in agents/.env' });
-    expect(
-      within(vars)
-        .getAllByRole('listitem')
-        .map((li) => li.textContent),
-    ).toEqual(['BACKEND_API_KEY', 'FLY_API_TOKEN · Fly deploys']);
-    // Values are never returned, so no value field is rendered.
-    expect(within(env).queryByRole('textbox', { name: /value/i })).toBeNull();
-
-    // Search matches path, description or variable name.
-    const search = within(env).getByRole('searchbox', { name: 'Search environment files' });
-    await user.type(search, 'render_api');
-    expect(within(env).getAllByTestId('project-env-file')).toHaveLength(1);
-    expect(within(env).getByTestId('project-env-file')).toHaveTextContent('back-end/.env');
-    await user.clear(search);
-    await user.type(search, 'backend secrets');
-    expect(within(env).getAllByTestId('project-env-file')).toHaveLength(1);
-  });
-
-  it('trash DELETEs the env file; the header count follows envFileCount', async () => {
-    const user = userEvent.setup();
-    renderBar();
-    const panel = await openSettings(user);
-    const env = within(panel).getByRole('region', { name: 'Environment files' });
-    await within(env).findAllByTestId('project-env-file');
-
-    await user.click(within(env).getByRole('button', { name: 'Remove back-end/.env' }));
-    await waitFor(() =>
-      expect(requests('DELETE', '/projects/p-rose/env-files/ef-backend')).toHaveLength(1),
-    );
-    await waitFor(() => expect(within(env).getAllByTestId('project-env-file')).toHaveLength(1));
-    expect(api.envFiles.get('p-rose')?.map((f) => f.path)).toEqual(['agents/.env']);
-    await waitFor(() => expect(env).toHaveTextContent('Environment files · 1'));
-    expect(requests('PUT', '/projects/p-rose')).toHaveLength(0);
-  });
-
-  it('+ Add a file POSTs { path, description?, content? } (dotenv paste) and lists its names', async () => {
-    const user = userEvent.setup();
-    renderBar();
-    const panel = await openSettings(user);
-    const env = within(panel).getByRole('region', { name: 'Environment files' });
-    await within(env).findAllByTestId('project-env-file');
-
-    await user.click(within(env).getByRole('button', { name: '+ Add a file' }));
-    const form = within(env).getByRole('form', { name: 'Add an environment file' });
-    const add = within(form).getByRole('button', { name: 'Add file' });
-    expect(add).toBeDisabled();
-    await user.type(within(form).getByRole('textbox', { name: 'File path' }), 'front-end/.env');
-    await user.type(within(form).getByRole('textbox', { name: 'File description' }), 'Vite');
-    await user.type(
-      within(form).getByRole('textbox', { name: 'Paste .env contents' }),
-      'VITE_API_URL=http://localhost:3001{Enter}export VITE_FLAG=1',
-    );
-    await user.click(add);
-
-    await waitFor(() => expect(requests('POST', '/projects/p-rose/env-files')).toHaveLength(1));
-    expect(requests('POST', '/projects/p-rose/env-files')[0].body).toEqual({
-      path: 'front-end/.env',
-      description: 'Vite',
-      content: 'VITE_API_URL=http://localhost:3001\nexport VITE_FLAG=1',
-    });
-    expect(within(env).queryByRole('form', { name: 'Add an environment file' })).toBeNull();
-    await waitFor(() => expect(within(env).getAllByTestId('project-env-file')).toHaveLength(3));
-    await waitFor(() => expect(env).toHaveTextContent('Environment files · 3'));
-    await user.click(within(env).getByRole('button', { name: 'Expand front-end/.env' }));
-    const vars = within(env).getByRole('list', { name: 'Variables in front-end/.env' });
-    expect(
-      within(vars)
-        .getAllByRole('listitem')
-        .map((li) => li.textContent),
-    ).toEqual(['VITE_API_URL', 'VITE_FLAG']);
-    // The pasted values never come back.
-    expect(env).not.toHaveTextContent('http://localhost:3001');
-
-    // Path only: optional fields are omitted, not sent empty.
-    await user.click(within(env).getByRole('button', { name: '+ Add a file' }));
-    const form2 = within(env).getByRole('form', { name: 'Add an environment file' });
-    await user.type(within(form2).getByRole('textbox', { name: 'File path' }), 'mac-app/.env');
-    await user.click(within(form2).getByRole('button', { name: 'Add file' }));
-    await waitFor(() => expect(requests('POST', '/projects/p-rose/env-files')).toHaveLength(2));
-    expect(requests('POST', '/projects/p-rose/env-files')[1].body).toEqual({
-      path: 'mac-app/.env',
-    });
-  });
-
-  it('Save PUTs only the edited subset with contract field names', async () => {
-    const user = userEvent.setup();
-    renderBar();
-    const panel = await openSettings(user);
-    const save = within(panel).getByRole('button', { name: 'Save' });
-    expect(save).toBeDisabled();
-
-    const timeout = within(panel).getByRole('spinbutton', { name: 'Startup timeout (seconds)' });
-    await user.clear(timeout);
-    await user.type(timeout, '300');
-    await user.click(within(panel).getByRole('button', { name: 'Auto-wake' }));
-    const branch = within(panel).getByRole('textbox', { name: 'Default branch' });
-    await user.clear(branch);
-    await user.type(branch, 'develop');
-
-    await user.click(save);
-    await waitFor(() => expect(requests('PUT', '/projects/p-rose')).toHaveLength(1));
-    // Never a repoUrl: the repo is connected on the Integrations panel.
-    expect(requests('PUT', '/projects/p-rose')[0].body).toEqual({
-      defaultBranch: 'develop',
-      startupTimeoutS: 300,
-      lifecycle: { autoWake: false },
-    });
-    expect(requests('PATCH', '/projects/p-rose')).toHaveLength(0);
-    await waitFor(() => expect(save).toBeDisabled());
-    expect(within(panel).queryByRole('alert')).toBeNull();
-    expect(api.projects[0]).toMatchObject({
-      startupTimeoutS: 300,
-      lifecycle: { autoWake: false },
-    });
-  });
-
-  it("clearing the startup script sends startupScript '' (clears it)", async () => {
-    const user = userEvent.setup();
-    renderBar();
-    const panel = await openSettings(user);
-    await user.clear(within(panel).getByRole('textbox', { name: 'Startup script' }));
-    await user.click(within(panel).getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(requests('PUT', '/projects/p-rose')).toHaveLength(1));
-    expect(requests('PUT', '/projects/p-rose')[0].body).toEqual({ startupScript: '' });
-    await waitFor(() => expect(api.projects[0].startupScript).toBeNull());
-    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Save' })).toBeDisabled());
-    expect(within(panel).getByRole('region', { name: 'Lifecycle' })).toHaveTextContent('not set');
-  });
-
-  it('a startup timeout outside 1..3600 cannot be saved', async () => {
-    const user = userEvent.setup();
-    renderBar();
-    const panel = await openSettings(user);
-    const timeout = within(panel).getByRole('spinbutton', { name: 'Startup timeout (seconds)' });
-    for (const bad of ['0', '3601']) {
-      await user.clear(timeout);
-      await user.type(timeout, bad);
-      expect(within(panel).getByRole('button', { name: 'Save' })).toBeDisabled();
-      expect(within(panel).getByTestId('project-timeout-error')).toHaveTextContent(
-        'Use 1–3600 seconds',
-      );
-    }
-    await user.clear(timeout);
-    await user.type(timeout, '3600');
-    expect(within(panel).queryByTestId('project-timeout-error')).toBeNull();
-    expect(within(panel).getByRole('button', { name: 'Save' })).toBeEnabled();
   });
 
   it('flag off: the stock bar never calls the Projects API', async () => {

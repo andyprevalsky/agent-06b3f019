@@ -339,7 +339,7 @@ async function createClaudeCodeSessionUnlocked(
   // so GitHub links each commit and Vercel deploys it (codeAgentGitIdentity.ts).
   Object.assign(
     envs,
-    await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, '')
+    await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, '', userId)
   );
 
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'claude');
@@ -604,7 +604,7 @@ export async function createCodexCodeSession(
   // so GitHub links each commit and Vercel deploys it (codeAgentGitIdentity.ts).
   Object.assign(
     envs,
-    await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, 'Codex')
+    await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, 'Codex', userId)
   );
 
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');

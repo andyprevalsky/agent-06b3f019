@@ -79,6 +79,7 @@ import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
 import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
 import projectsRouter from './domains/projects/routes';
+import githubCredentialRouter from './domains/projects/routes.githubCredential';
 import foldersRouter from './domains/projects/routes.topFolders';
 import teamsRouter from './domains/teams/routes';
 import * as teamsService from './domains/teams/service';
@@ -566,6 +567,7 @@ app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB f
 app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
 app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
+app.use('/api/projects/github-credential', githubCredentialRouter); // The caller's own GitHub credential
 app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
 app.use('/api/folders', foldersRouter); // Folders: user-facing alias of Projects (no repo)
 app.use('/api/teams', teamsRouter);

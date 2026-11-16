@@ -1,12 +1,14 @@
 /**
  * GitHub repo integration ("github_repo"): connect / disconnect / inventory /
  * resolve, built on the project repo logic it replaces (providers/githubRepos,
- * checkGithubRepoAccess). Folders no longer carry the connection; a repo
- * connected through one records it as connected_rose_project_ref.
+ * checkGithubRepoAccess). A connected repo IS a project: its project is
+ * recorded as connected_rose_project_ref.
  *
  *   connect(repo_url, connected_rose_project_ref?, replace?)
  *     ─► checkGithubRepoAccess (grant, or public auto-grant)   403 / 429 otherwise
  *     ─► owned project check                                    404 / 409
+ *     ─► no project given: the one it is already linked to, the user's project
+ *        with the same repo, or a new one (providers/githubRepos/repoProjects.ts)
  *     ─► Integration + GithubRepoConnection (one transaction)
  *     ─► repo-less project now points at the repo (legacy code-session restore)
  *
@@ -17,6 +19,7 @@ import { checkGithubRepoAccess } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
 import { githubRepoIdentity, sameGithubRepo } from '../../providers/githubRepos/refs';
 import { resolveGithubRepoRef } from '../../providers/githubRepos/resolve';
+import { findOrCreateRepoProject } from '../../providers/githubRepos/repoProjects';
 import {
   connectGithubRepo as writeConnection,
   disconnectGithubRepo as removeConnection,
@@ -168,7 +171,10 @@ export async function connectGithubRepo(
   }
   const connection = await writeConnection({
     ...write,
-    connectedRoseProjectRef: project?.id ?? null,
+    connectedRoseProjectRef:
+      project?.id ??
+      existing?.connectedRoseProjectRef ??
+      (await findOrCreateRepoProject(userId, identity, write.defaultBranch)),
   });
   if (project !== null && project.repoUrl === null) {
     await setProjectRepoUrlIfEmpty(userId, project.id, identity.repoUrl);
