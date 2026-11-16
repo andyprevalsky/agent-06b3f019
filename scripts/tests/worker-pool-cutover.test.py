@@ -6,6 +6,7 @@ import importlib.util
 import json
 import io
 import runpy
+import subprocess
 import threading
 from types import SimpleNamespace
 import sys
@@ -227,6 +228,51 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         with patch.object(sys, "stderr", stderr):
             self.assertEqual(cutover.for_each_machine(operation, [{"id": "ok"}]), ["ok"])
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_failed_queue_command_forwards_its_stderr_reason(self):
+        """2026-11-16 run 43785616839: `assert` exited 1 and the captured reason never reached the log."""
+        reason = "PrismaClientKnownRequestError: Raw query failed. Code: `57P01`"
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[4] == "assert":
+                return subprocess.CompletedProcess(command, 1, "", reason + "\n")
+            return subprocess.CompletedProcess(command, 0, '{"jobId": "job"}\n', "noise\n")
+
+        env = {"WORKER_DEPLOYMENT_JOB_ID": "job", "WORKER_DEPLOYMENT_OWNER_ID": "owner"}
+        stderr = io.StringIO()
+        with (
+            patch.dict(cutover.os.environ, env),
+            patch.object(cutover.subprocess, "run", run),
+            patch.object(sys, "stderr", stderr),
+        ):
+            ledger = cutover.Ledger()
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                ledger.assert_owned()
+            self.assertIn("Deployment queue assert exited 1", stderr.getvalue())
+            self.assertIn(reason, stderr.getvalue())
+            self.assertEqual(raised.exception.stderr, reason + "\n")
+            # Negative control: a successful command stays silent and parses stdout.
+            stderr.truncate(0)
+            stderr.seek(0)
+            self.assertEqual(ledger.read(), {"jobId": "job"})
+            self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual([command[4] for command in calls], ["assert", "read"])
+
+        def timeout(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, 60, output=b"", stderr=reason.encode())
+
+        stderr = io.StringIO()
+        with (
+            patch.dict(cutover.os.environ, env),
+            patch.object(cutover.subprocess, "run", timeout),
+            patch.object(sys, "stderr", stderr),
+            self.assertRaises(subprocess.TimeoutExpired),
+        ):
+            cutover.Ledger().assert_owned()
+        self.assertIn("Deployment queue assert timed out", stderr.getvalue())
+        self.assertIn(reason, stderr.getvalue())
 
     def run_job(self, ledger, native):
         with (
