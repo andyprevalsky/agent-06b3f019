@@ -1,0 +1,9 @@
+{
+  "active_tip_not_reused_from_original_bundle": true,
+  "all_exact_tips_match": true,
+  "branch_entries": 72,
+  "current_active_branch": "fix/outbound-phone-language",
+  "current_active_head": "0e65e3c0747c71c6dc742994285771eda1462f45",
+  "entries": 73,
+  "stash_entries": 1
+}

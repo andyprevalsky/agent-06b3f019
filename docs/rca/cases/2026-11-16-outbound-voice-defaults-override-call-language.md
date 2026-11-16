@@ -21,8 +21,10 @@ tags:
 sources:
   - agent 01dbedbb-4e9c-40ab-b02c-54189e732055
   - commit d40e1e11692b84a6859aee1f4f80858b73b1b553
+  - PR #2403
+  - agent 9ad789f4-a710-4f48-9da5-0619992e3b65
 repro: back-end/src/tests/blackbox/vapi.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -77,9 +79,21 @@ using the existing model context. No language classifier, text extraction, promp
 rewrite, model upgrade, or fallback is needed. The next broader change (replacing
 telephony orchestration) would not address this owned configuration conflict.
 
+Corroborating incident: agent `9ad789f4-a710-4f48-9da5-0619992e3b65`, calls
+`01a1e4fe-55bf-7001-85fe-ef4a28328f05` and
+`01a1e4ff-d20f-7001-8632-51624b254170`, independently GET-verified HTTP 200,
+carried intact Spanish briefs but the same English firstMessage/closing, Flux/en
+and custom voice without an explicit multilingual model. Both played only the
+English opener and ended `customer-ended-call` after 3.182/2.564 seconds. There
+was no user speech or endCall tool event. This is the same configuration defect;
+why the callee hung up and whether an identity check would otherwise succeed
+remain unproven. The other bug thread reconciled with this existing repair,
+without a duplicate code change or case.
+
 ## Solution
 
-Implemented and validated locally, pending deployment: generate the opener from model messages;
+Shipped in [PR #2403](https://github.com/Rose-Ai-Labs/rose/pull/2403), with
+production deployment and endpoint/semantic verification recorded in its closeout: generate the opener from model messages;
 use Deepgram `nova-3` with `multi`; explicitly select ElevenLabs
 `eleven_turbo_v2_5` while preserving the voice ID. Keep IVR/callee-first mode,
 DTMF, wait-for-human, output schema, identity and timeouts.
@@ -107,10 +121,14 @@ in that harness. Fresh independent reviewer ph7ek42nem6vrrt52saps01mks8janf4 ind
 identified the same first bad boundary and approved the deterministic regression
 and its flakiness controls, without code-level blocking findings.
 
-No fan-in, polling, extra model turn, or per-call database access is added by config
-construction at 10,000 concurrent agents. A generated opener does require provider
-LLM generation before initial speech. Nova endpointing differs from Flux and live
-turn timing needs provider verification. Controlled live provider proof uses the exact third provider system message and
+No fan-in, polling or per-call database access is added by config
+construction at 10,000 concurrent agents. Generating the opener adds an initial
+provider model turn, usage and latency before speech. Nova endpointing differs from Flux; controlled Spanish input was recognized
+correctly and selected deployment gates covered the changed configuration.
+The separate parked-call hold listener was not exercised in this incident or
+these replays; this record makes no claim about multilingual hold detection.
+
+Controlled live provider proof uses the exact third provider system message and
 custom voice, with WebSocket audio transport instead of dialing a telephone.
 Original-config replay `01a1e4e5-99b0-7001-8141-baf73346d3e8` opened in English
 and recognized the supplied Spanish decline only as “No” (confidence 0.3313).
@@ -121,11 +139,32 @@ English versus fixed Spanish, including “Hola, buenas. ¿Tienen mesa para dos
 personas para mañana martes a las siete de la tarde?” and Spanish follow-up.
 A second fixed replay also spoke its goodbye entirely in Spanish; its recorded
 audio independently transcribes “Muchas gracias por su tiempo. Que tenga un buen
-día. Adiós.” No fixed English closing was spoken. The client ended these bounded
-replays, so silent endCall execution itself is covered at configuration level,
-not established by these live sessions. Native Castilian accent, arbitrary
+día. Adiós.” No fixed English closing was spoken.
+
+The client ended these exact-prompt replays. A separate reduced-prompt
+isolation with identical provider configuration, call
+`01a1e4e8-f7a8-799b-b675-2380a5f8bd6d`, executed endCall successfully and ended
+`assistant-ended-call`, without an additional English closing. That reduced
+prompt did not produce its requested spoken goodbye; the exact-prompt replay
+supplies the Spanish goodbye evidence. Combined spoken goodbye and endCall
+script fidelity is not established by one replay. Native Castilian accent, arbitrary
 custom-voice pronunciation, deterministic script fidelity, and actual restaurant
 booking success are not established. No restaurant/user was dialed.
+
+An English control using the same provider settings, call
+`01a1e505-b990-7779-b765-c5e9b7d6386a`, produced the requested English opener
+(independently transcribed), recognized “No. Thank you.”, and ended via endCall.
+The rest of the fixture utterance was not required or observed after that decline.
+
+The reconciled incident also has bounded acoustic proof: call
+`01a1e511-02dc-7000-9f49-06c84944a96e` used its original second Spanish brief,
+schema and selected voice with the fixed config. Independent Scribe transcription
+detected Spanish and confirmed the identity-check question was spoken. The model
+also supplied an unprompted correction in this one-way replay, so orderly
+multi-turn identity flow is not established. The
+client ended this controlled replay; no recipient response or successful identity
+confirmation is claimed. Both captured incident inputs also fail the same
+configuration assertion on base and pass on the fixed source.
 
 
 ## Human feedback
@@ -135,7 +174,9 @@ editing and reconciling an existing owner rather than duplicating its repair.
 The coordinator read 44 active/relevant project threads and searched the agent
 ID and call tool; no same-defect owner was found. Folder-specific discovery is
 not exposed to this ordinary devbox, so project-wide reads covered active Bugs
-and other Bug Report work without inferring ownership from titles.
+and other Bug Report work without inferring ownership from titles. A later
+active report was confirmed against its actual provider objects and reconciled
+under this existing repair before any duplicate source change or deployment.
 
 ## Reusable lesson
 
