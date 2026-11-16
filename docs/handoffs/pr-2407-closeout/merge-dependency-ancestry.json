@@ -1,0 +1,18 @@
+{
+  "merge": "f14f0cc030f288d2212c8d76acdd63043a3ed679",
+  "checked_at": "2026-11-16T18:59:05.308456+00:00",
+  "ancestry": {
+    "2328": {
+      "source": "765eb3abe570a6b305d978ce588039c04c9ece18",
+      "is_ancestor": true
+    },
+    "2289": {
+      "source": "e42554d8e06e43adb932a14b4984fecb7153abfb",
+      "is_ancestor": true
+    },
+    "2290": {
+      "source": "cc7a39b2846aa385320386bbb1374e74c989e6a4",
+      "is_ancestor": true
+    }
+  }
+}

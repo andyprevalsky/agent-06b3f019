@@ -7784,7 +7784,7 @@
     "name": "claude-code-agent",
     "quarantine": {
       "since": "2026-11-16",
-      "repair": "pending-handoff:0cfdb15f797a4ff59d817905cf623e23",
+      "repair": "https://boxes.dev/thread/ph7dx37apma4a6zctsmff7snvn8jbhy7",
       "error": "Timeout after 304s (task timeout=300s) | Investigate: python agents/benchmarks/agent_latency.py b1ca94e7-83aa-4358-9768-204b5748aabd | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
       "evidence": "PR #2407 native smoke FLAKY 0cfdb15f797a4ff59d817905cf623e23; original .context/deploy-pipeline/attempts/2/initial/smoke; RCA https://boxes.dev/thread/ph709m01dn2cyaj9tr19rgwq4d8jbcb8"
     },
