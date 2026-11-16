@@ -7,7 +7,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type * as API from '../../providers/workerDeploymentQueue';
-import { execTypeScript, typeScriptProcess } from '../../providers/processSafety';
+import { retryWithBackoff } from '../../providers/retry';
+import { execTypeScript, spawnTypeScript, typeScriptProcess } from '../../providers/processSafety';
+import { waitFor } from '../helpers/waitFor';
 
 type Ctx = {
   api: typeof API;
@@ -294,6 +296,128 @@ export async function coalesceCliCases(ctx: Ctx) {
     } finally {
       await rm(shallow, { recursive: true, force: true });
     }
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+    await rm(repo.folder, { recursive: true, force: true });
+  }
+}
+/**
+ * 2026-11-16: #2257's run (checkout 224a7c8c20) coalesced its own job into
+ * c2b6101f (c678865ab9) and ran that cutover with its own, older controller, so
+ * #2147's controller fix never executed. An older release's controller must
+ * leave a proven-newer head to that release's own run, never spawn its child.
+ */
+export async function newerReleaseControllerCases(ctx: Ctx) {
+  const { api, appFor } = ctx;
+  const at = atFor(ctx.identity);
+  const repo = await ancestryRepository();
+  const folder = await mkdtemp(path.join(tmpdir(), 'worker-queue-newer-controller-'));
+  try {
+    const app = appFor('newer-controller');
+    const older = await api.enqueueWorkerDeployment(at(app, 'older', repo.c1));
+    const newer = await api.enqueueWorkerDeployment(at(app, 'newer', repo.c2));
+    // As in the incident, the newer release's run has already proven older ⊂ newer.
+    await api.recordWorkerDeploymentAncestry(
+      newer.jobId,
+      [older.jobId],
+      'git merge-base --is-ancestor'
+    );
+    const cli = path.resolve(__dirname, '../../../scripts/worker-deployment-queue.ts');
+    const env = { ...process.env, WORKER_DEPLOYMENT_ANCESTRY_REPOSITORY: repo.folder };
+    const checkout = (sha: string) =>
+      execFileSync('git', ['-C', repo.folder, 'checkout', '-q', sha]);
+    // The older release's own CI checkout: controller c1.
+    checkout(repo.c1);
+    const marker = (name: string) => path.join(folder, name);
+    // Each controller's child records which release's controller ran which job.
+    const child = (release: string) => [
+      process.execPath,
+      '-e',
+      `require('node:fs').appendFileSync(${JSON.stringify(marker('ran'))}, ${JSON.stringify(release)}+':'+process.env.WORKER_DEPLOYMENT_JOB_ID+'\\n')`,
+    ];
+    // --if-idle runs return at once on a busy lease (the older run holds it briefly
+    // every 5 s), so each is retried until it reaches its decision.
+    const idleRun = (jobId: string, release: string) =>
+      execTypeScript([cli, 'run', '--job-id', jobId, '--if-idle', '--', ...child(release)], {
+        timeout: 30000,
+        env,
+      }).then(
+        (done) => done.stdout,
+        (error: { stdout?: string }) => error.stdout ?? ''
+      );
+    // The older release's run, in its real (non-idle) mode, starts first.
+    const olderRun = spawnTypeScript(
+      [cli, 'run', '--job-id', older.jobId, '--', ...child('older')],
+      {
+        env,
+      }
+    );
+    let output = '';
+    olderRun.stdout.on('data', (chunk) => (output += String(chunk)));
+    let errors = '';
+    olderRun.stderr.on('data', (chunk) => (errors = (errors + String(chunk)).slice(-4000)));
+    const ended = new Promise<number | null>((resolve) => olderRun.once('close', resolve));
+    try {
+      await retryWithBackoff(async () => output, {
+        maxRetries: 600,
+        fixedDelays: Array(600).fill(50),
+        shouldRetryResult: (text) => !text.includes('NEWER_RELEASE_CONTROLLER'),
+        component: 'NewerControllerFixture',
+      });
+      const deferral = output
+        .split('\n')
+        .filter((line) => line.includes('NEWER_RELEASE_CONTROLLER'))
+        .map((line) => JSON.parse(line))[0];
+      assert.deepEqual(
+        deferral,
+        {
+          waiting: true,
+          requestedJobId: older.jobId,
+          predecessorJobId: newer.jobId,
+          reason: 'NEWER_RELEASE_CONTROLLER',
+          headSourceCommit: repo.c2,
+          controllerSourceCommit: repo.c1,
+        },
+        output + errors
+      );
+      assert.equal((await api.readWorkerDeployment(older.jobId)).stage, 'SUPERSEDED');
+      assert.equal(existsSync(marker('ran')), false, 'older controller never spawned a child');
+      // The scheduled recovery path (--if-idle) defers the same way.
+      const idle = await retryWithBackoff(() => idleRun(older.jobId, 'older-idle'), {
+        maxRetries: 20,
+        fixedDelays: Array(20).fill(100),
+        shouldRetryResult: (stdout) => !stdout.includes('NEWER_RELEASE_CONTROLLER'),
+        component: 'NewerControllerFixture',
+      });
+      assert.match(idle, /NEWER_RELEASE_CONTROLLER/);
+      assert.equal(existsSync(marker('ran')), false, 'idle older controller never spawned a child');
+    } finally {
+      let closed = false;
+      void ended.then(() => {
+        closed = true;
+      });
+      olderRun.kill('SIGTERM');
+      // The probe cannot throw, so the only rejection is the grace-period timeout.
+      await waitFor('older controller closes after SIGTERM', () => closed, {
+        timeoutMs: 20_000,
+      }).catch(() => olderRun.kill('SIGKILL'));
+      await ended;
+    }
+    // A resume of the same older job from a checkout that contains the newer release
+    // (deploy.md's manual resume from main) runs the head instead of deferring.
+    checkout(repo.c3);
+    await retryWithBackoff(() => idleRun(older.jobId, 'main'), {
+      maxRetries: 20,
+      fixedDelays: Array(20).fill(100),
+      shouldRetryResult: () => !existsSync(marker('ran')),
+      component: 'NewerControllerFixture',
+    });
+    assert.equal((await readFile(marker('ran'), 'utf8')).trim(), `main:${newer.jobId}`);
+    assert.equal(
+      (await readFile(marker('ran'), 'utf8')).includes('older'),
+      false,
+      'no older controller ran'
+    );
   } finally {
     await rm(folder, { recursive: true, force: true });
     await rm(repo.folder, { recursive: true, force: true });

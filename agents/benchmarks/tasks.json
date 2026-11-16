@@ -9133,6 +9133,12 @@
       "evidence": "PR #2279 deploy 15ec855ebe smoke: first attempt (agent 51abff93-c92b-463a-8e60-0e2fc41af2fc) reached COST_LIMIT_REACHED at 147 cents / 229 s after 80 moonshotai/kimi-k3 browser-model calls (77 RoseInvalidRequest route fall-throughs); single rerun on the same source COMPLETED at 38 cents / 137 s with 26 calls (FLAKY). Not introduced: the diff only closes Rose archive records on exceptional exits and relabels a backend phone-verifier archive call_site."
     },
     "title": "Browser Biometrics WebDecoy",
+    "quarantine": {
+      "since": "2026-11-16",
+      "repair": "pending-handoff:dde1843d76714899ba2cff244c0a6541",
+      "error": "Timeout after 420s (task timeout=420s)",
+      "evidence": "PR #2289 smoke FLAKY occurrence dde1843d76714899ba2cff244c0a6541 on ce6d88652e (agent 7d335a40 ACTIVE at 420 s; same-ref rerun passed); PR diff (back-end worker-deployment-queue only) does not reach this task per select_affected_tests"
+    },
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
