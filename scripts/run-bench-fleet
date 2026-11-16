@@ -2007,6 +2007,54 @@ source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
 export FLY_API_TOKEN
+# Every flyctl agent in one HOME loads the same single wire_guard_state peer, and
+# a second agent session on it stalls both tunnels. A relay campaign holds this
+# lock exclusively for its private agent (run-bench-campaign.py
+# claim_home_wireguard_peer); a standalone controller, whose flyctl calls use the
+# HOME default agent, holds it shared for its lifetime, so either launch order
+# refuses (2026-11-16: standalone + -k 4 campaign in one HOME, every copy
+# NORESULT). Relay-bound campaign children use the campaign's agent instead.
+claim_home_wireguard_peer_shared() {
+    [ -z "${CLOUDBENCH_SHARED_RELAY_AUTHORITY:-}${CLOUDBENCH_SHARED_RELAY_DIRECTORY:-}" ] || return 0
+    local path="$HOME/.fly/rose-campaign-wireguard-peer.lock"
+    python3 - "$path" <<'PY_PEER_CREATE' || return 1
+import os, stat, sys
+os.makedirs(os.path.dirname(sys.argv[1]), mode=0o700, exist_ok=True)
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit(f"❌ {sys.argv[1]} is not a regular file")
+finally:
+    os.close(fd)
+PY_PEER_CREATE
+    exec {HOME_WIREGUARD_PEER_FD}<"$path" || return 1
+    if ! python3 - "$HOME_WIREGUARD_PEER_FD" "$path" <<'PY_PEER_CLAIM'
+import fcntl, os, stat, sys
+fd, path = int(sys.argv[1]), sys.argv[2]
+opened, current = os.fstat(fd), os.lstat(path)
+if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+    raise SystemExit(f"❌ {path} changed while it was opened")
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+except BlockingIOError:
+    holder = os.pread(fd, 4096, 0).decode(errors="replace").strip() or "unknown holder"
+    raise SystemExit(
+        f"❌ a relay campaign already owns this HOME's Fly WireGuard peer ({holder}); this standalone "
+        "run's default Fly agent would open a second session on that peer and stall both tunnels "
+        "(lost bench.log and runtime-evidence reads). Run this task inside that campaign, wait for it "
+        "to finish, or launch from another devbox or HOME.")
+PY_PEER_CLAIM
+    then
+        exec {HOME_WIREGUARD_PEER_FD}<&-
+        unset HOME_WIREGUARD_PEER_FD
+        return 1
+    fi
+}
+# Recovery-only maintenance stays available to release retained Machines
+# (operator and /deploy cleanup run it at any time); it starts no benchmark.
+if [ "${RECOVER_STALE_ONLY:-0}" != 1 ]; then
+    claim_home_wireguard_peer_shared || exit 1
+fi
 private_source_holder_identity() {
     python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/process-identity.py" "$PRIVATE_SOURCE_LEASE_PID"
 }

@@ -715,6 +715,7 @@ except (OSError,AssertionError):
  started=True
  if isolated:path=str(root/('isolated-%d.sock'%os.getpid()))
  Path(path).parent.mkdir(parents=True,exist_ok=True)
+ Path(path).unlink(missing_ok=True)  # flyctl's agent removes a dead agent's socket before listening.
  daemon=subprocess.Popen([sys.executable,'-c',agent_code,path,'daemon'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
  with (root/'started-agent.pids').open('a')as stream:stream.write(str(daemon.pid)+'\\n')
  deadline=time.monotonic()+5
@@ -911,6 +912,15 @@ with (root/'wireguard-calls').open('a')as stream:
         /shutdown replies were lost (HTTP 000) and passed browser copies retained
         their Machines. A second campaign must refuse before starting any agent,
         and the claim must end with the first campaign's agent.
+
+        2026-11-16 (devbox 9b1d621b): a standalone fleet run's HOME default agent
+        (pid 769131, 01:36:47) and a -k 4 campaign's private agent (pid 915279,
+        01:48:38) both established on peer ...-01M7GZZTQ2F9ZJ7S22D92C9ANB; both
+        degraded at 01:56:06 and every copy ended NORESULT ("bench.log could not be
+        read after 5 bounded retries"). The guard must refuse in either launch
+        order: a campaign refuses while a standalone run shares the peer or a
+        default agent answers on ~/.fly/fly-agent.sock, and a standalone run
+        refuses while a campaign owns the peer.
         """
         from unittest.mock import patch
         f,repo,home,module,environment=self.campaign_relay_fixture()
@@ -923,7 +933,63 @@ with (root/'wireguard-calls').open('a')as stream:
                 if not value[name].closed:value[name].close()
         self.addCleanup(lambda:[stop(value)for value in values])
         proxies=lambda:(f.root/'proxy-calls').read_text().splitlines()if(f.root/'proxy-calls').exists()else[]
+        wireguard=lambda:(f.root/'wireguard-calls').read_text().splitlines()if(f.root/'wireguard-calls').exists()else[]
+        started=lambda:(f.root/'started-agent.pids').read_text().split()if(f.root/'started-agent.pids').exists()else[]
+        default_socket=home/'.fly/fly-agent.sock'
+        # A standalone fleet controller: the production claim, then a WireGuard
+        # flyctl call that resolves (and starts) the HOME default agent.
+        fleet=(ROOT/'scripts/run-bench-fleet').read_text()
+        begin=fleet.index('\nclaim_home_wireguard_peer_shared() {')+1
+        claim=fleet[begin:fleet.index('\n}\n',begin)+3]
+        standalone_script='\n'.join(['set -eo pipefail',claim,'claim_home_wireguard_peer_shared',
+                                      'flyctl ssh console -a fixture --machine "$WORKER_ID" -C true',
+                                      ': > "$CASE/standalone-ready"','read -r _'])
+        def standalone_environment():
+            child=dict(environment,CASE=str(f.root),WORKER_ID=f.mid)
+            for key in ('CLOUDBENCH_SHARED_RELAY_AUTHORITY','CLOUDBENCH_SHARED_RELAY_DIRECTORY'):child.pop(key,None)
+            return child
+        def start_standalone():
+            (f.root/'standalone-ready').unlink(missing_ok=True)
+            process=subprocess.Popen(['bash','-c',standalone_script],cwd=repo,env=standalone_environment(),
+                                     stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            self.addCleanup(lambda:process.poll()is not None or(process.kill(),process.wait()))
+            return process
+        def wait_ready(process):
+            deadline=time.monotonic()+20
+            while not (f.root/'standalone-ready').exists():
+                if process.poll()is not None:self.fail('standalone fixture exited: %r'%(process.communicate(),))
+                self.assertLess(time.monotonic(),deadline,'standalone fixture never became ready')
+                time.sleep(.02)
+        def finish(process):
+            out,err=process.communicate(input='\n',timeout=20);return process.returncode,out+err
         with patch.dict(os.environ,environment,clear=True):
+            # Order 1: the standalone run and its HOME default agent come first.
+            standalone=start_standalone();wait_ready(standalone)
+            self.assertTrue(default_socket.is_socket(),'standalone fixture did not start the HOME default agent')
+            self.assertEqual(len(started()),1)
+            refused_dir=f.root/'campaign-after-standalone';refused_dir.mkdir()
+            with self.assertRaisesRegex(ValueError,'WireGuard peer'):
+                values.append(module['start_shared_relay'](repo,refused_dir,repo,f.feed,time.monotonic()+15))
+            self.assertEqual(proxies(),[],'a campaign started a private Fly agent beside a standalone run\'s default agent')
+            self.assertEqual(finish(standalone)[0],0)
+            # The standalone controller exited, but its default agent still answers.
+            with self.assertRaisesRegex(ValueError,'fly-agent.sock'):
+                values.append(module['start_shared_relay'](repo,refused_dir,repo,f.feed,time.monotonic()+15))
+            self.assertEqual(proxies(),[],'a campaign started a private Fly agent beside a live HOME default agent')
+            # Once that exact fixture-owned agent is gone (stale socket file left), campaigns start.
+            agent=int(started()[0]);os.kill(agent,signal.SIGKILL)
+            # A killed thread group's leader can read as a zombie before its listener closes.
+            def refused():
+                probe=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+                try:probe.connect(str(default_socket))
+                except ConnectionRefusedError:return True
+                finally:probe.close()
+                return False
+            deadline=time.monotonic()+5
+            while not refused():
+                self.assertLess(time.monotonic(),deadline,'killed default agent kept listening');time.sleep(.02)
+            self.assertTrue(default_socket.exists(),'fixture expected a stale default socket file')
+            # Order 2: a campaign comes first; a second campaign and a standalone run refuse.
             first_dir=f.root/'campaign-a';first_dir.mkdir()
             values.append(module['start_shared_relay'](repo,first_dir,repo,f.feed,time.monotonic()+15))
             self.assertEqual(len(proxies()),1)
@@ -931,13 +997,24 @@ with (root/'wireguard-calls').open('a')as stream:
             with self.assertRaisesRegex(ValueError,'WireGuard peer'):
                 values.append(module['start_shared_relay'](repo,second_dir,repo,f.feed,time.monotonic()+15))
             self.assertEqual(len(proxies()),1,'a second campaign started another Fly agent on the HOME peer: %r'%proxies())
-            self.assertFalse((home/'.fly/fly-agent.sock').exists(),'default HOME agent socket was created')
+            calls_before=len(wireguard())
+            status,output=finish(start_standalone())
+            self.assertNotEqual(status,0,'a standalone run started beside a campaign that owns the HOME peer')
+            self.assertIn('WireGuard peer',output);self.assertIn(str(first_dir),output)
+            self.assertEqual(len(wireguard()),calls_before,'a refused standalone run still made a WireGuard flyctl call')
+            self.assertEqual(len(started()),1,'a refused standalone run started a default Fly agent')
             # The claim belongs to the first campaign's agent and ends with it.
             self.assertTrue(module['stop_shared_relay'](values.pop()))
             third_dir=f.root/'campaign-c';third_dir.mkdir()
             values.append(module['start_shared_relay'](repo,third_dir,repo,f.feed,time.monotonic()+15))
             self.assertEqual(len(proxies()),2)
             self.assertTrue(module['stop_shared_relay'](values.pop()))
+            # Standalone runs share the peer with each other (negative control).
+            first,second=start_standalone(),None
+            wait_ready(first)
+            second=start_standalone();wait_ready(second)
+            self.assertEqual([finish(first)[0],finish(second)[0]],[0,0])
+            self.assertEqual(len(started()),2,'concurrent standalone runs must share one default agent')
 
 
 

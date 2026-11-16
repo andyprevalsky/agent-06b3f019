@@ -17,6 +17,8 @@ import secrets
 import shlex
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -1126,30 +1128,104 @@ def archive_shared_relay(directory: Path, archive: Path) -> None:
     shutil.copytree(directory, archive, dirs_exist_ok=True, ignore=non_records)
 
 
+def peer_lock_holders(path: Path) -> str:
+    """Name this user's processes holding the peer lock open (e.g. a lingering default agent)."""
+    target = os.stat(path)
+    holders = []
+    for fd_dir in Path('/proc').glob('[0-9]*/fd'):
+        if fd_dir.parent.name == str(os.getpid()):
+            continue
+        try:
+            descriptors = list(fd_dir.iterdir())
+        except OSError:
+            continue  # Another user's process, or it exited.
+        for descriptor in descriptors:
+            try:
+                opened = os.stat(descriptor)
+            except OSError:
+                continue
+            if (opened.st_dev, opened.st_ino) == (target.st_dev, target.st_ino):
+                try:
+                    command = (fd_dir.parent / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace').strip()
+                except OSError:
+                    command = 'exited'
+                holders.append(f'pid {fd_dir.parent.name} ({command[:80]})')
+                break
+    return ', '.join(holders) or 'holder not visible to this user'
+
+
+def live_default_fly_agent(directory: Path) -> str | None:
+    """Return a description of the agent answering on HOME's default socket, else None.
+
+    A standalone run's flyctl calls start this background agent and it outlives the
+    run; while it answers it holds a session on the HOME WireGuard peer.
+    """
+    path = directory / 'fly-agent.sock'
+    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stream.settimeout(3)
+    try:
+        try:
+            stream.connect(str(path))
+        except (FileNotFoundError, ConnectionRefusedError):
+            return None  # No socket, or a stale file left by a dead agent.
+        try:
+            stream.sendall(struct.pack('<H', 4) + b'ping')
+            header = stream.recv(2, socket.MSG_WAITALL)
+            reply = stream.recv(struct.unpack('<H', header)[0], socket.MSG_WAITALL) if len(header) == 2 else b''
+            pid = json.loads(reply[3:]).get('PID') if reply.startswith(b'ok ') else None
+        except (OSError, ValueError, struct.error):
+            pid = None
+        return f'{path} (pid {pid})' if pid else f'{path} (listening, PING unanswered)'
+    finally:
+        stream.close()
+
+
 def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     """Claim this HOME's single Fly WireGuard peer for one campaign agent.
 
     Every flyctl agent started in one HOME loads the same wire_guard_state peer.
     A second campaign's private agent opens another session on that peer and
     stalls both tunnels (descend-full69-20261023: lost guest /shutdown replies,
-    retained Machines). The claim is an open file lock, so a dead holder releases
-    it; the caller hands it to the agent's bootstrap so it ends with that agent.
+    retained Machines); so does a standalone run's HOME default agent
+    (2026-11-16: every copy NORESULT). Standalone fleet controllers hold this lock
+    shared (run-bench-fleet claim_home_wireguard_peer_shared), so either launch
+    order refuses. The claim is an open file lock, so a dead holder releases it;
+    the caller hands it to the agent's bootstrap so it ends with that agent.
     """
     directory = Path(os.environ.get('HOME') or Path.home()) / '.fly'
     directory.mkdir(mode=0o700, exist_ok=True)
     path = directory / 'rose-campaign-wireguard-peer.lock'
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    advice = ('A second Fly agent on that peer stalls both tunnels. Run these tasks in one campaign, '
+              'wait for the other work to finish, or use a sharded campaign or another devbox')
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        holder = os.read(descriptor, 4096).decode(errors='replace').strip() or 'unknown holder'
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            holder = os.read(descriptor, 4096).decode(errors='replace').strip() or 'unknown holder'
+            os.close(descriptor)
+            raise ValueError(f'another campaign already owns this HOME\'s Fly WireGuard peer ({holder}). '
+                             f'{advice}') from None
+        holders = peer_lock_holders(path)
         os.close(descriptor)
-        raise ValueError(f'another campaign already owns this HOME\'s Fly WireGuard peer ({holder}); '
-                         'a second Fly agent on that peer stalls both tunnels. Run these tasks in that '
-                         'campaign, wait for it to finish, or use a sharded campaign') from None
+        raise ValueError(f'a standalone run (or the default Fly agent it started) shares this HOME\'s Fly '
+                         f'WireGuard peer: {holders}. {advice}; once no standalone run is live, stop a '
+                         'lingering default agent with `flyctl agent stop`') from None
     except BaseException:
         os.close(descriptor)
         raise
+    try:
+        default_agent = live_default_fly_agent(directory)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    if default_agent is not None:
+        os.close(descriptor)
+        raise ValueError(f'a default Fly agent answers on {default_agent} and holds a session on this HOME\'s '
+                         f'Fly WireGuard peer. {advice}; once no standalone run or ad-hoc flyctl tunnel uses '
+                         'this HOME, stop it with `flyctl agent stop` and relaunch')
     os.ftruncate(descriptor, 0)
     os.pwrite(descriptor, f'pid={os.getpid()} campaign={campaign_dir}\n'.encode(), 0)
     return descriptor
