@@ -1,0 +1,236 @@
+{
+  "completion": {
+    "command": "python3 scripts/deploy_test_cycle.py complete --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline",
+    "pending_post_merge": 0,
+    "ready": true
+  },
+  "effective_execution": {
+    "effort": "high",
+    "model": "gpt-6.1-sol",
+    "service_tier": "UNVERIFIED"
+  },
+  "historical_failures": [
+    {
+      "attempt": "round1",
+      "gate": "deploy-command-structural",
+      "later_evidence": "Final full source gate PASS at reviewed_head; original receipt preserved.",
+      "native_result": "UNVERIFIED",
+      "occurrence": "0d37b8e8d3e1461aa29ab89db6c63931",
+      "source": "c3bb4a40da56eefc5fa9aee4764c4f91f551ef24",
+      "test": "RelayStartupEvidence.test_campaign_persists_fixed_commands_before_any_controller_admission"
+    },
+    {
+      "attempt": "round1",
+      "attribution": "UNRECORDED in original historical RCA packet; retained, not relabeled PASS.",
+      "detail": "Passed 180/181 iphone-control test(s). [runner] domain process exited code=1 signal=none after 163376ms",
+      "gate": "backend-coverage-blackbox",
+      "native_result": "FLAKY",
+      "occurrence": "3edf48a360424c979189b51afdb48af8",
+      "source": "c3bb4a40da56eefc5fa9aee4764c4f91f551ef24",
+      "unit": "iphone-control"
+    },
+    {
+      "dependent_lanes": "workflow-migration and semantic BLOCKED at09:03Z",
+      "durable_job_stage": "SUCCEEDED",
+      "gate": "production Fly",
+      "job_id": "d345a37ca8c8cab2a28658958b3cbfd889719d305cf578b4e7d3ffa12b2caf21",
+      "last_original_production_status": "FAIL",
+      "native_result": "failure",
+      "run_id": "43827845653"
+    }
+  ],
+  "original_merge": "765eb3abe570a6b305d978ce588039c04c9ece18",
+  "outstanding_excluded_measurements": [
+    "PR2186 real wall-time measurement remains outside this continuation. No live-phone operations authorized.",
+    "PR2328 before/after phone observation latency after change not measured by this production verification."
+  ],
+  "review_exception": {
+    "provider": "CodeRabbit",
+    "reason": "usage-cap",
+    "result": "Skipped; merged unreviewed",
+    "reviewed_head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+  },
+  "reviewed_head": "2ec5e1c5a000df63566cec01fbbf74a13192e820",
+  "source_gates": [
+    {
+      "name": "format",
+      "phase": "quick",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "eslint",
+      "phase": "quick",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "typescript",
+      "phase": "quick",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "backend-structural",
+      "phase": "quick",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "new-test-stability",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "seed-cache-decision",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "canonical-seed-whatsapp-content",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "e2b-smoke",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "seed-memory-ratchet",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "live-probes",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "cloudbench-controller",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "backend-coverage-blackbox",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "deploy-command-structural",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "frontend-coverage-blackbox",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "agents-coverage-blackbox",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "semantic-stack",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "smoke",
+      "phase": "initial",
+      "source": {
+        "digest": "a7fbd61e5e59cec54106c2113c7a5544018581ba68c3ab397fe7cbb4a10f349b",
+        "head": "2ec5e1c5a000df63566cec01fbbf74a13192e820"
+      },
+      "status": "PASS"
+    }
+  ],
+  "successor_orchestration_attempt": {
+    "at": "2026-11-16T18:59Z",
+    "evidence": "Private preserved attempt-1859-old-tooling; no deployment/campaign created. Fail-closed sequencing corrected and exact merged parser blob verified before proper continuation.",
+    "native_result": "FAIL with old parser after preflight sequencing error"
+  },
+  "tooling": {
+    "active_source_consumers_before_refresh": [],
+    "changed_paths": [
+      "scripts/run_deploy_pipeline.py"
+    ],
+    "checkout_head_retained": "12b77e3e7a7a8f525eb896892cc7795454de964c",
+    "confirmed_idle_harness_preserved": [
+      {
+        "pid": 1724282,
+        "status": "confirmed idle at refresh; left untouched"
+      }
+    ],
+    "credit": "Operational merged tooling refresh only; no new-source source-gate PASS claimed.",
+    "observed_at": "2026-11-16T19:00:44.716025+00:00",
+    "original_release_merge": "765eb3abe570a6b305d978ce588039c04c9ece18",
+    "parser_pr": 2407,
+    "path": "scripts/run_deploy_pipeline.py",
+    "previous_tool_blob": "f23db78f325d837d97d32c21b835106d76a7de86",
+    "source_gate_binding": "2ec5e1c5a000df63566cec01fbbf74a13192e820",
+    "tool_blob": "762d237c5465c3665a250257042493f93bd1ad5d",
+    "tool_source_commit": "f14f0cc030f288d2212c8d76acdd63043a3ed679"
+  }
+}

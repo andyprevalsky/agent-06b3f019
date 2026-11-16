@@ -1,0 +1,7 @@
+{
+  "started_at": "2026-11-16T19:24:25.824641+00:00",
+  "base_sha": "6623b8e340bb69042c2406b82cbe5ac5cb6ea430",
+  "branch": "records/pr-2328-production-closeout",
+  "scope": "Records-only commit/review/merge delivery for completed #2328 native production verification; original deploy timing is separate.",
+  "original_deploy_run": "20261116-051120-2348970"
+}
