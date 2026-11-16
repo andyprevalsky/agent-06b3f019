@@ -52,10 +52,22 @@ export async function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
   });
 }
 
+/**
+ * An SVG opened as a page would run its scripts on the storage origin, so its
+ * signed URL always downloads. <img> still renders it and never runs SVG scripts.
+ */
+export function signedUrlOptions(storagePath: string): { download: true } | undefined {
+  return /\.svg$/i.test(storagePath) ? { download: true } : undefined;
+}
+
 async function createSignedUrl(file: FilePointer): Promise<string> {
   const { data, error } = await supabase.storage
     .from('attachments')
-    .createSignedUrl(file.storage_path, SIGNED_URL_TTL_SECONDS);
+    .createSignedUrl(
+      file.storage_path,
+      SIGNED_URL_TTL_SECONDS,
+      signedUrlOptions(file.storage_path),
+    );
   if (error || !data?.signedUrl) {
     throw new DocumentPreviewLoadError(error?.message || 'Could not create signed URL');
   }

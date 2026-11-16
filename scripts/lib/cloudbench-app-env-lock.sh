@@ -65,6 +65,23 @@ release_app_environment_lock() {
     [ "$owner" = "$$" ] && rm -f "$APP_ENV_LOCK_FILE" 2>/dev/null || true
 }
 
+# Read-only peer probe: print the PID of a LIVE process other than the caller
+# that owns the lock, using the same liveness rule shlock applies before it
+# breaks a lock (the recorded PID must still exist). An absent, malformed or
+# dead-owner lock prints nothing and returns 1. Never acquires or breaks it.
+# Maintenance (--setup / --refresh-deps / --refresh-wmh) holds the lock while
+# it starts the shared warm donor and parks the donor before releasing it, so a
+# live owner is how a provisioning fleet recognises in-flight maintenance.
+app_environment_lock_live_owner() {
+    local owner
+    [ -n "${APP_ENV_LOCK_FILE:-}" ] || return 1
+    owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
+    case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$owner" -gt 1 ] && [ "$owner" != "$$" ] || return 1
+    kill -0 "$owner" 2>/dev/null || return 1
+    printf '%s\n' "$owner"
+}
+
 assert_app_environment_lock_ownership() {
     local actual_owner
     actual_owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"

@@ -2861,6 +2861,148 @@ async def test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence():
     assert [row["agent_id"] for row in evidence["active_chain"]] == ["root", "out", "d1"]
 
 
+def _auto_reply_question_row(message_id: str, tool_call_id: str, text: str, *, waiting: bool, title: str, status: str):
+    """A send_message_to_user row exactly as the handler persists it (H-69 incident shape)."""
+    return {
+        "message_id": message_id,
+        "role": "TOOL",
+        "text": text,
+        "timestamp": f"2026-11-08T02:21:{55 + len(message_id) % 4}.000Z",
+        "metadata": {
+            "attentionMessage": text,
+            "isUserAttentionMessage": True,
+            "phase": "PLAN",
+            "sendMessageToUser": {"attentionKind": "question", "isQuestion": True, "isWaitingForUser": waiting},
+            "title": title,
+            "toolCallId": tool_call_id,
+            "toolName": "send_message_to_user",
+            "toolStatus": status,
+        },
+    }
+
+
+async def _poll_with_scripted_questions(script):
+    """Run the real _poll_agent against a scripted backend that stores harness posts.
+
+    ``script(rows, posts)`` returns the agent status after mutating the stored
+    rows for this poll; posts are the harness's auto-replies persisted the way
+    POST /api/agents/:id/messages persists them (text plus body metadata).
+    """
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("build-boxing-payment")
+    rows: list[dict] = [
+        {"message_id": "goal", "role": "USER", "text": "Build my dad's signup site", "metadata": {}, "timestamp": "2026-11-08T02:14:10.000Z"}
+    ]
+    posts: list[dict] = []
+
+    async def fake_get_agent(_base, _aid):
+        status = script(rows, posts)
+        return {"agent": {"agent_id": "root", "status": status}, "messages": copy.deepcopy(rows)}
+
+    async def fake_post(_base, _aid, message, metadata=None):
+        row = {
+            "message_id": f"reply-{len(posts) + 1}",
+            "role": "USER",
+            "text": message,
+            "metadata": copy.deepcopy(metadata) if metadata is not None else None,
+            "timestamp": f"2026-11-08T02:22:0{len(posts) * 5}.000Z",
+        }
+        posts.append(row)
+        rows.append(row)
+        return True
+
+    empty_stats = {
+        "agent_count": 0, "total_messages": 0, "total_cost_cents": 0, "active_count": 0, "failed_count": 0,
+        "tree_tokens_in": 0, "tree_tokens_out": 0, "error_agents": [], "all_agents": [],
+    }
+    with (
+        patch.object(bench, "get_agent", side_effect=fake_get_agent),
+        patch.object(bench, "get_attention_requests", AsyncMock(return_value=[])),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench, "post_message", side_effect=fake_post),
+        patch.object(bench, "POLL_INTERVAL", 0),
+        patch.object(bench, "_fetch_tree_stats", AsyncMock(return_value=empty_stats)),
+    ):
+        _data, _triggered, _resolved, failure = await bench._poll_agent("http://x", "root", task, None, {})
+    return rows, posts, failure
+
+
+async def test_auto_reply_to_two_distinct_questions_is_not_a_duplicate_message():
+    """H-69 (e22 build-boxing-payment r3): two questions → two harness replies, not a dual-write.
+
+    The root asked the user twice (distinct send_message_to_user toolCallIds).
+    The harness answered each with the same canned text and no provenance, so
+    no_duplicate_messages read its own second reply as a dual-write and failed
+    the run at 480 s of a 7,200 s budget. Each reply must identify the question
+    it answers; a genuinely double-persisted reply must still be flagged.
+    """
+    from benchmarks.context_validator import validate_context
+
+    q1 = "What discount should the Boxing and Muay Thai code apply?"
+    q2 = "Please specify the discount amount and its duration."
+
+    def script(rows, posts):
+        ids = {row["message_id"] for row in rows}
+        if "q1" not in ids:
+            rows.append(_auto_reply_question_row("q1", "tc-q1", q1, waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if len(posts) >= 1 and "q2" not in ids:
+            rows.append(_auto_reply_question_row("q1-done", "tc-q1", q1, waiting=False, title="User response received", status="FINISHED"))
+            rows.append(_auto_reply_question_row("q2", "tc-q2", q2, waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if len(posts) >= 2 and "q2-done" not in ids:
+            rows.append(_auto_reply_question_row("q2-done", "tc-q2", q2, waiting=False, title="User response received", status="FINISHED"))
+            return "ACTIVE"
+        return "COMPLETED" if "q2-done" in ids else "ACTIVE"
+
+    rows, posts, failure = await _poll_with_scripted_questions(script)
+
+    assert len(posts) == 2, f"one auto-reply per question expected, got {len(posts)}"
+    assert posts[0]["text"] == posts[1]["text"], "the canned reply text itself is unchanged"
+    assert failure is None or "no_duplicate_messages" not in failure, failure
+    duplicate_errors = [v for v in validate_context(rows) if v.rule == "no_duplicate_messages" and v.severity == "error"]
+    assert not duplicate_errors, duplicate_errors
+    # Each reply names the question it answers.
+    answered = [((p["metadata"] or {}).get("benchmarkAutoReply") or {}).get("toolCallId") for p in posts]
+    assert answered == ["tc-q1", "tc-q2"], answered
+    # The validator still catches a real dual-write of one reply.
+    dual_write = copy.deepcopy(posts[0]) | {"message_id": "reply-1-copy", "timestamp": "2026-11-08T02:22:30.000Z"}
+    flagged = [v for v in validate_context([*rows, dual_write]) if v.rule == "no_duplicate_messages" and v.severity == "error"]
+    assert flagged, "a double-persisted harness reply must still be a no_duplicate_messages error"
+
+
+async def test_auto_reply_answers_each_question_once_when_its_wait_is_re_emitted():
+    """The auto-reply is keyed by the question (toolCallId), not by the row id.
+
+    A question's waiting state can be persisted on more than one row (the
+    deploy-handoff 'Waiting for reply' row keeps isWaitingForUser=True for the
+    same toolCallId). Answering per row posted a second canned reply to one
+    question, leaving a stray user message for the next wait to consume.
+    """
+
+    def script(rows, posts):
+        ids = {row["message_id"] for row in rows}
+        if "q1" not in ids:
+            rows.append(_auto_reply_question_row("q1", "tc-q1", "Which plan?", waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if "q1-handoff" not in ids:
+            rows.append(
+                _auto_reply_question_row(
+                    "q1-handoff", "tc-q1", "new code version deployed, retry this tool",
+                    waiting=True, title="Waiting for reply", status="FINISHED",
+                )
+            )
+            return "ACTIVE"
+        return "COMPLETED"
+
+    _rows, posts, failure = await _poll_with_scripted_questions(script)
+
+    assert failure is None, failure
+    assert len(posts) == 1, f"one auto-reply per question expected, got {[p['message_id'] for p in posts]}"
+
+
 def test_tree_feedback_routing_static_checks_grade_routing_and_signatures():
     """Routing checks require outreach delivery, research precision, and corrected drafts."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -8485,6 +8627,153 @@ async def test_required_declared_evaluator_controls_pass_fail():
     ]
 
 
+DRIVE_LEASE_DISPLAY_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "benchmarks/fixtures/display_judge_evidence/google_drive_lease_recall_e4_r001_j0007.html"
+)
+
+
+def _drive_lease_displayed_run() -> dict:
+    """The /descend epoch-4 google-drive-lease-recall run (agent 987ebdab, job r001-j0007).
+
+    The agent showed the lease facts in an inline HTML card (`display`) and then
+    finished with a lossy schema card (notice_period_days: 60, pets_allowed: true).
+    """
+    usercontent = (
+        "http://localhost:3001/usercontent/display/987ebdab-28a8-46e7-99e1-c291ece49056/"
+        "47583a952e186f66307e37f9c039dbf1b8bebacdc4707bb2e477a41eee168e6c.html"
+    )
+    pointer = {
+        "id": "e25445ba-980c-894b-a77c-1d0320cc1731",
+        "kind": "page",
+        "mime_type": "text/html",
+        "original_filename": "display.html",
+        "usercontent_url": usercontent,
+    }
+    return {
+        "agent": {"agent_id": "987ebdab-28a8-46e7-99e1-c291ece49056", "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "ASSISTANT",
+                "message": "",
+                "file_pointer": pointer,
+                "metadata": {
+                    "source": "display",
+                    "excludeFromModel": True,
+                    "display": {
+                        "canonical_id": "dsp_711daa049039757caaf588aab65f4164",
+                        "kind": "media",
+                        "media_kind": "page",
+                        "mime_type": "text/html",
+                        "placement": "inline",
+                    },
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "Displayed 1 item(s) inline for the user; text/html.",
+                "metadata": {"toolName": "display", "toolStatus": "FINISHED", "title": "Displayed for the user"},
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "I found the current lease agreement in your Google Drive and extracted the "
+                        "monthly rent, lease end date, required move-out notice, and pet policy.",
+                        "outputs": [
+                            {"key": "monthly_rent", "value": 3450},
+                            {"key": "lease_end_date", "value": "2027-08-31"},
+                            {"key": "notice_period_days", "value": 60},
+                            {"key": "pets_allowed", "value": True},
+                        ],
+                    },
+                },
+            },
+        ],
+    }
+
+
+async def test_declared_judge_sees_the_item_displayed_to_the_user():
+    """A semantic judge reads the displayed answer, not the "Displayed 1 item(s)" stub.
+
+    /descend 2026-11-06 google-drive-lease-recall: the agent showed "Written notice"
+    and "Yes, one cat" in an inline HTML card. Display content was hydrated only for
+    tasks with display static checks, so the judge saw the stub plus the lossy schema
+    card and failed a correct answer.
+    """
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
+
+    task = get_task_by_name("google-drive-lease-recall")
+    judge = next(e for e in task.evaluators if e["method"] == "single_turn_llm_judge")
+    assert not any(
+        check.get("type") in {"display_media_shown", "display_artifact_figures"}
+        for evaluator in task.evaluators
+        for check in evaluator.get("checks", [])
+    ), "the regression is about judge-only tasks"
+    html = DRIVE_LEASE_DISPLAY_FIXTURE.read_bytes()
+    data = _drive_lease_displayed_run()
+    fetched: list[str] = []
+
+    class _Response:
+        status_code = 200
+        content = html
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, *args, **kwargs):
+            fetched.append(url)
+            return _Response()
+
+    captured: list[list[dict]] = []
+
+    async def fake_judge(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
+        if evaluator_arg["id"] == judge["id"]:
+            captured.append(evidence)
+        return {"score": 1.0, "reasoning": "captured"}
+
+    async def no_tree(data_arg, base_url):
+        data_arg.setdefault("_semantic_evaluator_tree", {})
+
+    with (
+        patch.object(bench, "_call_declared_llm_judge", fake_judge),
+        patch.object(bench, "_hydrate_semantic_evaluator_tree", no_tree),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+    ):
+        await bench._run_declared_evaluators(task, data, base_url="http://bench-backend:3001")
+
+    assert fetched and fetched[0].endswith(
+        "47583a952e186f66307e37f9c039dbf1b8bebacdc4707bb2e477a41eee168e6c.html"
+    ), f"displayed item was never fetched for the judge: {fetched}"
+    assert len(captured) == 1
+    shown = [row for row in captured[0] if row.get("metadata", {}).get("evidence_type") == "displayed_to_user"]
+    assert len(shown) == 1, [row.get("metadata") for row in captured[0]]
+    assert shown[0]["role"] == "ASSISTANT"
+    assert "Written notice" in shown[0]["text"] and "Yes, one cat" in shown[0]["text"]
+    assert shown[0]["metadata"]["mime_type"] == "text/html"
+    # The bounded row is the only copy; benchmark_state keeps the artifact's metadata.
+    state = next(row["benchmark_state"] for row in captured[0] if "benchmark_state" in row)
+    assert all("text" not in artifact for artifact in state["display_artifacts"])
+    agentic = build_agentic_evidence(data)
+    assert any(
+        row.get("metadata", {}).get("evidence_type") == "displayed_to_user" and "Yes, one cat" in row["text"]
+        for row in agentic["messages"]
+    )
+
+
 def test_declared_evaluator_evidence_includes_payment_approval_metadata():
     """Single-turn judges must see payment-request metadata, not a stripped title-only view."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
@@ -10067,13 +10356,115 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert "Attention request (write_lock)" in supplemental
 
 
+def test_doordash_food_plan_cart_reauth_receives_pinned_manifest():
+    """Every task pinning the food-plan manifest gets it in its goal and judge checklist.
+
+    Regression (descend H-33, 2026-11-06): the manifest fixture, goal and judge
+    checklist were keyed to the grocery-order task name only. The cart-reauth
+    sibling pins the same ``manifest_source`` and asks for "every required
+    Safeway manifest line item", but its agent received no manifest (explore:
+    "manifest does NOT exist in any reachable local data source") and its judge
+    received no canonical checklist. The cart-reauth goal must keep its own
+    guest/stop-at-auth contract rather than the order task's checkout prompt.
+    """
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    cart = get_task_by_name("browser-doordash-food-plan-grocery-cart-reauth")
+    order = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    unrelated = get_task_by_name("browser-doordash-usb-c-cable")
+    assert cart.pinned_facts["manifest_source"] == order.pinned_facts["manifest_source"]
+
+    checkout_manifest = (
+        "Checkout-ready one-week manifest\n### Safeway — main grocery order\n"
+        "| 93/7 lean ground beef | 2.5 lb |\n| Kodiak Power Cakes mix | 1 |"
+    )
+    execute_prompt = "SAFEWAY MANIFEST: 93/7 lean ground beef 2.5 lb. Complete checkout at Safeway."
+    prior_cache = dict(bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE)
+    prior_goal_override = os.environ.pop("BENCHMARK_GOAL_OVERRIDE", None)
+    try:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE["apply"] = {
+            "benchmark_goal": execute_prompt,
+            "checkout_manifest": checkout_manifest,
+        }
+        goal = bench._benchmark_goal_for_task(cart, "http://localhost:3001")
+        # The agent receives the pinned manifest table it is told to fill ...
+        assert checkout_manifest in goal
+        # ... under its own guest / stop-at-auth contract, not the order checkout prompt.
+        assert goal.startswith(cart.prompt.rstrip())
+        assert "Complete checkout at Safeway" not in goal
+        judge_requirement = bench._doordash_food_plan_task_requirement_for_judge(cart)
+        assert judge_requirement == goal
+        judge_manifest = bench._doordash_food_plan_manifest_context_for_judge(cart)
+        assert checkout_manifest in judge_manifest
+        assert "authoritative checkout manifest table" in judge_manifest.lower()
+        # The judge sees only what this agent received: never the order task's
+        # execute prompt / checkout contract.
+        assert execute_prompt not in judge_manifest
+        assert "Complete checkout at Safeway" not in judge_manifest
+        assert "execute manifest text" not in judge_manifest.lower()
+
+        # The order task keeps its prod execute prompt override unchanged.
+        order_goal = bench._benchmark_goal_for_task(order, "http://localhost:3001")
+        assert order_goal.startswith(execute_prompt)
+        assert checkout_manifest in bench._doordash_food_plan_manifest_context_for_judge(order)
+
+        assert execute_prompt in bench._doordash_food_plan_manifest_context_for_judge(order)
+
+        # Unrelated DoorDash tasks never receive the food-plan manifest.
+        assert bench._doordash_food_plan_manifest_context_for_judge(unrelated) == ""
+        assert checkout_manifest not in bench._benchmark_goal_for_task(unrelated, "http://localhost:3001")
+
+        # A frozen fixture without the checkout table must fail closed for the
+        # sibling rather than silently sending the manifest-less task prompt.
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE["apply"] = {"benchmark_goal": execute_prompt}
+        original_frozen = bench._doordash_food_plan_frozen_fixture
+        bench._doordash_food_plan_frozen_fixture = lambda: {
+            "execute_prompt": execute_prompt,
+            "checkout_manifest": "",
+        }
+        try:
+            try:
+                bench._doordash_food_plan_prompt_override(cart)
+            except RuntimeError as exc:
+                assert "checkout_manifest" in str(exc)
+            else:
+                raise AssertionError("cart-reauth goal resolved without a checkout manifest")
+            # The judge falls back to the catalog prompt instead of raising.
+            assert bench._doordash_food_plan_task_requirement_for_judge(cart) == cart.prompt
+            assert bench._doordash_food_plan_manifest_context_for_judge(cart) == ""
+        finally:
+            bench._doordash_food_plan_frozen_fixture = original_frozen
+    finally:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.update(prior_cache)
+        if prior_goal_override is not None:
+            os.environ["BENCHMARK_GOAL_OVERRIDE"] = prior_goal_override
+
+    # The pre-run fixture apply covers every manifest-pinned task, not one name.
+    applied: list[str] = []
+    original_run = bench._run_doordash_food_plan_fixture
+    bench._run_doordash_food_plan_fixture = lambda action: applied.append(action) or {"execute_prompt_chars": 1}
+    try:
+        for task in (cart, order, unrelated):
+            bench._prepare_doordash_food_plan_fixture(task, "http://localhost:3001")
+    finally:
+        bench._run_doordash_food_plan_fixture = original_run
+    assert applied == ["apply", "apply"]
+    # Both tasks upsert the same shared user profile, so both run exclusively.
+    assert cart.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert order.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+
+
 def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():
     """Guest checkout domains stay scoped without requiring an injectable CookieBundle."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
+    # browser-opentable-reservation moved to the signed-in list by owner
+    # decision (2026-11-09).
     guest_checkout_tasks = (
         "browser-toast-nopa-write-lock",
-        "browser-opentable-reservation",
         "browser-alchemy-springs-sauna",
         "browser-hotel-booking",
         "browser-event-ticket",
@@ -10090,10 +10481,41 @@ def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_require
         "browser-agent-amazon-cookie-payment": "amazon.com",
         "browser-amazon-return": "amazon.com",
         "minted-agent-accounts-uber": "uber.com",
+        "browser-opentable-reservation": "opentable.com",
     }
     for task_name, domain in authenticated_tasks.items():
         env = get_task_by_name(task_name).environment
         assert env["required_injectable_cookie_domains"] == [domain]
+
+    # Tasks whose prompts or evaluators need a signed-in account are flagged
+    # needs_auth with their live cookie domains required (owner decision 2026-11-09).
+    for task_name in (
+        "browser-agent",
+        "browser-agent-amazon-cookie-payment",
+        "browser-opentable-reservation",
+        "browser-amazon-return",
+        "browser-agent-amazon-mx-buy-under-5-usd",
+        "anti-bot-doordash-store",
+        "anti-bot-amazon-beanie-cart",
+        "anti-bot-x-login-home",
+        "anti-bot-linkedin-data-export-page",
+        "browser-doordash-food-plan-grocery-order",
+    ):
+        env = get_task_by_name(task_name).environment
+        assert env.get("needs_auth") is True, task_name
+        assert env["required_injectable_cookie_domains"] == env["live_cookie_domains"], task_name
+    for task_name in (
+        "browser-agent-amazon-passkey",
+        "browser-toast-nopa-write-lock",
+        "browser-alchemy-springs-sauna",
+        "browser-hotel-booking",
+        "browser-event-ticket",
+        "browser-imax-group-tickets",
+        "browser-1015-eventim-request-card",
+        "minted-agent-accounts-uber",
+        "minted-agent-accounts-x",
+    ):
+        assert get_task_by_name(task_name).environment.get("needs_auth") is not True, task_name
 
     # The passkey task deliberately starts signed out and must not require a
     # CookieBundle merely because its passkey sync is scoped to amazon.com.
@@ -13918,6 +14340,32 @@ def test_tamy_identity_fixture_declaration_drives_the_run_user():
         "amazon.com.mx",
         "amazon.com",
     ]
+
+
+async def test_owner_probe_purges_records_when_lifecycle_already_reconciled():
+    """Live owner run 2026-11-15 (agent 5728b052): the production probe passed through the
+    already-reconciled branch of ensure_payment_lifecycle_cleanup, which returned before the purge,
+    leaving the probe purchase on the owner account."""
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+
+    task = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    sandbox = bench.get_task_by_name("agent-payment-abandonment")
+    reconciled = {"purchase": {"status": "VOIDED"}}
+    for current, expected_purges in ((task, 1), (sandbox, 0)):
+        purge = AsyncMock()
+        with (
+            patch.object(bench, "_validate_payment_lifecycle", return_value=None),
+            patch.object(bench, "purge_owner_lifecycle_records", purge),
+        ):
+            result = await bench.ensure_payment_lifecycle_cleanup(
+                "https://benchmark.invalid", "agent-reconciled", current, current_lifecycle=reconciled
+            )
+        assert result is reconciled
+        assert purge.await_count == expected_purges, (current.name, purge.await_count)
+        if expected_purges:
+            purge.assert_awaited_once_with("https://benchmark.invalid", "agent-reconciled")
 
 
 async def test_parallel_tasks_keep_their_own_run_user():
@@ -29251,6 +29699,14 @@ async def run_all_tests():
         "mid_run_feedback_depth_trigger_poll_loop",
         test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence,
     )
+    await r.record_async(
+        "auto_reply_to_two_distinct_questions_is_not_a_duplicate_message",
+        test_auto_reply_to_two_distinct_questions_is_not_a_duplicate_message,
+    )
+    await r.record_async(
+        "auto_reply_answers_each_question_once_when_its_wait_is_re_emitted",
+        test_auto_reply_answers_each_question_once_when_its_wait_is_re_emitted,
+    )
     r.record(
         "fly_infra_detector_ignores_placeholders",
         test_fly_infra_detector_ignores_collector_placeholders,
@@ -29579,6 +30035,10 @@ async def run_all_tests():
         "declared_evaluator_evidence_normalized_completion_card",
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
     )
+    await r.record_async(
+        "declared_judge_sees_the_item_displayed_to_the_user",
+        test_declared_judge_sees_the_item_displayed_to_the_user,
+    )
     r.record(
         "declared_evaluator_evidence_includes_structured_output_first",
         test_declared_evaluator_evidence_includes_structured_output_first,
@@ -29662,6 +30122,10 @@ async def run_all_tests():
     r.record(
         "doordash_food_plan_grocery_repro_contract",
         test_doordash_food_plan_grocery_repro_contract,
+    )
+    r.record(
+        "doordash_food_plan_cart_reauth_receives_pinned_manifest",
+        test_doordash_food_plan_cart_reauth_receives_pinned_manifest,
     )
     r.record(
         "live_cookie_scope_separate_from_injectable_cookie_requirement",
@@ -29946,6 +30410,10 @@ async def run_all_tests():
     r.record(
         "tamy_identity_fixture_declaration_drives_run_user",
         test_tamy_identity_fixture_declaration_drives_the_run_user,
+    )
+    await r.record_async(
+        "owner_probe_purges_records_when_lifecycle_already_reconciled",
+        test_owner_probe_purges_records_when_lifecycle_already_reconciled,
     )
     await r.record_async(
         "parallel_tasks_keep_their_own_run_user",

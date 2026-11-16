@@ -2,6 +2,7 @@ import type * as grepRepo from './grepRepo';
 import type { MessageContextRow } from './messageContextRepo';
 import type { GrepMatch, GrepMessageRecord, ValidatedGrepInput } from './types';
 import { firstNonEmpty } from './format.snippets';
+import { channelAccountId } from './teamAccess';
 
 function threadName(row: grepRepo.MessageGrepRow): string {
   const fullName = [row.firstName, row.lastName].filter(Boolean).join(' ');
@@ -29,8 +30,7 @@ export function buildMessageConversationMatch(
   const records: GrepMessageRecord[] = contextRows.map((row) => ({
     message_id: row.id,
     owner_user_id: row.userId,
-    account_id:
-      row.channel === 'EMAIL' ? row.googleAccountEmail : row.channel === 'IMESSAGE' ? '' : null,
+    account_id: channelAccountId(row.channel, row.googleAccountEmail),
     channel: row.channel,
     from: row.from,
     to: row.to,

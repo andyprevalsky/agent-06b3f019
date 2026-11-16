@@ -186,6 +186,12 @@ def _extract_sources(tool_call: Dict[str, Any]) -> list:
     return _sources_named_by_filters(tool_call)
 
 
+# Sources whose shared accounts the backend authorizes per team grant.
+_TEAM_SHAREABLE_SOURCES = frozenset(
+    {"email", "gmail", "imessage", "whatsapp", "documents", "transactions"}
+)
+
+
 def _source_status_targets(
     tool_call: Dict[str, Any], user_id: Optional[str] = None
 ) -> tuple[list, Dict[str, set]]:
@@ -198,10 +204,11 @@ def _source_status_targets(
     """
     requested_sources = _extract_sources(tool_call)
     # Team availability is authorized by the backend per account. A reader's
-    # missing personal connector must not block another member's shared inbox.
+    # missing personal connector must not block another member's shared account.
     owner = tool_call.get("owner_user_id")
-    if tool_call.get("team_id") or (owner and owner != user_id):
-        requested_sources = [source for source in requested_sources if source not in {"email", "gmail", "imessage"}]
+    team_scoped = bool(tool_call.get("team_id") or (owner and owner != user_id))
+    if team_scoped:
+        requested_sources = [source for source in requested_sources if source not in _TEAM_SHAREABLE_SOURCES]
     document_provider = _document_provider(tool_call)
     targets: list = []
     target_to_search_sources: Dict[str, set] = {}

@@ -7,7 +7,7 @@
  *              ▼
  *   CDP setPhase(idle|solving|succeeded|failed) ──► animated chip
  *
- * Steel: isSolving + terminal task status. Kernel: widget probe + captcha_solve_result.
+ * Steel: isSolving + terminal task status. Kernel: captcha_solve_result only.
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -66,27 +66,7 @@ function testScriptIsTelemetryDrivenNotDomOnly(): void {
 function testResolveCaptchaAutoSolveActive(): void {
   assert.equal(resolveCaptchaAutoSolveActive({ provider: 'steel', isSolving: true }), true);
   assert.equal(resolveCaptchaAutoSolveActive({ provider: 'steel', isSolving: false }), false);
-  assert.equal(
-    resolveCaptchaAutoSolveActive(
-      { provider: 'kernel', isSolving: null },
-      { kernelChallengeWidgetsPresent: true }
-    ),
-    true
-  );
-  assert.equal(
-    resolveCaptchaAutoSolveActive(
-      { provider: 'kernel', isSolving: null },
-      { kernelChallengeWidgetsPresent: false }
-    ),
-    false
-  );
-  assert.equal(
-    resolveCaptchaAutoSolveActive(
-      { provider: 'steel', isSolving: false },
-      { kernelChallengeWidgetsPresent: true }
-    ),
-    false
-  );
+  assert.equal(resolveCaptchaAutoSolveActive({ provider: 'kernel', isSolving: null }), false);
 }
 
 function testResolveCaptchaIndicatorPhaseTransitions(): void {
@@ -94,7 +74,6 @@ function testResolveCaptchaIndicatorPhaseTransitions(): void {
 
   let resolved = resolveCaptchaIndicatorPhase(
     { provider: 'steel', isSolving: true, latestOutcome: null },
-    {},
     memory
   );
   assert.equal(resolved.phase, 'solving');
@@ -114,7 +93,6 @@ function testResolveCaptchaIndicatorPhaseTransitions(): void {
         timestampMicros: nowMicros,
       },
     },
-    {},
     memory
   );
   assert.equal(resolved.phase, 'succeeded');
@@ -134,19 +112,17 @@ function testResolveCaptchaIndicatorPhaseTransitions(): void {
         timestampMicros: nowMicros,
       },
     },
-    {},
     memory
   );
   assert.equal(resolved.phase, 'idle');
 
-  // Kernel failure after solving episode.
+  // Kernel has no in-flight state: idle until a fresh terminal outcome lands.
   memory = emptyCaptchaIndicatorMemory();
   resolved = resolveCaptchaIndicatorPhase(
     { provider: 'kernel', isSolving: null, latestOutcome: null },
-    { kernelChallengeWidgetsPresent: true },
     memory
   );
-  assert.equal(resolved.phase, 'solving');
+  assert.equal(resolved.phase, 'idle');
   memory = resolved.memory;
 
   resolved = resolveCaptchaIndicatorPhase(
@@ -162,7 +138,6 @@ function testResolveCaptchaIndicatorPhaseTransitions(): void {
         timestampMicros: Date.now() * 1000,
       },
     },
-    { kernelChallengeWidgetsPresent: false },
     memory
   );
   assert.equal(resolved.phase, 'failed');
@@ -255,6 +230,36 @@ async function testScriptShowsPhaseTransitions(): Promise<void> {
   }
 }
 
+/**
+ * H-35b: a challenge widget on the page is not evidence that a solver is
+ * working on it. Kernel reports only terminal captcha_solve_result events and
+ * Tilion reports no per-session solver state, so neither may claim "solving";
+ * the chip is in-page DOM that the browser agent reads as fact.
+ */
+function testWidgetPresenceIsNotSolverEvidence(): void {
+  const indicatorSources = [
+    'back-end/src/providers/browser/captchaSolveIndicator.ts',
+    'back-end/src/domains/compute-grants/connectSession.watcher.ts',
+    'agents/browser_tools/captcha_solve_indicator.py',
+    'agents/browser_tools/dom_service.py',
+  ];
+  for (const relative of indicatorSources) {
+    const source = readFileSync(join(REPO_ROOT, relative), 'utf8');
+    assert.doesNotMatch(
+      source,
+      /CAPTCHA_WIDGET_PRESENT_SCRIPT|kernelChallengeWidgetsPresent|kernel_challenge_widgets_present|probe_captcha_widgets_present/,
+      `${relative} still treats widget presence as solver evidence`
+    );
+  }
+  for (const provider of ['kernel', 'tilion'] as const) {
+    assert.equal(resolveCaptchaAutoSolveActive({ provider, isSolving: null }), false);
+    assert.equal(
+      resolveCaptchaIndicatorPhase({ provider, isSolving: null, latestOutcome: null }).phase,
+      'idle'
+    );
+  }
+}
+
 function testInstallSitesAreWired(): void {
   const kernel = readFileSync(join(REPO_ROOT, 'back-end/src/providers/browser/kernel.ts'), 'utf8');
   const steel = readFileSync(join(REPO_ROOT, 'back-end/src/providers/steel/session.ts'), 'utf8');
@@ -287,6 +292,7 @@ testScriptIsTelemetryDrivenNotDomOnly();
 testResolveCaptchaAutoSolveActive();
 testResolveCaptchaIndicatorPhaseTransitions();
 testInstallSitesAreWired();
+testWidgetPresenceIsNotSolverEvidence();
 
 async function main(): Promise<void> {
   await testInstallRegistersInitScriptOnAllContexts();

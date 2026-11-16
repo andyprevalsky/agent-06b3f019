@@ -52,7 +52,11 @@ def task_contract(root, head, name):
     raw = result.stdout
     old = [t for t in json.loads(raw) if t['name'] == name]
     current = [t for t in json.loads((root / 'agents/benchmarks/tasks.json').read_bytes()) if t['name'] == name]
-    need(len(old) == len(current) == 1 and old == current, 'catalog task changed')
+    # A quarantine marker is deploy-gating metadata (added and released by repair/records PRs),
+    # not the task contract; every other field must be byte-identical to the original catalog.
+    def contract(task):
+        return {k: v for k, v in task.items() if k != 'quarantine'}
+    need(len(old) == len(current) == 1 and contract(old[0]) == contract(current[0]), 'catalog task changed')
     need(old[0].get('production_only', False) is False
          and 'agentcard-lifecycle-sandbox' in old[0].get('tags', []), 'not a sandbox catalog task')
     return old[0]

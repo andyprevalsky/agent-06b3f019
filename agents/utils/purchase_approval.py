@@ -2,14 +2,28 @@
 
 import re
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 _PLACEHOLDER_RE = re.compile(
     r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b",
     re.IGNORECASE,
 )
-_RATING_RE = re.compile(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])")
+_RATING_RE = re.compile(
+    r"(?<![\w.,#])(\d+(?:\.\d+)?)(?=\s*(?:(?:stars?|points?|score|rating)\b|[★⭐%]|(?:/|out\s+of)\s*\d|of\s*\d+(?:\.\d+)?(?:\s*(?:stars?|rating|score))?\s*$))",
+    re.IGNORECASE,
+)
+_RATING_LABEL_RE = re.compile(r"\b(?:rated|rating|score)\s*[:=]?\s*(\d+(?:\.\d+)?)(?![\d.,])", re.IGNORECASE)
+_LEGACY_FIVE_POINT_RE = re.compile(
+    r"^(\d(?:\.\d+)?)(?:\s*\([\d.,]+\s*[kmb]?\+?\))?(?:\s*[-–—]\s*#\d+\s+of\s+\d+)?$",
+    re.IGNORECASE,
+)
+# An explicit scale right after the first score ("3 out of 10", "8/10", "3%"); only a 5-point scale becomes stars.
+_RATING_SCALE_RE = re.compile(
+    r"\s*(?:(?:stars?|points?|score|rating|[★⭐])\s*)?"
+    r"\(?\s*(?:(?:/|(?:out\s+)?of|on\s+(?:a\s+)?scale\s+of)\s*(\d+(?:\.\d+)?)|(%))",
+    re.IGNORECASE,
+)
 _REVIEW_COUNT_RE = re.compile(
     r"\b\d[\d,]*(?:\.\d+)?\s*[kmb]?\+?\s+(?:customer\s+)?(?:reviews?|ratings?)\b",
     re.IGNORECASE,
@@ -195,17 +209,35 @@ def validate_image_url_for_page(value: Any, page_image_urls: Iterable[Any], page
     return value
 
 
-def validate_product_rating(value: Any) -> str:
+def validate_product_rating(value: Any) -> Optional[str]:
+    """Optional rating; when given, keep any scale the page shows ("9.2 out of 10", "94%")."""
+    if value is None or not str(value).strip():
+        return None
     text = _validated_review_text(value)
     if re.search(r"\breviews?\b|\bratings\b", text, re.IGNORECASE):
         raise ValueError("rating must be a product score, not a review count")
-    match = _RATING_RE.search(text)
-    if not match or not 0 <= float(match.group(1)) <= 5:
-        raise ValueError("rating must include a numeric product score from 0 to 5")
-    return f"{match.group(1)} stars"
+    match = _RATING_RE.search(text) or _RATING_LABEL_RE.search(text)
+    implicit_five_point = False
+    if match is None:
+        # Retain the original implicit five-star forms, not arbitrary bare numbers.
+        match = _LEGACY_FIVE_POINT_RE.fullmatch(text)
+        if match is None or float(match.group(1)) > 5:
+            raise ValueError("rating must include the numeric score the page shows")
+        implicit_five_point = True
+    if float(match.group(1)) <= 5:
+        scale = _RATING_SCALE_RE.match(text, match.end(1))
+        explicit_stars = re.match(r"\s*(?:stars?\b|[★⭐])", text[match.end(1) :], re.IGNORECASE)
+        if (scale is not None and scale.group(1) is not None and float(scale.group(1)) == 5) or (
+            scale is None and (implicit_five_point or explicit_stars)
+        ):
+            return f"{match.group(1)} stars"
+    return text
 
 
-def validate_product_review_count(value: Any) -> str:
+def validate_product_review_count(value: Any) -> Optional[str]:
+    """Optional review count; when given, it must be a count followed by reviews or ratings."""
+    if value is None or not str(value).strip():
+        return None
     text = _validated_review_text(value)
     match = _REVIEW_COUNT_RE.search(text)
     if not match:

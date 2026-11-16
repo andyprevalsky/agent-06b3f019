@@ -517,3 +517,15 @@ through the normal dependency command after the last owned worker retired.
 Final combined-source gates and a fresh real cloud smoke remain pending. This
 recurrence does not establish the uncaptured historical exception or claim
 production Google/phone acceptance.
+
+## Related smoke38 admission observation — November 10
+
+Source2390845 (digest50294f07),17scheduled jobs,width8: mass member failed in3.714s with the native pre-allocation ENOSPC diagnostic. One confirmed infrastructure failure triggered the recorded1/17stop; seven siblings were cancelled and nine did not start. The original outer result remains17UNVERIFIED/completefalse/cleanupfalse. This is no native PASS and no receipt upgrade.
+
+The current/root device65024ledger had seven standalone consumed-owner hints, no inflight debit or ticket grant, and no matching live owner births. All protected reserves remain non-reclaimable. Ordinary17>8campaign dispatch selects the standalone reserve path. The real budget/remaining-debit/nested-liability functions and native expressions were replayed from239,upstreamf8 andoriginal1c47against the captured ledger and separate later df samples. They behave identically: the8thadmission requires5664MiB initial free under512MiBpreferred/256MiBheadroom/32MiBminimum. The parent's laterpre-reclaim5482MiBsample reproduces7admitted/1refused; its guarded596.85MiBreclaim makes the same calculation admit8.
+
+This is related to this case's capacity class, not proof that its prior concurrent-snapshot race returned. The actual3:51failure did not capture its df/floor/needed/pending/debit values, so exact historical byte attribution remains OPEN. The new receipt and raw earlier failure must remain distinct. No allocator logic defect is claimed or source change proposed.
+
+Terminal archiving still requires5GiBfree. The final current free observation permits about933.97MiB net artifact growth after ordinary new-reserve release, but future growth has not been measured. Admission-only replay is not a full-run or final-archive guarantee. The parent's closeout audit retains ownership; no protected reserve, floor, concurrency or receipt changes are authorized by this append.
+
+Coordinator constraints: preserve the original incomplete outcomes and cleanup debts; retain protected reserves and healthy work. No incident-specific user correction was recorded. The user requested completion of /deploy and preservation of Freedom.

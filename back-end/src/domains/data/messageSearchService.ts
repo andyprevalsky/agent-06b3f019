@@ -1,4 +1,4 @@
-import { resolveMessageAccess, messageOwnership } from './teamAccessRepo';
+import { resolveMessageAccess, messageOwnership, type SharedGrant } from './teamAccessRepo';
 import { buildMessageConversationMatch } from './format.messages';
 import * as grepRepo from './grepRepo';
 import { findMessageContextRows, searchConversationMatchRows } from './messageContextRepo';
@@ -13,9 +13,11 @@ export async function searchMessageSource(params: {
   userId: string;
   input: ValidatedGrepInput;
   source: ValidSource;
+  /** Grants already resolved for this request; resolved here when absent. */
+  grants?: SharedGrant[];
 }): Promise<{ total: number; matches: GrepMatch[] }> {
   const { userId, input, source } = params;
-  const access = await resolveMessageAccess(userId, input.teamScope);
+  const access = await resolveMessageAccess(userId, input.teamScope, params.grants);
   let personIds: string[] | undefined;
   const messageFilters = input.filters.messages;
   // `filters.path` addresses a thread; its thread segment is the same identifier

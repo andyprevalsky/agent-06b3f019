@@ -1,0 +1,71 @@
+{
+ ".cloud-env": "managed-env (boxes.dev project environment; secrets never archived)",
+ ".context/": {
+  "archive": "devbox-closeout-private/pr2257/20261116T025559Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2257-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2257-closeout/private-archive-receipt.json --destination <empty dir>"
+ },
+ ".devbox/": "managed (boxes.dev runtime state)",
+ ".env.npm": "managed-env (boxes.dev project environment; secrets never archived)",
+ ".llm-dumps/": {
+  "archive": "devbox-closeout-private/pr2257/20261116T025559Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2257-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2257-closeout/private-archive-receipt.json --destination <empty dir>"
+ },
+ "agents/.context/": {
+  "archive": "devbox-closeout-private/pr2257/20261116T025559Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2257-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2257-closeout/private-archive-receipt.json --destination <empty dir>"
+ },
+ "agents/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "agents/.env.benchmark-temporal": "managed-env (generated benchmark Temporal override; secrets never archived)",
+ "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "agents/navi-worker-log.txt": {
+  "archive": "devbox-closeout-private/pr2257/20261116T025559Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2257-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2257-closeout/private-archive-receipt.json --destination <empty dir>"
+ },
+ "agents/providers/fast_cache/": "reproducible (runtime cache)",
+ "back-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "back-end/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "back-end/backend-logs.log": {
+  "archive": "devbox-closeout-private/pr2257/20261116T025559Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2257-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2257-closeout/private-archive-receipt.json --destination <empty dir>"
+ },
+ "branch:backup/cerebras-chat-quota-prepush-20261002": {
+  "archive": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited local-only branch (not this deploy); identical tip already preserved by the PR #1932 private archive; left in place",
+  "sha256": "d7d80541e820a33628e3a1f83a6a971d2b7d5a36f9a85393ad553f4fb947e9f6",
+  "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+ },
+ "front-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "front-end/frontend-logs.log": {
+  "archive": "devbox-closeout-private/pr2257/20261116T025559Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2257-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2257-closeout/private-archive-receipt.json --destination <empty dir>"
+ },
+ "hub-poller-logs.log": {
+  "archive": "devbox-closeout-private/pr2257/20261116T025559Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "receipt": "docs/handoffs/pr-2257-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2257-closeout/private-archive-receipt.json --destination <empty dir>"
+ },
+ "mac-app/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "package-lock.json": "reproducible (ignored root install lock)",
+ "research/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+  "archive": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "note": "template-inherited stash (not this deploy); identical object preserved by the PR #1932 private archive",
+  "sha256": "d7d80541e820a33628e3a1f83a6a971d2b7d5a36f9a85393ad553f4fb947e9f6",
+  "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+ }
+}

@@ -236,6 +236,15 @@ export async function getStorageObject(
 }
 
 /**
+ * An SVG opened as a page would run its scripts on the storage origin, so its
+ * signed URL always downloads (Content-Disposition: attachment). An <img> still
+ * renders it: images ignore Content-Disposition and never run SVG scripts.
+ */
+export function signedUrlOptions(storagePath: string): { download: true } | undefined {
+  return /\.svg$/i.test(storagePath) ? { download: true } : undefined;
+}
+
+/**
  * Generate a signed URL for a file (for frontend display of large files)
  */
 export async function getSignedUrl(storagePath: string, expiresIn: number = 3600): Promise<string> {
@@ -243,7 +252,7 @@ export async function getSignedUrl(storagePath: string, expiresIn: number = 3600
 
   const { data, error } = await client.storage
     .from(ATTACHMENT_BUCKET)
-    .createSignedUrl(storagePath, expiresIn);
+    .createSignedUrl(storagePath, expiresIn, signedUrlOptions(storagePath));
 
   if (error) {
     log.error('Signed URL generation failed', { error: error.message });

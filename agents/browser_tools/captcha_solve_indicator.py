@@ -186,28 +186,6 @@ CAPTCHA_SOLVE_INDICATOR_SCRIPT = r"""(() => {
   }
 })();"""
 
-CAPTCHA_WIDGET_PRESENT_SCRIPT = r"""(() => {
-  const HOST_MARKERS = [
-    'hcaptcha.com', 'newassets.hcaptcha.com', 'recaptcha.net', 'recaptcha/',
-    'google.com/recaptcha', 'gstatic.com/recaptcha', 'challenges.cloudflare.com',
-    'turnstile', 'geetest.com', 'captcha-delivery.com', 'funcaptcha.com', 'arkoselabs.com',
-  ];
-  try {
-    const frames = document.querySelectorAll('iframe');
-    for (const frame of frames) {
-      const src = String(frame.getAttribute('src') || frame.src || '').toLowerCase();
-      if (HOST_MARKERS.some((m) => src.includes(m))) return true;
-      const title = String(frame.getAttribute('title') || '').toLowerCase();
-      if (title.includes('captcha') || title.includes('hcaptcha')) return true;
-    }
-    return !!(
-      document.querySelector('.h-captcha, .g-recaptcha, .cf-turnstile, #cf-turnstile, [data-hcaptcha-widget-id]')
-    );
-  } catch (_) {
-    return false;
-  }
-})()"""
-
 
 class CaptchaIndicatorMemory(TypedDict):
     last_solving: bool
@@ -241,20 +219,14 @@ def captcha_solve_indicator_set_solving_script(solving: bool) -> str:
     return captcha_solve_indicator_set_phase_script("solving" if solving else "idle")
 
 
-def resolve_captcha_auto_solve_active(
-    telemetry: Mapping[str, Any],
-    *,
-    kernel_challenge_widgets_present: bool = False,
-) -> bool:
-    """Mirror of back-end resolveCaptchaAutoSolveActive."""
-    is_solving = telemetry.get("isSolving")
-    if is_solving is True:
-        return True
-    if is_solving is False:
-        return False
-    if telemetry.get("provider") == "kernel":
-        return kernel_challenge_widgets_present is True
-    return False
+def resolve_captcha_auto_solve_active(telemetry: Mapping[str, Any]) -> bool:
+    """Mirror of back-end resolveCaptchaAutoSolveActive.
+
+    Only a provider's own in-flight flag (Steel ``isSolving``) is evidence that
+    a solver is working. A challenge widget on the page is not: Kernel reports
+    only terminal outcomes and Tilion reports no solver state.
+    """
+    return telemetry.get("isSolving") is True
 
 
 def _outcome_key(outcome: Mapping[str, Any]) -> str:
@@ -292,15 +264,11 @@ FRESH_OUTCOME_MS = 15_000
 def resolve_captcha_indicator_phase(
     telemetry: Mapping[str, Any],
     *,
-    kernel_challenge_widgets_present: bool = False,
     memory: CaptchaIndicatorMemory | None = None,
 ) -> tuple[str, CaptchaIndicatorMemory]:
     """Mirror of back-end resolveCaptchaIndicatorPhase."""
     mem = memory or empty_captcha_indicator_memory()
-    solving = resolve_captcha_auto_solve_active(
-        telemetry,
-        kernel_challenge_widgets_present=kernel_challenge_widgets_present,
-    )
+    solving = resolve_captcha_auto_solve_active(telemetry)
     outcome = telemetry.get("latestOutcome")
     key = _outcome_key(outcome) if isinstance(outcome, Mapping) else None
     now_ms = time.time() * 1000.0
@@ -356,19 +324,12 @@ async def poll_captcha_indicator_phase(
 ) -> str:
     """Fetch provider CAPTCHA telemetry and resolve chip phase."""
     telemetry = await fetch_telemetry(config, task_id)
-    widgets = False
-    if telemetry.get("isSolving") is None and telemetry.get("provider") == "kernel":
-        widgets = await dom_service.probe_captcha_widgets_present()
     mem: CaptchaIndicatorMemory = {
         "last_solving": bool(memory.get("last_solving", False)),
         "last_shown_outcome_key": memory.get("last_shown_outcome_key"),
         "await_terminal_until": float(memory.get("await_terminal_until") or 0.0),
     }
-    phase, next_mem = resolve_captcha_indicator_phase(
-        telemetry,
-        kernel_challenge_widgets_present=widgets,
-        memory=mem,
-    )
+    phase, next_mem = resolve_captcha_indicator_phase(telemetry, memory=mem)
     memory.update(next_mem)
     return phase
 

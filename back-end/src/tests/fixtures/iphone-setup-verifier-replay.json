@@ -1,0 +1,1592 @@
+{
+  "source": "prod setup agent 1772a64a-c22a-5cf7-9184-17508eda5df6, 2026-11-15, server-loaded screen.text observations as sent to phone_setup_* (card digits scrubbed); plus live retry agent 87c1e09a-28ed-5f81-b7ce-6166c18523d7 (2026-11-15 20:40Z): Saved to iCloud page and FaceTime page; plus agent 87c1e09a 2026-11-15 23:46-23:55Z: iCloud See All list and Contacts Accounts screen",
+  "observations": {
+    "gmail_settings_cursor119": [
+      {
+        "text": "No SIM S",
+        "confidence": 1,
+        "x": 72,
+        "y": 21,
+        "w": 120.3,
+        "h": 23.7,
+        "source": "pixels"
+      },
+      {
+        "text": "L: 9:59 PM",
+        "confidence": 1,
+        "x": 375,
+        "y": 22,
+        "w": 130,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "Settings",
+        "confidence": 1,
+        "x": 149,
+        "y": 237,
+        "w": 234.5,
+        "h": 64,
+        "source": "pixels"
+      },
+      {
+        "text": "Account",
+        "confidence": 1,
+        "x": 132,
+        "y": 329,
+        "w": 132.2,
+        "h": 27.1,
+        "source": "pixels"
+      },
+      {
+        "text": "Andy Prevalsky",
+        "confidence": 1,
+        "x": 268,
+        "y": 414,
+        "w": 228,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "a@roselabs.ai",
+        "confidence": 0.5,
+        "x": 245,
+        "y": 459,
+        "w": 182,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "Notifications",
+        "confidence": 1,
+        "x": 167,
+        "y": 583,
+        "w": 202,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Email notifications",
+        "confidence": 1,
+        "x": 293,
+        "y": 665,
+        "w": 274,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "All new mail",
+        "confidence": 1,
+        "x": 232,
+        "y": 712,
+        "w": 156,
+        "h": 24,
+        "source": "pixels"
+      },
+      {
+        "text": "Chat notifications",
+        "confidence": 1,
+        "x": 288,
+        "y": 816,
+        "w": 268,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "On",
+        "confidence": 1,
+        "x": 635,
+        "y": 817,
+        "w": 46,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": ">",
+        "confidence": 1,
+        "x": 678,
+        "y": 817,
+        "w": 24,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Incoming calls",
+        "confidence": 1,
+        "x": 178,
+        "y": 955.1,
+        "w": 234.1,
+        "h": 47.8,
+        "source": "pixels"
+      },
+      {
+        "text": "Ringing for incoming calls",
+        "confidence": 1,
+        "x": 352,
+        "y": 1048,
+        "w": 392,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "Microphone permission is required for ringing. Tap",
+        "confidence": 1,
+        "x": 369,
+        "y": 1139,
+        "w": 606,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "to grant permission.",
+        "confidence": 1,
+        "x": 185,
+        "y": 1178,
+        "w": 246,
+        "h": 24,
+        "source": "pixels"
+      },
+      {
+        "text": "Apps in Gmail",
+        "confidence": 1,
+        "x": 175,
+        "y": 1257,
+        "w": 222,
+        "h": 34,
+        "source": "pixels"
+      }
+    ],
+    "gmail_inbox_notification_dialog_cursor101": [
+      {
+        "text": "No SIM",
+        "confidence": 1,
+        "x": 61,
+        "y": 22,
+        "w": 98.1,
+        "h": 20.3,
+        "source": "pixels"
+      },
+      {
+        "text": "L: 9:55 PM",
+        "confidence": 1,
+        "x": 376,
+        "y": 22,
+        "w": 128,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "Search in mail",
+        "confidence": 1,
+        "x": 247,
+        "y": 112,
+        "w": 206,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Inbox",
+        "confidence": 1,
+        "x": 75,
+        "y": 247,
+        "w": 74,
+        "h": 22,
+        "source": "pixels"
+      },
+      {
+        "text": "Stay organized by adding",
+        "confidence": 1,
+        "x": 520,
+        "y": 252,
+        "w": 348,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "all your email accounts",
+        "confidence": 1,
+        "x": 502,
+        "y": 294.2,
+        "w": 312.6,
+        "h": 33.3,
+        "source": "pixels"
+      },
+      {
+        "text": "Google",
+        "confidence": 1,
+        "x": 218,
+        "y": 327,
+        "w": 112.7,
+        "h": 36.3,
+        "source": "pixels"
+      },
+      {
+        "text": "Security alert",
+        "confidence": 1,
+        "x": 255,
+        "y": 367,
+        "w": 190,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "A new sign-in on Apple iPhone SE (...",
+        "confidence": 1,
+        "x": 398,
+        "y": 409,
+        "w": 476,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "\"Gmail\" Would Like to Send You",
+        "confidence": 1,
+        "x": 365,
+        "y": 515,
+        "w": 506,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "Notifications",
+        "confidence": 1,
+        "x": 218,
+        "y": 561,
+        "w": 204,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Notifications may include alerts,",
+        "confidence": 1,
+        "x": 335,
+        "y": 620,
+        "w": 438,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "sounds, and icon badges. These can",
+        "confidence": 1,
+        "x": 365,
+        "y": 656.8,
+        "w": 502.7,
+        "h": 42.7,
+        "source": "pixels"
+      },
+      {
+        "text": "be configured in Settings.",
+        "confidence": 1,
+        "x": 292,
+        "y": 698,
+        "w": 352,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Don't Allow",
+        "confidence": 1,
+        "x": 229,
+        "y": 801,
+        "w": 178.1,
+        "h": 30.7,
+        "source": "pixels"
+      },
+      {
+        "text": "Allow",
+        "confidence": 1,
+        "x": 524,
+        "y": 802,
+        "w": 84,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Sign-in attempt was blocked a@ros...",
+        "confidence": 1,
+        "x": 400,
+        "y": 903,
+        "w": 480,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "H",
+        "confidence": 1,
+        "x": 86,
+        "y": 1009,
+        "w": 32,
+        "h": 38,
+        "source": "pixels"
+      },
+      {
+        "text": "hello 2",
+        "confidence": 1,
+        "x": 213,
+        "y": 987,
+        "w": 106.9,
+        "h": 29.9,
+        "source": "pixels"
+      },
+      {
+        "text": "New card created ending in 0000",
+        "confidence": 1,
+        "x": 385,
+        "y": 1027,
+        "w": 450,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "A new virtual card ending in 0000 W...",
+        "confidence": 1,
+        "x": 399,
+        "y": 1068,
+        "w": 482,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "8:14 PM",
+        "confidence": 1,
+        "x": 630,
+        "y": 984,
+        "w": 112.2,
+        "h": 21.4,
+        "source": "pixels"
+      },
+      {
+        "text": "\u2022",
+        "confidence": 1,
+        "x": 696,
+        "y": 982,
+        "w": 24,
+        "h": 24,
+        "source": "pixels"
+      },
+      {
+        "text": "Reddit",
+        "confidence": 1,
+        "x": 212,
+        "y": 1149,
+        "w": 104,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "Compose",
+        "confidence": 1,
+        "x": 585.9,
+        "y": 1157.7,
+        "w": 136.5,
+        "h": 25.2,
+        "source": "pixels"
+      },
+      {
+        "text": "\"Sophia's departure",
+        "confidence": 1,
+        "x": 297,
+        "y": 1191,
+        "w": 278,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "richiranD. I knam it'e hean veare",
+        "confidence": 0.5,
+        "x": 386,
+        "y": 1228,
+        "w": 456,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "99+",
+        "confidence": 1,
+        "x": 164,
+        "y": 1270,
+        "w": 48,
+        "h": 20,
+        "source": "pixels"
+      }
+    ],
+    "imessage_send_receive_cursor4": [
+      {
+        "text": "No SIM S",
+        "confidence": 1,
+        "x": 73,
+        "y": 21,
+        "w": 122,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "<",
+        "confidence": 1,
+        "x": 74,
+        "y": 86,
+        "w": 36,
+        "h": 52,
+        "source": "pixels"
+      },
+      {
+        "text": "L: 9:22 PM",
+        "confidence": 1,
+        "x": 375,
+        "y": 22,
+        "w": 130,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "iMessage",
+        "confidence": 1,
+        "x": 374,
+        "y": 86.6,
+        "w": 157.4,
+        "h": 32.3,
+        "source": "pixels"
+      },
+      {
+        "text": "You Can Receive iMessages to and",
+        "confidence": 1,
+        "x": 338,
+        "y": 265,
+        "w": 548,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "Reply From",
+        "confidence": 1,
+        "x": 154,
+        "y": 309,
+        "w": 176.5,
+        "h": 36.8,
+        "source": "pixels"
+      },
+      {
+        "text": "V +1 (972) 977-7432",
+        "confidence": 1,
+        "x": 242,
+        "y": 395,
+        "w": 364.7,
+        "h": 46.8,
+        "source": "pixels"
+      },
+      {
+        "text": "/ andyprevalsky@icloud.com",
+        "confidence": 1,
+        "x": 307,
+        "y": 496,
+        "w": 486,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "v andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 308,
+        "y": 598,
+        "w": 488,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "Start New Conversations From",
+        "confidence": 1,
+        "x": 306,
+        "y": 726,
+        "w": 484,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "V +1 (972) 977-7432",
+        "confidence": 1,
+        "x": 243,
+        "y": 812,
+        "w": 362,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "andyprevalsky@icloud.com",
+        "confidence": 1,
+        "x": 344,
+        "y": 915,
+        "w": 416,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 343,
+        "y": 1019,
+        "w": 414,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "Apple Account: andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 324,
+        "y": 1103,
+        "w": 520,
+        "h": 26,
+        "source": "pixels"
+      }
+    ],
+    "google_account_page_cursor9": [
+      {
+        "text": "No SIM S",
+        "confidence": 1,
+        "x": 72,
+        "y": 21,
+        "w": 120.4,
+        "h": 24.2,
+        "source": "pixels"
+      },
+      {
+        "text": "L: 10:04 PM",
+        "confidence": 1,
+        "x": 365,
+        "y": 22,
+        "w": 162,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "X",
+        "confidence": 0.3,
+        "x": 76,
+        "y": 158,
+        "w": 36,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "Google Account",
+        "confidence": 1,
+        "x": 274,
+        "y": 158,
+        "w": 256.4,
+        "h": 42.5,
+        "source": "pixels"
+      },
+      {
+        "text": "Andy Prevalsky",
+        "confidence": 1,
+        "x": 363.9,
+        "y": 314,
+        "w": 305.6,
+        "h": 50.1,
+        "source": "pixels"
+      },
+      {
+        "text": "a@roselabs.ai",
+        "confidence": 0.5,
+        "x": 307,
+        "y": 355,
+        "w": 182,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "Critical security issues found",
+        "confidence": 1,
+        "x": 383,
+        "y": 507,
+        "w": 430,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "Secure your account in the",
+        "confidence": 1,
+        "x": 341,
+        "y": 553,
+        "w": 346,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "Security Checkup",
+        "confidence": 1,
+        "x": 283,
+        "y": 591,
+        "w": 230,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Take action",
+        "confidence": 1,
+        "x": 580,
+        "y": 672,
+        "w": 152.3,
+        "h": 29.8,
+        "source": "pixels"
+      },
+      {
+        "text": "Personal info",
+        "confidence": 1,
+        "x": 265,
+        "y": 819,
+        "w": 194,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Name, email, phone, address",
+        "confidence": 1,
+        "x": 356,
+        "y": 862,
+        "w": 376,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "***",
+        "confidence": 1,
+        "x": 105,
+        "y": 1157,
+        "w": 54,
+        "h": 22,
+        "source": "pixels"
+      },
+      {
+        "text": "Security & sign-in",
+        "confidence": 1,
+        "x": 300,
+        "y": 979,
+        "w": 264,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "Recent security events, Password",
+        "confidence": 1,
+        "x": 385,
+        "y": 1019,
+        "w": 430,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Manager, Security Checkup",
+        "confidence": 1,
+        "x": 347,
+        "y": 1057,
+        "w": 354,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Google password",
+        "confidence": 1,
+        "x": 300,
+        "y": 1146,
+        "w": 264,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "Last changed Oct 18",
+        "confidence": 1,
+        "x": 302,
+        "y": 1185,
+        "w": 264,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "Linked apps",
+        "confidence": 1,
+        "x": 258.7,
+        "y": 1274.3,
+        "w": 179.4,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "Your linked apps and data",
+        "confidence": 1,
+        "x": 334,
+        "y": 1313,
+        "w": 332,
+        "h": 26,
+        "source": "pixels"
+      }
+    ],
+    "icloud_saved_to_icloud_cursor54": [
+      {
+        "text": "No SIM S",
+        "confidence": 1,
+        "x": 73,
+        "y": 20,
+        "w": 122,
+        "h": 24,
+        "source": "pixels"
+      },
+      {
+        "text": "<",
+        "confidence": 1,
+        "x": 74,
+        "y": 85,
+        "w": 36,
+        "h": 50,
+        "source": "pixels"
+      },
+      {
+        "text": "L: 12:40 PM",
+        "confidence": 1,
+        "x": 373,
+        "y": 22,
+        "w": 146,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud",
+        "confidence": 1,
+        "x": 372,
+        "y": 84,
+        "w": 108,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Saved to iCloud",
+        "confidence": 1,
+        "x": 224,
+        "y": 392,
+        "w": 320,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "Manage how apps and features on this",
+        "confidence": 1,
+        "x": 359,
+        "y": 447,
+        "w": 586,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "iPhone sync to iCloud. Learn more...",
+        "confidence": 1,
+        "x": 336,
+        "y": 490,
+        "w": 552,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "Mi",
+        "confidence": 1,
+        "x": 90,
+        "y": 1042,
+        "w": 40,
+        "h": 40,
+        "source": "pixels"
+      },
+      {
+        "text": "O",
+        "confidence": 1,
+        "x": 92,
+        "y": 1289,
+        "w": 60,
+        "h": 62,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Photos",
+        "confidence": 1,
+        "x": 259,
+        "y": 652,
+        "w": 218,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "8,941 Items \u2022 56.2 GB",
+        "confidence": 1,
+        "x": 304,
+        "y": 701,
+        "w": 300,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Drive",
+        "confidence": 1,
+        "x": 246,
+        "y": 774,
+        "w": 192,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "187.3 GB",
+        "confidence": 1,
+        "x": 215,
+        "y": 821,
+        "w": 122,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Mail",
+        "confidence": 1,
+        "x": 237,
+        "y": 897,
+        "w": 178.6,
+        "h": 33.6,
+        "source": "pixels"
+      },
+      {
+        "text": "12.6 KB",
+        "confidence": 1,
+        "x": 205,
+        "y": 944,
+        "w": 106,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Passwords & Keychain",
+        "confidence": 1,
+        "x": 326,
+        "y": 1023,
+        "w": 344,
+        "h": 38,
+        "source": "pixels"
+      },
+      {
+        "text": "196 Items",
+        "confidence": 1,
+        "x": 220,
+        "y": 1068,
+        "w": 136.1,
+        "h": 24.6,
+        "source": "pixels"
+      },
+      {
+        "text": "Notes",
+        "confidence": 1,
+        "x": 201,
+        "y": 1145,
+        "w": 90,
+        "h": 26.2,
+        "source": "pixels"
+      },
+      {
+        "text": "10.3 MB \u2022 10.3 MB",
+        "confidence": 1,
+        "x": 279,
+        "y": 1191,
+        "w": 250,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Messages in iCloud",
+        "confidence": 1,
+        "x": 303,
+        "y": 1269,
+        "w": 294,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "20.4 GB",
+        "confidence": 1,
+        "x": 210,
+        "y": 1313,
+        "w": 112,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "On \u203a",
+        "confidence": 1,
+        "x": 647,
+        "y": 672,
+        "w": 82,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 647,
+        "y": 796,
+        "w": 82,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 647,
+        "y": 920,
+        "w": 86,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 648,
+        "y": 1041,
+        "w": 84.4,
+        "h": 31,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 648,
+        "y": 1164,
+        "w": 84,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 647,
+        "y": 1288,
+        "w": 86,
+        "h": 36,
+        "source": "pixels"
+      }
+    ],
+    "facetime_settings_cursor71": [
+      {
+        "text": "SOS only S",
+        "confidence": 1,
+        "x": 84,
+        "y": 22,
+        "w": 144.2,
+        "h": 29,
+        "source": "pixels"
+      },
+      {
+        "text": "L: 12:42 PM",
+        "confidence": 1,
+        "x": 376,
+        "y": 22,
+        "w": 140,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "iMessage",
+        "confidence": 1,
+        "x": 374,
+        "y": 86.5,
+        "w": 158.4,
+        "h": 39.1,
+        "source": "pixels"
+      },
+      {
+        "text": "You can be reached by FaceTime at",
+        "confidence": 1,
+        "x": 344,
+        "y": 265,
+        "w": 560,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "V +1 (972) 977-7432",
+        "confidence": 1,
+        "x": 244,
+        "y": 348,
+        "w": 360,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "Vandyprevalsky@icloud.com",
+        "confidence": 0.5,
+        "x": 306,
+        "y": 452,
+        "w": 496,
+        "h": 44,
+        "source": "pixels"
+      },
+      {
+        "text": "v andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 307,
+        "y": 555,
+        "w": 486,
+        "h": 38,
+        "source": "pixels"
+      },
+      {
+        "text": "Caller ID",
+        "confidence": 1,
+        "x": 132,
+        "y": 682,
+        "w": 132.1,
+        "h": 28.6,
+        "source": "pixels"
+      },
+      {
+        "text": "V +1 (972) 977-7432",
+        "confidence": 1,
+        "x": 246,
+        "y": 768,
+        "w": 356,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "andyprevalsky@icloud.com",
+        "confidence": 1,
+        "x": 344,
+        "y": 871,
+        "w": 416,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 343,
+        "y": 974,
+        "w": 414,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "Apple Account: andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 324,
+        "y": 1058,
+        "w": 520,
+        "h": 24,
+        "source": "pixels"
+      }
+    ],
+    "contacts_accounts_cursor9": [
+      {
+        "text": "No SIM S",
+        "confidence": 1,
+        "x": 73,
+        "y": 21,
+        "w": 122,
+        "h": 26,
+        "source": "pixels"
+      },
+      {
+        "text": "<",
+        "confidence": 1,
+        "x": 73,
+        "y": 84,
+        "w": 42,
+        "h": 56,
+        "source": "pixels"
+      },
+      {
+        "text": "\u2022 3:55 PM",
+        "confidence": 1,
+        "x": 376,
+        "y": 22,
+        "w": 128,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "Contacts Accounts",
+        "confidence": 1,
+        "x": 376,
+        "y": 84,
+        "w": 304,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Accounts",
+        "confidence": 1,
+        "x": 141,
+        "y": 228,
+        "w": 150.2,
+        "h": 29.3,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud",
+        "confidence": 1,
+        "x": 110,
+        "y": 310,
+        "w": 104,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Drive, iCloud Mail, Contacts, and",
+        "confidence": 1,
+        "x": 332,
+        "y": 363,
+        "w": 544,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "10 more...",
+        "confidence": 1,
+        "x": 130,
+        "y": 400,
+        "w": 136,
+        "h": 24,
+        "source": "pixels"
+      },
+      {
+        "text": "Add Account",
+        "confidence": 1,
+        "x": 165,
+        "y": 500,
+        "w": 198,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Fetch New Data",
+        "confidence": 1,
+        "x": 186,
+        "y": 676,
+        "w": 244,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Push >",
+        "confidence": 1,
+        "x": 632,
+        "y": 676,
+        "w": 112,
+        "h": 28,
+        "source": "pixels"
+      }
+    ],
+    "icloud_see_all_cursor14": [
+      {
+        "text": "No SIM S",
+        "confidence": 1,
+        "x": 72,
+        "y": 20,
+        "w": 120.2,
+        "h": 25,
+        "source": "pixels"
+      },
+      {
+        "text": "\u2022",
+        "confidence": 1,
+        "x": 93,
+        "y": 192,
+        "w": 46,
+        "h": 48,
+        "source": "pixels"
+      },
+      {
+        "text": "\u2022 3:46 PM",
+        "confidence": 1,
+        "x": 376,
+        "y": 21,
+        "w": 132,
+        "h": 22,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud",
+        "confidence": 1,
+        "x": 372,
+        "y": 84,
+        "w": 108,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "Messages in iCloud",
+        "confidence": 1,
+        "x": 303,
+        "y": 174,
+        "w": 294,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "20.4 GB",
+        "confidence": 1,
+        "x": 210,
+        "y": 218,
+        "w": 112.1,
+        "h": 28.6,
+        "source": "pixels"
+      },
+      {
+        "text": "Health",
+        "confidence": 1,
+        "x": 206,
+        "y": 295,
+        "w": 100.1,
+        "h": 30.4,
+        "source": "pixels"
+      },
+      {
+        "text": "19.9 MB",
+        "confidence": 1,
+        "x": 209,
+        "y": 341,
+        "w": 114.3,
+        "h": 31.2,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Calendar",
+        "confidence": 1,
+        "x": 276,
+        "y": 427,
+        "w": 252,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Siri",
+        "confidence": 1,
+        "x": 179,
+        "y": 528,
+        "w": 54,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "Contacts",
+        "confidence": 1,
+        "x": 225,
+        "y": 619,
+        "w": 138.4,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "64.1 MB",
+        "confidence": 1,
+        "x": 210,
+        "y": 665,
+        "w": 112.2,
+        "h": 30.8,
+        "source": "pixels"
+      },
+      {
+        "text": "Reminders",
+        "confidence": 1,
+        "x": 237,
+        "y": 751,
+        "w": 162.3,
+        "h": 31.4,
+        "source": "pixels"
+      },
+      {
+        "text": "Safari",
+        "confidence": 1,
+        "x": 200,
+        "y": 850,
+        "w": 92,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "News",
+        "confidence": 1,
+        "x": 198,
+        "y": 951,
+        "w": 84.3,
+        "h": 30.7,
+        "source": "pixels"
+      },
+      {
+        "text": "Stocks",
+        "confidence": 1,
+        "x": 207,
+        "y": 1051,
+        "w": 106.1,
+        "h": 30.3,
+        "source": "pixels"
+      },
+      {
+        "text": "Home",
+        "confidence": 1,
+        "x": 201,
+        "y": 1150,
+        "w": 90.5,
+        "h": 29.5,
+        "source": "pixels"
+      },
+      {
+        "text": "Fitness+",
+        "confidence": 1,
+        "x": 222,
+        "y": 1251,
+        "w": 132.3,
+        "h": 31.3,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 647,
+        "y": 193,
+        "w": 82,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 648,
+        "y": 316,
+        "w": 84,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "On",
+        "confidence": 1,
+        "x": 629,
+        "y": 427,
+        "w": 46,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 646,
+        "y": 528,
+        "w": 84,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "666666",
+        "confidence": 1,
+        "x": 624,
+        "y": 1013,
+        "w": 120,
+        "h": 638,
+        "source": "pixels"
+      }
+    ],
+    "icloud_see_all_cursor38": [
+      {
+        "text": "No SIM S",
+        "confidence": 1,
+        "x": 70,
+        "y": 21,
+        "w": 116,
+        "h": 22,
+        "source": "pixels"
+      },
+      {
+        "text": "\u2022 3:52 PM",
+        "confidence": 1,
+        "x": 376,
+        "y": 21,
+        "w": 132,
+        "h": 22,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud",
+        "confidence": 1,
+        "x": 372,
+        "y": 84,
+        "w": 108,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 646,
+        "y": 164,
+        "w": 84,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "20.4 GB",
+        "confidence": 1,
+        "x": 210,
+        "y": 190,
+        "w": 112.1,
+        "h": 28.4,
+        "source": "pixels"
+      },
+      {
+        "text": "Health",
+        "confidence": 1,
+        "x": 206,
+        "y": 266,
+        "w": 100.3,
+        "h": 29.2,
+        "source": "pixels"
+      },
+      {
+        "text": "19.9 MB",
+        "confidence": 1,
+        "x": 210,
+        "y": 313,
+        "w": 112.1,
+        "h": 30.5,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Calendar",
+        "confidence": 1,
+        "x": 276,
+        "y": 399,
+        "w": 252,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 646,
+        "y": 288,
+        "w": 84,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "On",
+        "confidence": 1,
+        "x": 627,
+        "y": 400,
+        "w": 46,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Siri",
+        "confidence": 1,
+        "x": 181,
+        "y": 499,
+        "w": 54,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 647,
+        "y": 500,
+        "w": 82,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Contacts",
+        "confidence": 1,
+        "x": 224,
+        "y": 591,
+        "w": 140.1,
+        "h": 30.7,
+        "source": "pixels"
+      },
+      {
+        "text": "64.1 MB",
+        "confidence": 1,
+        "x": 210,
+        "y": 637,
+        "w": 112.5,
+        "h": 31.8,
+        "source": "pixels"
+      },
+      {
+        "text": "Reminders",
+        "confidence": 1,
+        "x": 237,
+        "y": 723,
+        "w": 162.6,
+        "h": 33.2,
+        "source": "pixels"
+      },
+      {
+        "text": "Safari",
+        "confidence": 1,
+        "x": 200,
+        "y": 823,
+        "w": 92,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "News",
+        "confidence": 1,
+        "x": 197,
+        "y": 923,
+        "w": 86.5,
+        "h": 31.5,
+        "source": "pixels"
+      },
+      {
+        "text": "Stocks",
+        "confidence": 1,
+        "x": 206,
+        "y": 1023,
+        "w": 104,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Home",
+        "confidence": 1,
+        "x": 201,
+        "y": 1123,
+        "w": 91,
+        "h": 33,
+        "source": "pixels"
+      },
+      {
+        "text": "Fitness+",
+        "confidence": 1,
+        "x": 222,
+        "y": 1224,
+        "w": 132,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Wallet",
+        "confidence": 1,
+        "x": 203,
+        "y": 1320,
+        "w": 94,
+        "h": 24,
+        "source": "pixels"
+      },
+      {
+        "text": "6600",
+        "confidence": 0.5,
+        "x": 625,
+        "y": 989,
+        "w": 122,
+        "h": 686,
+        "source": "pixels"
+      }
+    ]
+  },
+  "expectedAppleIdentity": "andyprevalsky@yahoo.com",
+  "expectedGoogleIdentity": "a@roselabs.ai",
+  "expectedReceiveAddress": "+19729777432"
+}

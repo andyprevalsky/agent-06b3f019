@@ -282,6 +282,32 @@ logger = structlog.get_logger()
 
 # Resume marker for a sign-in-help request the user declined.
 AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
+# Typed one-tap owner action on a native phone code request (no user text).
+AUTH_ASSISTANCE_RESEND_CODE_RESPONSE = "__AUTH_ASSISTANCE_RESEND_CODE__"
+AUTH_RESEND_CODE_RESULT = {
+    "success": False,
+    "status": "resend_code_requested",
+    "user_action": "resend_code",
+    "message": (
+        "The user did not receive the code and tapped Resend code; no code was entered. "
+        "Observe the phone, request a new code with the provider's own control (for example "
+        "Resend code, or Try another way then a text message), then request the user's help "
+        "for the new code again."
+    ),
+}
+
+
+def auth_assistance_declined_message(auth_realm: Optional[str]) -> str:
+    """Facts only: the exact request the user declined, then what the browser did.
+
+    The quoted question is the one the backend showed the user
+    (back-end/src/domains/auth-assistance/repo.ts, repo.nativeWrite.ts).
+    """
+    if auth_realm == "iphone":
+        return 'The user declined the request "Complete the protected step on your iPhone". The browser task stopped.'
+    return f'The user declined the request "Sign in to {auth_realm or "the site"}". The browser task stopped.'
+
+
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
@@ -1241,19 +1267,26 @@ def _model_visible_browser_message(
     *,
     action_result_redact: Any = None,
     secret_values_used: bool = False,
+    authored_redact: Any = None,
 ) -> Any:
-    """Project a native transcript envelope without exempting its page payloads."""
+    """Project a native transcript envelope without exempting its page payloads.
+
+    ``authored_redact`` projects the model's own text and tool arguments; the
+    model can only have copied them from what it was shown.
+    """
     if not isinstance(message, dict):
         return redact(message)
+    authored = authored_redact if callable(authored_redact) else redact
 
     def visible_json(text: Any, action_name: str = "", *, tool_arguments: bool = False) -> Any:
+        project = authored if tool_arguments else redact
         if not isinstance(text, str):
-            return redact(text)
+            return project(text)
         try:
             original = json.loads(text)
         except (ValueError, TypeError):
-            return redact(text)
-        payload = redact(original)
+            return project(text)
+        payload = project(original)
         if tool_arguments:
             target_fields = {
                 "click": ("index",),
@@ -1274,7 +1307,10 @@ def _model_visible_browser_message(
         elif action_name and callable(action_result_redact):
             payload = action_result_redact(action_name, original)
         from browser_tools.result_projection import preserve_output_protocol
-        payload = preserve_output_protocol(original, payload, action_name, redact, arguments=tool_arguments)
+        payload = preserve_output_protocol(
+            original, payload, action_name, project, arguments=tool_arguments,
+            scoped_redact=authored_redact if callable(authored_redact) else None,
+        )
         return json_dumps_compact(payload)
 
     safe = redact_with_screenshots(message, redact)
@@ -1296,7 +1332,10 @@ def _model_visible_browser_message(
             blocks.append(visible_block)
         safe["content"] = blocks
     elif content is not None:
-        safe["content"] = visible_json(content, str(message.get("name") or "")) if role == "tool" else redact(content)
+        safe["content"] = (
+            visible_json(content, str(message.get("name") or "")) if role == "tool"
+            else authored(content) if role == "assistant" else redact(content)
+        )
         if is_inter_agent_message(message) and isinstance(safe["content"], str):
             # Keep the inter-agent marker: RoseClient settles a trailing one to user role.
             safe["content"] = InterAgentText(safe["content"])
@@ -1335,10 +1374,13 @@ def _model_visible_browser_turn_messages(
     *,
     secret_values_used: bool,
     action_result_redact: Any = None,
+    authored_redact: Any = None,
 ) -> Any:
     """Keep ordinary image results and their original tool-call association."""
     return [
-        _model_visible_browser_message(message, redact, action_result_redact=action_result_redact)
+        _model_visible_browser_message(
+            message, redact, action_result_redact=action_result_redact, authored_redact=authored_redact
+        )
         for message in messages
     ] if isinstance(messages, list) else redact_with_screenshots(messages, redact)
 
@@ -3926,6 +3968,7 @@ async def _call_browser_use_with_rotation(
             redact,
             secret_values_used=dom_service.secret_values_used,
             action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+            authored_redact=getattr(dom_service, "model_visible_observation", None),
         )
         rose_kwargs["browser_state"] = redact(browser_state_for_llm)
         from browser_tools.dom_service import ActionHistory
@@ -3947,6 +3990,7 @@ async def _call_browser_use_with_rotation(
                 redact,
                 secret_values_used=dom_service.secret_values_used,
                 action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+                authored_redact=getattr(dom_service, "model_visible_observation", None),
             )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
@@ -4603,12 +4647,20 @@ async def _hard_recover_frozen_renderer_page(
     fallback_url: str = "",
     timeout_s: float = 20.0,
 ) -> tuple[Optional[Any], List[str]]:
-    """Open a fresh page, then kill the frozen target via browser-process CDP.
+    """Replace a frozen page inside its own BrowserContext via browser-process CDP.
 
     When classify_evaluate_cdp_stall reports renderer_main_thread_blocked, the
-    page-target CDP is dead but Browser.getVersion still works. Creating the
-    replacement page *before* closing the hung target is required: closing the
-    last page target via CDP can tear down the Playwright BrowserContext.
+    page-target CDP is dead but Browser.getVersion still works. The replacement
+    page must stay in the frozen page's BrowserContext, which holds the
+    session's injected cookies and site storage. A fresh ``new_context()`` has
+    an empty cookie jar, so the task would resume logged out (H-63).
+
+    The blank replacement page is created *before* the hung target is closed,
+    because closing the last page target via CDP can tear down the Playwright
+    BrowserContext. The resume navigation runs after a best-effort close of the
+    hung targets (5 s per target, errors ignored). A same-site resume therefore
+    usually starts after the blocked renderer is gone, but a failed or slow
+    close does not stop the navigation, so this is not guaranteed.
     """
     actions: List[str] = []
     if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
@@ -4661,23 +4713,37 @@ async def _hard_recover_frozen_renderer_page(
                 await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
             browser_cdp = None
 
-    try:
-        # Prefer a fresh BrowserContext: under a pegged renderer,
-        # context.new_page() can fail with "Please use browser.new_context()".
-        new_context = await asyncio.wait_for(playwright_browser.new_context(), timeout=10.0)
-        new_page = await asyncio.wait_for(new_context.new_page(), timeout=10.0)
-        actions.append("new_context_page")
-    except Exception as exc:
-        actions.append(f"new_page_failed:{type(exc).__name__}")
+    async def _context_cookie_count() -> str:
         try:
-            new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
-            actions.append("new_page")
-        except Exception as exc2:
-            actions.append(f"context_new_page_failed:{type(exc2).__name__}")
-            if browser_cdp is not None:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
-            return None, actions
+            return str(len(await asyncio.wait_for(context.cookies(), timeout=3.0)))
+        except Exception:
+            return "unavailable"
+
+    cookies_before = await _context_cookie_count()
+    try:
+        new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
+        actions.append("new_page")
+    except Exception as exc:
+        actions.append(f"context_new_page_failed:{type(exc).__name__}")
+        if browser_cdp is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
+        return None, actions
+
+    if browser_cdp is not None:
+        closed = 0
+        for target_id in frozen_target_ids:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
+                    timeout=5.0,
+                )
+                closed += 1
+                actions.append(f"close_target:{target_id[:12]}")
+        if closed:
+            actions.append(f"closed_targets:{closed}")
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
 
     if resume_url.startswith(("http://", "https://")):
         try:
@@ -4697,26 +4763,13 @@ async def _hard_recover_frozen_renderer_page(
             await asyncio.wait_for(new_page.goto(resume_url), timeout=10.0)
             actions.append("goto_resume_url")
 
-    if browser_cdp is not None:
-        closed = 0
-        for target_id in frozen_target_ids:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
-                    timeout=5.0,
-                )
-                closed += 1
-                actions.append(f"close_target:{target_id[:12]}")
-        if closed:
-            actions.append(f"closed_targets:{closed}")
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
-
     if input_page is not None:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(input_page.close(), timeout=3.0)
             actions.append("close_playwright_page")
 
+    # Counts only: proves the resumed page kept the session cookie jar.
+    actions.append(f"context_cookies:{cookies_before}->{await _context_cookie_count()}")
     return new_page, actions
 
 
@@ -4844,9 +4897,10 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
         },
         (
             "Every visible item; one media image (or rendered_summary for multi-item). "
-            "Per item require title, numeric rating, review count, and a canonical "
-            "product-detail URL already in the trajectory — never cart/checkout/order/return URLs. "
-            "Include price, qty, description (<80 chars), seller, shipping, totals, payment, address when visible."
+            "Per item require a title; include its own product page URL already in the trajectory when it has "
+            "one — never cart/checkout/order/return URLs. "
+            "Include price, qty, description (<80 chars), rating, review count, seller, shipping, totals, payment, "
+            "address when visible."
         ),
     ),
     (
@@ -7251,6 +7305,36 @@ def _finalize_rejected_browser_approval(state: Dict[str, Any]) -> None:
         container["write_lock_approvals"] = approvals
 
 
+def _finalize_auth_resend_request(state: Dict[str, Any]) -> None:
+    """Answer the pending native auth call with the owner's typed resend intent."""
+    resend = state.get("auth_user_action") or {}
+    if resend.get("action") != "resend_code":
+        return
+    call_id = resend.get("tool_call_id")
+    for message in reversed(state.get("browser_turn_messages") or []):
+        if (message.get("role") != "tool" or message.get("name") != "request_user_assistance_for_authentication"
+                or (call_id and message.get("tool_call_id") != call_id)):
+            continue
+        try:
+            result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(result, dict) or result.get("request_id") != resend.get("request_id"):
+            continue
+        if _resolve_browser_tool_result_for_resume(
+            state.get("browser_turn_messages") or [], pending_status=result.get("status"),
+            result_updates=AUTH_RESEND_CODE_RESULT, tool_call_id=message.get("tool_call_id"),
+        ):
+            break
+    else:
+        raise BrowserResumeStoreError("Resend code request has no saved matching tool result; prior context is required")
+    for entry in reversed(state.get("action_history") or []):
+        result = entry.get("result") or {}
+        if entry.get("action") == "request_user_assistance_for_authentication" and result.get("request_id") == resend.get("request_id"):
+            entry["result"] = {**result, **AUTH_RESEND_CODE_RESULT}
+            break
+
+
 def _copy_simulated_browser_resume_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
     if not source.get("world_model_simulated"):
         return
@@ -8401,6 +8485,7 @@ async def _spawn_browser_agent_activity_v3_real(
             hydrated_resume = dict(await hydrate_resume_context(agent_id=agent_id, resume_state=write_lock_resume_state))
             if hydrated_resume.get("rejected_action") or hydrated_resume.get("approval_type") == AUTH_ASSISTANCE_DECLINED:
                 _finalize_rejected_browser_approval(hydrated_resume)
+            _finalize_auth_resend_request(hydrated_resume)
         except BrowserResumeStoreError as error:
             return {"status": "paused", "success": False, "pause_error": str(error),
                     "conversation_checkpoint": "unavailable",
@@ -8472,10 +8557,16 @@ async def _spawn_browser_agent_activity_v3_real(
         )
         # Private hydration can precede DOM binding, and cleanup can outlive
         # its transport. Keep those boundaries under the activity's policy.
-        return mask_secret_values(
+        redacted = mask_secret_values(
             redact_current_secret_values(visible),
             (write_lock_resume_state or {}).get("secret_redaction_refs"),
         )
+        if action_entries:
+            # Entry steps are harness bookkeeping that the projection restored.
+            for entry, safe_entry in zip(visible, redacted):
+                if isinstance(entry, dict) and isinstance(safe_entry, dict) and type(entry.get("step")) is int:
+                    safe_entry["step"] = entry["step"]
+        return redacted
 
     async def _save_browser_action_message(**kwargs: Any) -> Any:
         # Routing IDs stay exact; only user/model-visible payloads are redacted.
@@ -8704,6 +8795,11 @@ async def _spawn_browser_agent_activity_v3_real(
                     for field in protocol_keys:
                         if field in original:
                             visible_auth[key][field] = original[field]
+                    # The backend mints the Tilion live-view token for this
+                    # handoff and re-mints it for display; like browser_url,
+                    # the persisted copy carries it redacted.
+                    if "liveViewUrl" in original:
+                        visible_auth[key]["liveViewUrl"] = redact_url_secrets(original["liveViewUrl"])
         return result
 
     browser_url = None
@@ -9079,7 +9175,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "status": "auth_assistance_declined",
                 "success": False,
                 "user_declined_auth": True,
-                "message": "The user declined sign-in assistance. The browser task stopped without retrying authentication.",
+                "message": auth_assistance_declined_message((write_lock_resume_state or {}).get("auth_realm")),
                 "task_id": task_id,
                 "session_id": session_id,
                 "browser_url": redact_url_secrets(browser_url),
@@ -9673,9 +9769,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
             _user_context_sections.append(
                 "## Purchase Approval Context\n"
-                "Before triggering any Buy, Place Order, or other purchase write action, collect every item's "
-                "canonical product-detail URL, numeric rating, and numeric review count. Never use a cart or "
-                "checkout URL as the product link. A purchase approval is blocked if any item lacks these fields."
+                "Before triggering any Buy, Place Order, or other purchase write action, collect each item's own "
+                "product page URL when it has one, and its rating and review count when the page shows them. "
+                "Never use a cart or checkout URL as the product link."
             )
             _record_timing("parallel.data.user_profile", t)
 
@@ -9954,6 +10050,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 dom_service.model_visible_value,
                 secret_values_used=dom_service.secret_values_used,
                 action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+                authored_redact=getattr(dom_service, "model_visible_observation", None),
             )
             verifier_checkpoints[:] = dom_service.model_visible_value(verifier_checkpoints)
             reasoning_messages[:] = dom_service.model_visible_value(reasoning_messages)
@@ -10597,15 +10694,22 @@ async def _spawn_browser_agent_activity_v3_real(
                     # Do not restore the pre-redaction preview over the DOM's
                     # private-entry/secret projection. Keep only issued protocol IDs.
                     model_preview = getattr(result, "model_preview", model_preview)
+                    from browser_tools.result_projection import project_result
+                    preview_action = action.get("action", "")
                     if hasattr(dom_service, "model_visible_value"):
+                        observe = getattr(dom_service, "model_visible_observation", None)
                         model_preview = preserve_output_protocol(
-                            model_preview, dom_service.model_visible_value(model_preview),
-                            action.get("action", ""), dom_service.model_visible_value,
+                            model_preview,
+                            project_result(model_preview, preview_action, dom_service.model_visible_value, observe),
+                            preview_action, dom_service.model_visible_value, scoped_redact=observe,
                         )
                     for refs in redaction_refs:
                         redact_preview = lambda value: mask_secret_values(value, refs)
+                        scoped_preview = lambda value: mask_secret_values(value, refs, value_scoped=True)
                         model_preview = preserve_output_protocol(
-                            model_preview, redact_preview(model_preview), action.get("action", ""), redact_preview,
+                            model_preview,
+                            project_result(model_preview, preview_action, redact_preview, scoped_preview),
+                            preview_action, redact_preview, scoped_redact=scoped_preview,
                         )
                     if not hasattr(result, "__dict__"):
                         result = BrowserModelResult(result)
@@ -10896,7 +11000,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_download_persister = download_persister_task.result()
                 observe_page_state = _with_downloaded_files(observe_page_state, browser_download_persister)
                 restored_transcript_unobserved = False
-                step_timer.annotate(observe_dom=observe_needs_dom)
+                step_timer.annotate(
+                    observe_dom=observe_needs_dom,
+                    observe_dom_timing_ms=getattr(dom_service, "last_dom_build_timing_ms", None)
+                    if observe_needs_dom
+                    else None,
+                )
                 current_url = _private_browser_runtime_url(dom_service, observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
             except asyncio.TimeoutError:
@@ -15353,8 +15462,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             yield terminal_event
                         return
                     user_declined = False
+                    user_resend = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         signal_response = workflow_instance._signal_responses.pop(request_id, None)
+                        user_resend = (
+                            isinstance(signal_response, str)
+                            and signal_response.strip() == AUTH_ASSISTANCE_RESEND_CODE_RESPONSE
+                            and (result.get("auth_target") or {}).get("kind") == "iphone"
+                        )
                         # A decline used to be read as "the user signed in": the
                         # task resumed on a signed-out page and asked again.
                         user_declined = (
@@ -15387,6 +15502,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             write_lock_resume_state[payment_field] = prior_resume[payment_field]
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
+                    if user_resend:
+                        write_lock_resume_state["auth_user_action"] = {
+                            "action": "resend_code",
+                            "request_id": request_id,
+                            "tool_call_id": result.get("pending_tool_call_id"),
+                        }
                     if user_declined:
                         write_lock_resume_state = _rejected_browser_resume_state(
                             {**result, "approval_type": "auth_assistance"}, write_lock_resume_state)
@@ -15394,7 +15515,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
-                        title="User Declined To Sign In" if user_declined else "User Assistance Received",
+                        title=("User Declined To Sign In" if user_declined else
+                               "User Asked To Resend The Code" if user_resend else "User Assistance Received"),
                         message="",
                         status=MessageStatus.FINISHED,
                         metadata={

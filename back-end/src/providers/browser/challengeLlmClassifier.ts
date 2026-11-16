@@ -28,6 +28,14 @@ const log = createLogger('ChallengeLlmClassifier');
 
 export const CHALLENGE_LLM_MODEL = 'rose-labs/rose-1-mini';
 export const CHALLENGE_LLM_SETTLE_MS = 60_000;
+/**
+ * Settle before the FIRST classification. Storefronts keep beacons/long-polls
+ * running and never reach `networkidle`, so waiting the whole 60 s solver budget
+ * before every classification made each recovery candidate cost ~66 s even when
+ * the page was already clean (H-20). A clean first look is final; a challenged
+ * busy page still gets the remaining budget and a second classification.
+ */
+export const CHALLENGE_LLM_FIRST_SETTLE_MS = 8_000;
 const CLEANED_DOM_CHAR_CAP = 12_000;
 const NETWORK_ENTRY_CAP = 40;
 const NETWORK_BODY_CHAR_CAP = 200;
@@ -124,21 +132,28 @@ async function collectCompletion(stream: AsyncIterable<CompletionChunk>): Promis
   return { text: text.trim(), usage, actualModel };
 }
 
-/** Wait for load + network quiet (best-effort) before classifying. */
+/**
+ * Wait for load + network quiet (best-effort) before classifying. Returns true
+ * when the page went network-idle inside the budget (nothing left to wait for).
+ */
 export async function waitForDomSettled(
   page: Page,
   timeoutMs: number = CHALLENGE_LLM_SETTLE_MS
-): Promise<void> {
+): Promise<boolean> {
   const started = Date.now();
   await page
     .waitForLoadState('domcontentloaded', { timeout: Math.min(15_000, timeoutMs) })
     .catch(() => undefined);
   const remaining = Math.max(0, timeoutMs - (Date.now() - started));
-  if (remaining > 0) {
-    await page.waitForLoadState('networkidle', { timeout: remaining }).catch(() => undefined);
-  }
+  const networkIdle =
+    remaining > 0 &&
+    (await page.waitForLoadState('networkidle', { timeout: remaining }).then(
+      () => true,
+      () => false
+    ));
   // Short quiet period so late title/body hydration can land.
   await page.waitForTimeout(1_500);
+  return networkIdle;
 }
 
 export async function captureCleanedDom(page: Page): Promise<string> {
@@ -544,20 +559,44 @@ export async function classifyPageAfterSettle(
     agentDomTree?: string | null;
     networkEntries?: NetworkSummaryEntry[];
     recoveryReason?: string | null;
+    /** Test seam: the classifier call (defaults to the rose-1-mini LLM). */
+    classify?: typeof classifyChallengeWithLlm;
   }
 ): Promise<{
   clean: boolean;
   reason: string;
   title: string;
+  /** Usage of the deciding (last) classification. */
   usage: ChallengeClassifierLlmUsage | null;
+  /** Usage of every classification made (one or two). */
+  usages: ChallengeClassifierLlmUsage[];
 }> {
-  await waitForDomSettled(page, settleTimeoutMs);
-  const context = await captureChallengeClassifierContext(page, response, options);
-  const result = await classifyChallengeWithLlm(context, billing);
+  const started = Date.now();
+  const classify = options?.classify ?? classifyChallengeWithLlm;
+  const usages: ChallengeClassifierLlmUsage[] = [];
+  const look = async () => {
+    const context = await captureChallengeClassifierContext(page, response, options);
+    const result = await classify(context, billing);
+    if (result.usage) usages.push(result.usage);
+    return { context, result };
+  };
+  const networkIdle = await waitForDomSettled(
+    page,
+    Math.min(CHALLENGE_LLM_FIRST_SETTLE_MS, settleTimeoutMs)
+  );
+  let decided = await look();
+  const remainingMs = settleTimeoutMs - (Date.now() - started);
+  // Only a challenged page that is still loading can change: give the provider
+  // solver the rest of the original budget, then look once more.
+  if (decided.result.challenged && !networkIdle && remainingMs > 0) {
+    await waitForDomSettled(page, remainingMs);
+    decided = await look();
+  }
   return {
-    clean: !result.challenged,
-    reason: result.reason,
-    title: context.title,
-    usage: result.usage,
+    clean: !decided.result.challenged,
+    reason: decided.result.reason,
+    title: decided.context.title,
+    usage: decided.result.usage,
+    usages,
   };
 }

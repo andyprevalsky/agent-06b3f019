@@ -120,7 +120,12 @@ describe('iPhone connection in normal Integrations', () => {
       expect(connect).toBeEnabled();
       expect(connect).toHaveTextContent(/^Connect$/);
       const section = screen.getByRole('region', { name: 'iPhone connection' });
-      expect(within(section).getByRole('heading', { name: 'iPhone' })).toBeInTheDocument();
+      expect(within(section).getByRole('heading', { name: 'Phone' })).toBeInTheDocument();
+      // Android sits under iPhone in the Phone category, marked Coming soon like other rows.
+      const android = within(section).getByTestId('integration-row-android');
+      expect(within(android).getByText('Android')).toBeInTheDocument();
+      expect(within(android).getByText('Coming soon')).toBeInTheDocument();
+      expect(within(android).getByTestId('android-logo')).toBeInTheDocument();
       const row = within(section).getByTestId('integration-row-iphone');
       expect(within(row).getByTestId('iphone-apple-icon')).toBeInTheDocument();
       expect(row).toContainElement(connect);

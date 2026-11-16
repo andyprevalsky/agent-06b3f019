@@ -14,6 +14,13 @@ HTTP_TIMEOUT = 45.0
 AUTH_HTTP_TIMEOUT = 18.0
 ACTIVITY_TIMEOUT_SECONDS = 55
 
+# Lantern answers a repeated identical search from the existing session, whose
+# fixed TTL started at the first search. A first page with less continuation
+# lifetime than this is fetched again once that session expires, inside the
+# HTTP budget and with a reserve left for the second request.
+SEARCH_SESSION_MIN_LIFETIME_SECONDS = 30.0
+SEARCH_SESSION_REFRESH_RESERVE_SECONDS = 10.0
+
 # Do not immediately replay rate-limited, ambiguous or unknown-outcome calls.
 RETRY_MAX_ATTEMPTS = 1
 RETRY_BACKOFF_COEFFICIENT = 2.0

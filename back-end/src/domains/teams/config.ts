@@ -1,4 +1,18 @@
-export const SHAREABLE_PROVIDERS = ['gmail', 'imessage'] as const;
+/** Every connectable integration except iPhone, browser cookies, passwords and Pebble Index 01. */
+export const SHAREABLE_PROVIDERS = [
+  'gmail',
+  'imessage',
+  'whatsapp',
+  'linkedin',
+  'granola',
+  'fireflies',
+  'plaid',
+  'github_repo',
+  'claude_code',
+  'gpt_code',
+  'cli',
+  'mcp',
+] as const;
 export const CONTACT_LIMIT = 20;
 /** A SENDING claim older than this lease is presumed to have crashed before recording its result. */
 export const INVITE_SENDING_LEASE_MS = 10 * 60 * 1000;
