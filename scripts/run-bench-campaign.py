@@ -1548,6 +1548,20 @@ def provider_capacity_refusal(benches: int, tasks: list[str] | None = None) -> i
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
 
 
+def delegating_ceiling_refusal(benches: int, tasks: list[str] | None = None) -> int:
+    """0 when the app delegating-guest ceiling can admit `benches` simultaneous REAL/SIM copies.
+
+    Fleet admission refuses live REAL/SIM primaries + requested above
+    CLOUDBENCH_DELEGATING_PRIMARY_CEILING after its admission wait, recording
+    INFRA; a campaign (or sharded group) wider than the ceiling can never fit.
+    """
+    capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
+    try:
+        return capacity["delegating_check"](benches, tasks=tasks)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
+
+
 # scripts/run-bench run_bench_secret_like_setting, re-applied here because a
 # recorded name list is untrusted input (parity regression in
 # cloudbench_campaign_inventory_test.py).
@@ -1676,6 +1690,9 @@ def main() -> int:
         refused = provider_capacity_refusal(global_benches, args.task)
         if refused:
             return refused
+    refused = delegating_ceiling_refusal(global_benches, args.task)
+    if refused:
+        return refused
     controller_nice = os.environ.get("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE", "0")
     if controller_nice not in ("0", "10"):
         raise SystemExit("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE must be 0 or 10")

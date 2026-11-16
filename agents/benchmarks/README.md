@@ -556,6 +556,11 @@ Polar-only selection caps at 135, where Kernel binds). Mixed, unknown or
 uncatalogued selections keep the global peaks (70). Do not retry, split or
 work around a refusal: ask the user to raise the provider limits (then record
 them in the registry in a reviewed change) or rerun at or below the cap.
+The same launchers also refuse, with exit 78, a simultaneous REAL/SIM width above the
+app-wide delegating-guest ceiling that fleet admission enforces
+(`CLOUDBENCH_DELEGATING_PRIMARY_CEILING`, default 70; DEMO-lane tasks do not count).
+Lower the width or use a rolling campaign with `--concurrency` at or below it; raise the
+ceiling only with a measured backend load at the wider width.
 Task-free `--infra-probe` fleets and validated `--demo-cache` replays are exempt.
 
 ### World-model refresh conformance

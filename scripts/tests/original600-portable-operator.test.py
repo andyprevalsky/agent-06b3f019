@@ -2112,6 +2112,8 @@ class Portable(unittest.TestCase):
             for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64','CLOUDBENCH_GUEST_PG_MAJOR','FIXTURE_SEED_HEAD_EXIT']:env.pop(key,None)
             if limits is not None:
                 env['CLOUDBENCH_PROVIDER_LIMITS_FILE'] = str(private(inputs/'provider-limits.json', limits))
+                # A wide fixture admits the original 600 under the fleet's delegating-guest ceiling too.
+                env['CLOUDBENCH_DELEGATING_PRIMARY_CEILING'] = '600'
             yield types.SimpleNamespace(root=root, args=args, env=env, marker=marker, state=state, inputs=inputs, fakebin=fakebin)
 
     def test_public_check_owns_exact_historical_catalog_objects(self):
@@ -2304,7 +2306,8 @@ class Portable(unittest.TestCase):
 
     def test_sharded_polar_manifest_selects_its_demand_profile_while_mixed_and_original_keep_70(self):
         # run-bench routes 74 Polar copies (>32) to this sharded operator; its capacity check must
-        # select the measured Polar demand profile as fleets and campaigns do, not the global 70.
+        # select the measured Polar demand profile as fleets and campaigns do, not the global 70,
+        # and must still refuse a width above the app delegating-guest ceiling.
         requests = []
         with self.public_check(warm_fixture(time.time()), requests, catalogs=True) as fx:
             def manifest_args(label, names):
@@ -2312,8 +2315,26 @@ class Portable(unittest.TestCase):
                 return fx.args[:fx.args.index('--tasks')+1] + [str(path)] + fx.args[fx.args.index('--tasks')+2:]
             polar = polar_names(74)
             self.assertEqual(len(polar), 74)
+            # 2026-11-16: 74 Polar copies passed this check, then every sharded launch hit the
+            # app-wide delegating-guest ceiling (70 live REAL/SIM primaries) and stopped at 5% INFRA.
+            # All copies start at once, so the check refuses before any credential or provider read.
+            refused = subprocess.run(manifest_args('polar74', polar) + ['--repetitions', '1', '--task-timeout', '480'],
+                                     cwd='/', env=fx.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(refused.returncode, 78, refused.stderr)
+            self.assertIn('provider demand profile polar-bench', refused.stderr)
+            self.assertIn('❌ Delegating-guest ceiling: requested 74 simultaneous REAL/SIM copies, maximum 70 '
+                          '(CLOUDBENCH_DELEGATING_PRIMARY_CEILING, default 70).', refused.stderr)
+            self.assertIn('--concurrency 70 or less', refused.stderr)
+            self.assertEqual(json.loads(refused.stdout), dict(status='REFUSED_DELEGATING_CEILING', source_ref=fx.args[3],
+                                                              copies=74, delegating_ceiling=70, provider_calls=0))
+            self.assertNotIn('CHECKED_NOT_LAUNCHED', refused.stdout)
+            self.assertEqual(requests, [])
+            self.assertFalse(fx.marker.exists())
+            self.assertEqual(list(fx.state.iterdir()), [])
+            # The same fleet ceiling override admits the width (it never changes the default 70).
             admitted = subprocess.run(manifest_args('polar74', polar) + ['--repetitions', '1', '--task-timeout', '480'],
-                                      cwd='/', env=fx.env, capture_output=True, text=True, timeout=60)
+                                      cwd='/', env=dict(fx.env, CLOUDBENCH_DELEGATING_PRIMARY_CEILING='74'),
+                                      capture_output=True, text=True, timeout=60)
             self.assertEqual(admitted.returncode, 0, admitted.stderr)
             self.assertNotIn('REFUSED_PROVIDER_RATE_LIMITS', admitted.stdout)
             self.assertIn('provider demand profile polar-bench', admitted.stderr)
