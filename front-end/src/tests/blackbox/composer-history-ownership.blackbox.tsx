@@ -18,6 +18,7 @@ vi.mock('@/features/terminal/components/GateStack', () => ({ GateStack: () => nu
 vi.mock('@/features/terminal-component-group', () => ({
   useAppView: () => null,
   useOpenCodeAgent: () => null,
+  useCodeAgentView: () => null,
   PinnedQuestionMount: () => null,
   TaskCompletedBar: () => null,
   BackgroundAgentsBanner: ({ selectedAgentId }: { selectedAgentId: string | null }) => (

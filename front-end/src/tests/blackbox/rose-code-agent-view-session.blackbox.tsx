@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { HttpResponse } from 'msw';
+import { http, HttpResponse } from 'msw';
 
 import * as roseDesktopFlag from '@/lib/roseDesktop';
 import Terminal from '@/pages/Terminal';
@@ -21,12 +21,15 @@ import {
   msg,
 } from './code-agent-steering.fixtures';
 import { capturedRequests } from './msw/capture';
+import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import {
   OTHER,
+  API_BASE,
   OWNER,
   TASK,
   liveRows,
+  agentRow,
   openFromRow,
   ownerChat,
   ownerCodeAgentRow,
@@ -180,7 +183,58 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     const page = await screen.findByTestId('code-agent-view');
     // No row click: the title is the session's own snapshot title.
     expect(page).toHaveAttribute('aria-label', 'Codex: 3-state speed button');
+    const trail = screen.getByRole('navigation', { name: 'Agent breadcrumb' });
+    expect(within(trail).getByText('3-state speed button')).toHaveAttribute('aria-current', 'page');
     await waitFor(() => expect(row()).toHaveAttribute('aria-current', 'true'));
+  });
+
+  it('a coding breadcrumb preserves a nested owner path and selects a different ancestor', async () => {
+    // Detail refreshes return the same persisted message identities.
+    const ownerMessages = ownerChat(liveRows());
+    const ancestorMessages = [msg({}, { role: 'USER', text: 'Plan a Tahoe weekend' })];
+    server.use(
+      http.get(`${API_BASE}/agents/${OWNER}`, () =>
+        HttpResponse.json({
+          agent: {
+            ...agentRow(OWNER, 'Polish Rose UI', 1),
+            parent_agent_id: OTHER,
+            parent_goal: 'Plan Tahoe trip',
+            verifier: null,
+            tools: [],
+          },
+          messages: ownerMessages,
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+      http.get(`${API_BASE}/agents/${OTHER}`, () =>
+        HttpResponse.json({
+          agent: {
+            ...agentRow(OTHER, 'Plan Tahoe trip', 2),
+            parent_agent_id: null,
+            parent_goal: null,
+            verifier: null,
+            tools: [],
+          },
+          messages: ancestorMessages,
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+      http.get(`${API_BASE}/agents/${OWNER}/ancestors`, () =>
+        HttpResponse.json({
+          ancestors: [{ id: OTHER, goal: 'Plan Tahoe trip' }],
+        }),
+      ),
+    );
+    const user = await renderOnOwner();
+    await openFromRow(user);
+    const trail = screen.getByRole('navigation', { name: 'Agent breadcrumb' });
+    expect(within(trail).getByRole('button', { name: 'Polish Rose UI' })).toBeInTheDocument();
+    await user.click(await within(trail).findByRole('button', { name: 'Plan Tahoe trip' }));
+    await waitFor(() => expect(view()).toBeNull());
+    expect(urlParams().get('agent-id')).toBe(OTHER);
+    expect(urlParams().has('code-agent')).toBe(false);
+    expect(await screen.findByText('Plan a Tahoe weekend')).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Agent breadcrumb' })).toBeNull();
   });
 
   it('10k: the view reads only its own session (no list, tree or other agent); none once closed', async () => {

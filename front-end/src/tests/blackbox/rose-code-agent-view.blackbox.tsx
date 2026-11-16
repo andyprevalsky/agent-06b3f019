@@ -68,6 +68,27 @@ afterEach(() => {
 });
 
 describe('Rose left bar: a code agent opens as its own conversation (flag on)', () => {
+  it('keeps the owner breadcrumb visible when a coding session opens and returns through it', async () => {
+    const user = await renderOnOwner();
+    // A root chat has no ancestor trail; opening its code task must add the owner.
+    expect(screen.queryByRole('navigation', { name: 'Agent breadcrumb' })).toBeNull();
+    const page = await openFromRow(user);
+    const trail = screen.getByRole('navigation', { name: 'Agent breadcrumb' });
+    expect(within(trail).getByText('Make the speed button 3-state')).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(page).toBeInTheDocument();
+    const ownerReads = requests('GET', `/api/agents/${OWNER}`).length;
+    await user.click(within(trail).getByRole('button', { name: 'Polish Rose UI' }));
+    await waitFor(() => expect(screen.queryByTestId('code-agent-view')).toBeNull());
+    expect(urlParams().get('agent-id')).toBe(OWNER);
+    expect(urlParams().has('code-agent')).toBe(false);
+    expect(screen.queryByRole('navigation', { name: 'Agent breadcrumb' })).toBeNull();
+    expect(await ownerCodeAgentRow()).toBeInTheDocument();
+    expect(requests('GET', `/api/agents/${OWNER}`)).toHaveLength(ownerReads);
+  });
+
   it('row click replaces the chat column with its titled view, root transcript and direct query box', async () => {
     const user = await renderOnOwner();
     // The owner's chat shows the session as one plain row: title · Running.
