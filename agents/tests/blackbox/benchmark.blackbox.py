@@ -1446,7 +1446,10 @@ def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
             "-q",
             str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"),
             "-k",
-            "boot_payload or boot_launch_compresses_complete_payload",
+            "boot_payload or boot_launch_compresses_complete_payload or controller_execs_from_a_script_snapshot "
+            "or nested_controller_borrows_parent_owned_script_snapshot or script_snapshot_initialization_signal_and_publish_failure_clean_up "
+            "or borrowed_script_snapshot_and_invalid_owner_identity_are_never_deleted or detached_script_snapshot_transfer_covers_exit_death_timeout_and_waiter_loss "
+            "or refresh_deps_rejects_invalid_ref_before_fly",
         ],
         cwd=repo_root,
         text=True,
@@ -1454,7 +1457,7 @@ def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "27 passed" in result.stdout
+    assert "33 passed" in result.stdout
 
 
 def test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate():
@@ -14368,6 +14371,34 @@ async def test_owner_probe_purges_records_when_lifecycle_already_reconciled():
             purge.assert_awaited_once_with("https://benchmark.invalid", "agent-reconciled")
 
 
+async def test_owner_purchase_probe_purges_records_before_agent_deletion():
+    """Live owner purchase 2026-11-16 (agent f28b31bd): the purchase probe never purged, so its
+    $1 record stayed on the owner account, and deleting the agent nulled agentId, putting it beyond
+    the agent-scoped purge route. The purchase probe must purge, whatever the grade, before
+    deletion; the abandon probe purges in ensure_payment_lifecycle_cleanup instead."""
+    import inspect
+    from unittest.mock import AsyncMock, patch
+
+    import httpx
+
+    import benchmarks.run_benchmark as bench
+
+    purchase = bench.get_task_by_name("agent-payment-production-purchase")
+    abandon = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    sandbox = bench.get_task_by_name("agent-payment-abandonment")
+    for task, expected in ((purchase, 1), (abandon, 0), (sandbox, 0)):
+        purge = AsyncMock()
+        with patch.object(bench, "purge_owner_lifecycle_records", purge):
+            await bench.purge_owner_purchase_probe_records("https://benchmark.invalid", "agent-p", task)
+        assert purge.await_count == expected, (task.name, purge.await_count)
+    failing = AsyncMock(side_effect=httpx.ConnectError("backend unreachable"))
+    with patch.object(bench, "purge_owner_lifecycle_records", failing):
+        await bench.purge_owner_purchase_probe_records("https://benchmark.invalid", "agent-p", purchase)
+    source = inspect.getsource(bench._run_single_task_as_run_user)
+    purge_at = source.index("await purge_owner_purchase_probe_records(base_url, agent_id, task)")
+    assert purge_at < source.index("await delete_task_agent()"), "purge must precede agent deletion"
+
+
 async def test_parallel_tasks_keep_their_own_run_user():
     """A parallel sibling can neither borrow nor erase another task's run identity.
 
@@ -24714,7 +24745,13 @@ def test_unified_catalog_delineates_bench_axes():
 def test_catalog_refuses_a_task_with_a_duplicate_json_key():
     """A textual merge that leaves two `quarantine` objects on one task must fail validation;
     json's last-one-wins silently dropped PR1910's markers on two smoke tasks (2026-11-13)."""
-    from benchmarks.long_horizon import load_raw_catalog
+    from benchmarks.long_horizon import DEFAULT_CATALOG, load_raw_catalog, _reject_duplicate_keys
+
+    # Also guard the checked-in catalogs: the synthetic refusal alone did not
+    # catch a real merge duplicating a quarantine marker on 2026-11-16.
+    for real_catalog in (DEFAULT_CATALOG, DEFAULT_CATALOG.with_name("polar_tasks.json")):
+        text = real_catalog.read_text()
+        assert json.loads(text, object_pairs_hook=_reject_duplicate_keys) == json.loads(text)
 
     with tempfile.TemporaryDirectory() as tmp:
         catalog = Path(tmp) / "tasks.json"
@@ -30414,6 +30451,10 @@ async def run_all_tests():
     await r.record_async(
         "owner_probe_purges_records_when_lifecycle_already_reconciled",
         test_owner_probe_purges_records_when_lifecycle_already_reconciled,
+    )
+    await r.record_async(
+        "owner_purchase_probe_purges_records_before_agent_deletion",
+        test_owner_purchase_probe_purges_records_before_agent_deletion,
     )
     await r.record_async(
         "parallel_tasks_keep_their_own_run_user",

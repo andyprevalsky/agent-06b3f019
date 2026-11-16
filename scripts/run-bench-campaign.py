@@ -1628,9 +1628,9 @@ def provider_capacity_refusal(benches: int, tasks: list[str] | None = None) -> i
 def delegating_ceiling_refusal(benches: int, tasks: list[str] | None = None) -> int:
     """0 when the app delegating-guest ceiling can admit `benches` simultaneous REAL/SIM copies.
 
-    Fleet admission refuses live REAL/SIM primaries + requested above
-    CLOUDBENCH_DELEGATING_PRIMARY_CEILING after its admission wait, recording
-    INFRA; a campaign (or sharded group) wider than the ceiling can never fit.
+    Fleet admission waits while live REAL/SIM primaries + requested exceed
+    CLOUDBENCH_DELEGATING_PRIMARY_CEILING, then records CAPACITY_DEFERRED (not
+    INFRA); a campaign (or sharded group) wider than the ceiling can never fit.
     """
     capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
     try:

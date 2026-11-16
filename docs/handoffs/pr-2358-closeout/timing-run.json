@@ -1,0 +1,12 @@
+{
+  "run_id": "20261116-082244-691995",
+  "status": "completed",
+  "started_at": "2026-11-16T08:22:44Z",
+  "started_epoch": 1794817364.0815797,
+  "finished_at": "2026-11-16T18:48:24Z",
+  "finished_epoch": 1794854904.0536244,
+  "git_sha": "904f191ea60b3f37d9996b681f715586edebbcae",
+  "branch": "fix/read-only-tx-timeout-regression",
+  "timed_stage_coverage": "Native finish reports no timed stages recorded; separate native gate/production/controller and factory-event timestamps remain available. Historical gaps are unrecorded waiting, not invented work.",
+  "factory_ledger": "Published67rows to origin/main; native finish PASS"
+}

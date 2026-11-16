@@ -1,6 +1,6 @@
 /**
  * Rose Desktop feature flag (lib/roseDesktop.ts): the new chrome defaults on for
- * every signed-in account; explicit flag-off components retain the stock UI.
+ * every visitor; explicit test overrides retain the stock UI.
  *
  * Query box (UI ledger rows 23, 31, 40, 43, 53), flag on vs off:
  *  - #31 the toolbar lives on a Rose-gradient tab behind the box (4px lip,
@@ -28,6 +28,7 @@ import QueryInput from '@/features/terminal-component-group/components/QueryInpu
 import { PopularGoalsCarousel } from '@/features/terminal/components/PopularGoalsCarousel';
 import { POPULAR_GOALS, ROSE_DESKTOP_POPULAR_GOALS } from '@/features/terminal/config';
 import { ROSE_DESKTOP_USER_IDS, isRoseDesktopUser } from '@/lib/roseDesktop';
+import { isRoseDesktopSession, roseDesktopAccountId } from '@/lib/roseDesktopSession';
 import {
   defaultModelForAccount,
   useSelectedAgentModel,
@@ -62,14 +63,51 @@ function renderGoals(roseDesktop: boolean) {
 }
 
 describe('Rose Desktop flag', () => {
-  it('defaults on for every signed-in account while public visitors stay stock', () => {
+  it('defaults on for everyone without an account or rollout flag', () => {
     expect(ROSE_DESKTOP_USER_IDS).toEqual([ANDY]);
     expect(isRoseDesktopUser({ id: ANDY })).toBe(true);
     expect(isRoseDesktopUser({ id: '8283e892-b0a4-4298-9ef7-b95bcc67e46b' })).toBe(true);
-    expect(isRoseDesktopUser({ id: 'anonymous-session', is_anonymous: true })).toBe(false);
-    expect(isRoseDesktopUser({ id: '' })).toBe(false);
-    expect(isRoseDesktopUser(null)).toBe(false);
-    expect(isRoseDesktopUser(undefined)).toBe(false);
+    expect(isRoseDesktopUser({ id: 'anonymous-session', is_anonymous: true })).toBe(true);
+    expect(isRoseDesktopUser({ id: '' })).toBe(true);
+    expect(isRoseDesktopUser(null)).toBe(true);
+    expect(isRoseDesktopUser(undefined)).toBe(true);
+  });
+
+  it.each([
+    { isAnonymous: true, authUser: null },
+    { isAnonymous: true, authUser: { id: 'anonymous-session', is_anonymous: true } },
+    { isAnonymous: false, authUser: { id: 'waitlisted' }, inviteRequired: true },
+    { isAnonymous: false, authUser: { id: 'ordinary-account' } },
+  ])('uses the existing new query box for session %j', (session) => {
+    renderWithProviders(<QueryInput {...queryProps} />, {
+      roseDesktop: isRoseDesktopSession(session),
+    });
+    expect(screen.getByTestId('query-toolbar-nub')).toBeInTheDocument();
+    expect(screen.queryByText('Safe Writes')).toBeNull();
+  });
+
+  it('keeps account state restricted to real, invited sessions', () => {
+    expect(roseDesktopAccountId({ isAnonymous: true, authUser: null })).toBeNull();
+    expect(
+      roseDesktopAccountId({
+        isAnonymous: true,
+        authUser: { id: 'anonymous-session', is_anonymous: true },
+      }),
+    ).toBeNull();
+    expect(
+      roseDesktopAccountId({
+        isAnonymous: false,
+        authUser: { id: ANDY, is_anonymous: true },
+      }),
+    ).toBeNull();
+    expect(
+      roseDesktopAccountId({
+        isAnonymous: false,
+        authUser: { id: ANDY },
+        inviteRequired: true,
+      }),
+    ).toBeNull();
+    expect(roseDesktopAccountId({ isAnonymous: false, authUser: { id: ANDY } })).toBe(ANDY);
   });
 
   it('stock UI keeps the query toolbar visible with no nub', () => {
@@ -524,14 +562,17 @@ describe('Rose Desktop query box: dark-only glass send (#53)', () => {
 describe('Rose Desktop new-agent defaults (#23)', () => {
   const signedIn = (id: string) => ({ isAnonymous: false, isFullySignedIn: true, user: { id } });
 
-  it('defaults new agents to rose-flash for every signed-in account', () => {
+  it('defaults new agents to rose-flash for every visitor', () => {
     expect(defaultModelForAccount(signedIn(ANDY))).toBe('rose-labs/rose-1-flash');
     expect(defaultModelForAccount(signedIn('8283e892-b0a4-4298-9ef7-b95bcc67e46b'))).toBe(
       'rose-labs/rose-1-flash',
     );
     expect(
       defaultModelForAccount({ isAnonymous: true, isFullySignedIn: false, user: { id: ANDY } }),
-    ).toBe('rose-labs/rose-1-ultra');
+    ).toBe('rose-labs/rose-1-flash');
+    expect(defaultModelForAccount({ isAnonymous: true, isFullySignedIn: false, user: null })).toBe(
+      'rose-labs/rose-1-flash',
+    );
   });
 
   it('a new conversation (or an agent without a model) selects that default', () => {

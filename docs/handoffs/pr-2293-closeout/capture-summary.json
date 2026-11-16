@@ -1,0 +1,44 @@
+{
+  "format": "BROWSER-CHIP-PRIVATE-CAPTURE-V1",
+  "capture_at": "2026-11-16T17:29:33.183377+00:00",
+  "inventory_sha256": "167ee8084914cdc3fe476853613801b3c47ccbea09463826868ebf7278c9bb9b",
+  "captured_members": 164085,
+  "captured_bytes": 6169022311,
+  "exclusions": [
+    ".context/frontend-builds/",
+    ".context/tsbuildinfo/",
+    ".context/browser-chip-repair/closeout-capture/",
+    ".context/browser-chip-repair/local-branches.bundle",
+    ".context/browser-chip-repair/smoke-monitor/native-evidence.tar.gz",
+    ".context/browser-chip-repair/final-smoke-monitor/native-evidence.tar.gz",
+    ".context/browser-chip-repair/release-smoke-monitor/native-evidence.tar.gz",
+    ".context/browser-chip-repair/post-sync-smoke-monitor/native-evidence.tar.gz"
+  ],
+  "symlinks": [
+    {
+      "path": ".context/browser-chip-repair/guarded-helper-before/node_modules",
+      "target": "/home/boxes/rose/back-end/node_modules"
+    },
+    {
+      "path": ".context/deploy-cloud/2173ea13822fedf8e32d29c7bd7c074d36bf353748e2fccf01df998e6f119250/campaigns/deploy-2173ea13822fedf8e32d29c7bd7c074d36bf353748e2fccf01df998e6f119250/shared-inventory/inventory/current",
+      "target": ".generation-cc0_tegp"
+    },
+    {
+      "path": ".context/deploy-cloud/5e40b6ffe923c52d088b291f3ea4e07819ceba8b0563cd17eac7a07fad7a8e4a/campaigns/deploy-5e40b6ffe923c52d088b291f3ea4e07819ceba8b0563cd17eac7a07fad7a8e4a/shared-inventory/inventory/current",
+      "target": ".generation-x0zs0yg4"
+    },
+    {
+      "path": ".context/deploy-cloud/9ba0ca015d1497e1dc1b7161d923f7496090d61e28257bd4914b06a582b8dcc4/campaigns/deploy-9ba0ca015d1497e1dc1b7161d923f7496090d61e28257bd4914b06a582b8dcc4/shared-inventory/inventory/current",
+      "target": ".generation-imnjgkcv"
+    },
+    {
+      "path": ".context/deploy-cloud/9fd379df8044e71581af2f90d6fc150575b9e89d18da4558837cec834928dd2e/campaigns/deploy-9fd379df8044e71581af2f90d6fc150575b9e89d18da4558837cec834928dd2e/shared-inventory/inventory/current",
+      "target": ".generation-fq4s5xc7"
+    }
+  ],
+  "notes": [
+    "Private configuration is encrypted; restore only into an empty destination.",
+    "Large native smoke archives and self-contained branch bundle are preserved by separate committed receipts.",
+    "Empty cleanup capacity reservation bytes are reproducible and excluded; all original resource ledgers and receipts retained."
+  ]
+}

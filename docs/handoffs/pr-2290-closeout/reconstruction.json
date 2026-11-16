@@ -1,0 +1,14 @@
+{
+  "order": [
+    "initial",
+    "2a",
+    "d05",
+    "1771",
+    "96d",
+    "final"
+  ],
+  "index": "archive-index.json",
+  "algorithm": "Restore each authenticated archive in chronological order. Initial manifest rows map source->stage;2a files map source->stage. Later logical_files carry prior mapping or content member under the archive stage directory. Preserve all source+sha256 versions; same-byte aliases share payload. Final archive capture-manifest includes every current source mapping and explicit exclusions.",
+  "private_config": "Encrypted only. Existing independently delivered settings are verified in managed-recovery-proof.json; no individual secret values or hashes are published.",
+  "native": "manifest.json describes frozen captured versions, not future raw files."
+}

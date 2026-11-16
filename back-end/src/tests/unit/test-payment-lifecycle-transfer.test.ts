@@ -10,6 +10,7 @@ import { TestPaymentError } from '../../domains/test-payment/errors';
 import { getTestPaymentLifecycle } from '../../domains/test-payment/lifecycle';
 import { mapOrgTransfer } from '../../domains/test-payment/lifecycleOrgTransfer';
 import { v2TransferredCents } from '../../domains/test-payment/lifecycleV2';
+import { isSettledProbePurchase } from '../../domains/test-payment/purgeLifecycleRecords';
 import { withKnownStripeIntent } from '../../domains/test-payment/lifecycleProviderRecords';
 
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
@@ -113,6 +114,30 @@ async function main(): Promise<void> {
       'sandbox keeps the provider counter'
     );
     assert.equal(v2TransferredCents({ ...live, status: 'consumed', livemode: true }), 100);
+  });
+
+  await test('v2 consumed transfer reports its whole amount though v2 echoes 0 (owner purchase 2026-11-16)', async () => {
+    const consumed = {
+      status: 'consumed',
+      amount_cents: 100,
+      transferred_cents: 0,
+      released_cents: 0,
+      livemode: true,
+    };
+    assert.equal(v2TransferredCents(consumed), 100);
+  });
+
+  await test('owner probe purge settles abandoned and completed purchases, never money in flight', async () => {
+    const row = (status: string, funding: string | null) => ({
+      status,
+      walletFunding: funding === null ? null : { status: funding },
+    });
+    assert.equal(isSettledProbePurchase(row('REFUNDED', 'RECLAIMED')), true);
+    assert.equal(isSettledProbePurchase(row('CLEARED', 'CONSUMED')), true);
+    assert.equal(isSettledProbePurchase(row('VOIDED', null)), true);
+    assert.equal(isSettledProbePurchase(row('HELD', 'FUNDED')), false);
+    assert.equal(isSettledProbePurchase(row('CLEARED', 'FUNDED')), false);
+    assert.equal(isSettledProbePurchase(row('REFUNDED', 'RECLAIMING')), false);
   });
 
   await test('provider intent count includes a fresh hold Stripe Search has not indexed yet', async () => {

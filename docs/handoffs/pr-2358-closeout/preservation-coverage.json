@@ -1,0 +1,392 @@
+{
+  "capture_run": "capture-20261116T184950Z-26afc30f62f5461583dddbb555ace0f2",
+  "snapshot_roots": [
+    "/home/boxes/rose",
+    "/var/tmp/rotx",
+    "/home/boxes/.claude/projects/-home-boxes-rose"
+  ],
+  "coverage": [
+    {
+      "path": ".cloud-env",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 292,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": ".context/",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 46982,
+      "bytes": 2581069858,
+      "classes": {
+        "composite-smoke": 2156,
+        "primary": 44826
+      }
+    },
+    {
+      "path": ".devbox/",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 10,
+      "bytes": 21346,
+      "classes": {
+        "primary": 10
+      }
+    },
+    {
+      "path": ".env.npm",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 170,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "agents/.env",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 13856,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "agents/.env.benchmark-temporal",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 695,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "agents/.env.cloudbench-upsert.lock",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 0,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "agents/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/activities/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/benchmarks/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/browser_tools/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/api_request/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/attempt_completion/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/call_phone_number/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/gate/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/grep/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/knowledge_base/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/message_person/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/param_populator/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/read_message_history/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/reasoning/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/request_payment_card/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/request_user_approval/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/request_user_signup/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/send_message_to_user/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/set_plan/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/spawn_agent/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/spawn_browser_agent_v3/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/spawn_claude_code_agent/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/spawn_sub_agents/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/wait_for/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/domains/web_fetch/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/helpers/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/loop/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/navi-worker-log.txt",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 3672,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "agents/providers/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/providers/fast_cache/",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 0,
+      "bytes": 0,
+      "classes": {}
+    },
+    {
+      "path": "agents/providers/planner_memory/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/providers/rose/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/tools/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/tools/people_search/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/tools/prompts/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/tools/web_search/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/utils/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/venv/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "agents/workflows/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "back-end/.env",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 20873,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "back-end/.env.cloudbench-upsert.lock",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 0,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "back-end/backend-logs.log",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 90996,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "back-end/coverage/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "back-end/node_modules/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "codex/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "docs/rca/INDEX.md",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 636335,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "front-end/.env",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 556,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "front-end/frontend-logs.log",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 115,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "front-end/node_modules/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "hermes-agent/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "hub-poller-logs.log",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 100,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "kimi-code/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "mac-app/.env",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 840,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "node_modules/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "openclaw/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "package-lock.json",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 1049317,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "prime-agent/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "research/.env",
+      "disposition": "verified composite private snapshot",
+      "regular_files": 1,
+      "bytes": 1632,
+      "classes": {
+        "primary": 1
+      }
+    },
+    {
+      "path": "scripts/__pycache__/",
+      "disposition": "native reproducible"
+    },
+    {
+      "path": "scripts/lib/__pycache__/",
+      "disposition": "native reproducible"
+    }
+  ],
+  "final_guards": [
+    {
+      "late_file": "final-inventory.json",
+      "sha256": "877107860cc5f89ba08150fcd04392daa7a95dcefdc1a64bc36ad3ec8764fdb9",
+      "byte_identical_preserved_metadata_member": "pre-upload-inventory.json",
+      "metadata_carrier": "r2://trace-archive/private-preservation/pr2358/final-metadata-capture-20261116T184950Z-26afc30f62f5461583dddbb555ace0f2.tar.gz.gcm"
+    },
+    {
+      "late_file": "final-processes.json",
+      "sha256": "b9b1f8385e1f98fd25c60038ec219b3300a07159123e7e46d26b70526ca053ef",
+      "byte_identical_preserved_metadata_member": "post-stage-processes.json",
+      "metadata_carrier": "r2://trace-archive/private-preservation/pr2358/final-metadata-capture-20261116T184950Z-26afc30f62f5461583dddbb555ace0f2.tar.gz.gcm"
+    }
+  ],
+  "later_outputs": "Safe exported receipts/public summaries/native readiness/PR review metadata and scorecard are later derived records, preserved through this records PR and external native GitHub/visual receipts; not claimed inside their own encrypted carrier. No later original runtime/log/config data was created.",
+  "no_deletion_authorized": true
+}

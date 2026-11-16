@@ -92,11 +92,23 @@ def _display_status(task: dict) -> str:
     return "failed"
 
 
+CAPACITY_DEFERRAL_REASONS = {
+    "cleanup_disk_reserve": "local disk could not hold the emergency teardown reserve within the {wait}s capacity "
+                            "wait; no provider mutation (capacity, not infrastructure)",
+    "delegating_primary_ceiling": "the app-wide delegating (REAL/SIM) primary ceiling stayed full of live guests for "
+                                  "the {wait}s capacity admission wait; no provider allocation (capacity, not "
+                                  "infrastructure)",
+    "demo_guest_ceiling": "the app-wide DEMO guest ceiling stayed full of live guests for the {wait}s capacity "
+                          "admission wait; no provider allocation (capacity, not infrastructure)",
+}
+
+
 def _capacity_deferral(fleet_dir: Path) -> str | None:
     """The controller's own pre-provider capacity deferral reason, if recorded.
 
-    run-bench-fleet writes this marker only when its bounded wait for the
-    emergency teardown disk reserve expired before any provider mutation.
+    run-bench-fleet writes this marker only when a bounded shared-capacity wait
+    expired before it allocated anything: the emergency teardown disk reserve,
+    or the app-wide delegating/DEMO lane ceiling filled by other workstreams.
     Anything unreadable or malformed keeps the INFRA_ERROR projection.
     """
     marker = fleet_dir / "_batch/capacity-deferred.json"
@@ -106,12 +118,14 @@ def _capacity_deferral(fleet_dir: Path) -> str | None:
         value = json.loads(marker.read_text())
     except (OSError, ValueError):
         return None
-    wait = value.get("wait_seconds") if isinstance(value, dict) else None
-    if (value.get("schema") != "cloudbench-capacity-deferred-v1" or value.get("reason") != "cleanup_disk_reserve"
+    if not isinstance(value, dict):
+        return None
+    wait = value.get("wait_seconds")
+    template = CAPACITY_DEFERRAL_REASONS.get(value.get("reason")) if isinstance(value.get("reason"), str) else None
+    if (value.get("schema") != "cloudbench-capacity-deferred-v1" or template is None
             or type(wait) is not int or wait < 0):
         return None
-    return (f"local disk could not hold the emergency teardown reserve within the {wait}s capacity wait; "
-            "no provider mutation (capacity, not infrastructure)")
+    return template.format(wait=wait)
 
 
 def _optional_number(value) -> float | None:

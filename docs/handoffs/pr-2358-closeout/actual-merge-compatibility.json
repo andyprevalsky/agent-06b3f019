@@ -1,0 +1,13 @@
+{
+  "merge": "a3944cd513b8a7771b86716156ab7fb26e01d7da",
+  "first_parent": "9a93980bbba2e250cd8907f6da1da77d9835660a",
+  "strict_catalog": "PASS",
+  "tasks": 220,
+  "changed_tasks": [
+    "background-agent-message-smoke"
+  ],
+  "catalog_sha256": "660c515b39f149a49630180d034a2703489e0c69ec3fa1b1430fdb0e4a24e0f7",
+  "main_incident_metadata_unchanged": true,
+  "database_file_byte_identical_to_tested_3683": true,
+  "existing_COST_metadata_gap": "Retained unchanged; sole repair PR2411, not fixed by2358"
+}

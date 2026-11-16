@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private-preservation/pr2358/original-smoke-20261116T1729Z.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "c69c318c14122b74933795f3ed250be5d581f954135fa55a38446b7c99e112a3",
+  "gzip_sha256": "67fede907b9488d68f6d57ecff534fc8badc58713852dd0ba44ec579677ea2f4",
+  "stored_bytes": 126816231,
+  "frames": 16,
+  "files": 2156,
+  "original_bytes": 359262171,
+  "manifest_sha256": "606efa8f652424db058029750d013f9e805795749747a9babdf1edc610cc9531",
+  "full_readback_verified": true
+}

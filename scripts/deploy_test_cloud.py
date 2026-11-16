@@ -302,7 +302,7 @@ def capacity_admission_env(now, environ=os.environ):
 
     Every devbox shares the benchmark app's DEMO/delegating/Machine/shared-CPU ceilings, so a
     shortfall is normally another devbox's fleet that will release. The fleet's own default
-    gives up after 300 s and failed smoke; within a deploy it now keeps polling until the
+    gives up after 1800 s; within a deploy it keeps polling until the
     gate's existing deadline (deploy_gates.GATE_DEADLINE_SECONDS). The ceilings are unchanged.
     An operator's explicit deadline wins and is never extended.
     """

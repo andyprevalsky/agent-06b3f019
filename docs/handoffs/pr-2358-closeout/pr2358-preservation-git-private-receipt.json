@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private-preservation/pr2358/inherited-git-20261116T173038Z-8286b2cf-7caf-4903-beea-5f20af5830f0.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "71a4830a2ff007cd3bee1590931a1c87c4d2a043ce3f61a3f34ff099a477c374",
+  "gzip_sha256": "4341e08556c74306918c2a13e38d3b455eeed3307d197c78690e1f086b4fd7be",
+  "stored_bytes": 1272823884,
+  "frames": 152,
+  "files": 9,
+  "original_bytes": 1289827063,
+  "manifest_sha256": "ce05e42e04cd7b6437ae94f19dcc08987bb8957d26a72035fb8375d1ec61ed2e",
+  "full_readback_verified": true
+}

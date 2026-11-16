@@ -21,7 +21,7 @@ sources:
   - memory: browser task 91a0ff73-a8e8-5c2f-8444-04f2262a0725
   - commit 16e079f926f8e69c716c20070561d3ed23344d5e
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_terminal_browser_cleanup_releases_only_recorded_phone_custody
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -65,10 +65,10 @@ not set paused_session_id. Explicit resumable and sealed paths remain excluded.
 
 ## Solution
 
-Locally verified repair in PR #2349; parent owns deployment. Existing BrowserCleanupOwners
+Repair shipped in PR #2349, merged as 457cc757d706bad1360fe89876a1b4a79b820d3a. Existing BrowserCleanupOwners
 retains exact backend-returned lease IDs for this user/task, including an acquire
-whose following command fails. Existing encrypted resume continuity carries
-these IDs and restores only matching user/task bindings. Confirmed explicit
+whose following command fails. Existing trusted inline or private encrypted resume continuity carries
+these IDs under its normal storage policy and restores only matching user/task bindings. Confirmed explicit
 release removes its ID. Terminal activity cleanup releases retained IDs through
 the existing ownership-checked backend lease release route. It never discovers,
 acquires, resets or sends a phone command to locate cleanup targets.
@@ -98,7 +98,22 @@ introduced test pollution: an inner phone mock replaced the outer cleanup
 failure transport in a reused fixture. The identical four-case command failed
 in 10.0 seconds, then passed in 22.2 seconds after making phone custody opt-in;
 all original assertions remain. Independent runtime/code review is clean and
-the parent obtained golden-reference approval. No production outcome is claimed.
+the parent obtained golden-reference approval. The merged-heartbeat source passed sixteen focused functions five times
+(27.1, 28.0, 27.1, 27.5, 28.8 seconds) and the full owning suite in 265.7 seconds.
+The combined fixed-clock fresh-lease control proves capture and terminal release
+when the upstream TTL optimization sends no heartbeat. Final 17 selected deploy
+gates passed, including all eight smoke tasks and owned-resource cleanup.
+
+Production verification on 2026-11-16 passed: exact-merge Fly workflow
+43913102171 and durable deployment job
+c6d0be4b47474127dc35536c9384096abcc1de9c04cf4682323e395bdac2c321
+completed the qualified old-generation retirement; all workflow-migration rows
+and fixture cleanup passed. Semantic workflow 43916514611 passed with its
+unchanged native binding to live descendant
+f9cf97a6f8ad8bdeba6c85bb4ba73247e5c38373, recorded
+PASS-verified-by-descendant rather than an exact-merge semantic pass.
+The separate setup-completion verifier case remains OPEN; this outcome fixes
+terminal custody only. No live phone operation was used for acceptance.
 
 Golden analogs inspected: OpenClaw
 `src/agents/session-placement-forced-terminal-settlement.ts:4` carries an exact
