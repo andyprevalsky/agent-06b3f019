@@ -84,8 +84,80 @@ async function testFiniteLiteralAlternations(): Promise<void> {
   process.stdout.write('PASS finite literal alternation safety proof\n');
 }
 
+/**
+ * Chat-router greps rejected as "Pattern safety analysis did not complete"
+ * (production 2026-11-10 and 2026-11-12, after `(?i)` folding): recheck rates
+ * them degree 2 but needs over a second, past the gate's deadline.
+ */
+async function testWildcardLiteralAlternations(): Promise<void> {
+  for (const [pattern, flags] of [
+    ['azure.*credit|credit.*azure|azure.*spend|spend.*azure|azure.*justif|justif.*azure', 'is'],
+    ['(oauth|verification|security review|google.*submit|rose.*oauth|oauth.*rose)', 'i'],
+    [
+      '(oauth|consent|google cloud|api.*submit|submit.*api|security.*review|verification.*status)',
+      'i',
+    ],
+    ['(?:move.*out|moving)', ''],
+    [String.raw`a\.b.*c\|d|e`, 'm'],
+  ]) {
+    assert.equal(
+      (await checkPatternSafety(pattern, flags, 0)).ok,
+      true,
+      `a union of literal and single-wildcard branches must not depend on analyzer scheduling: ${pattern} /${flags}`
+    );
+  }
+  for (const pattern of [
+    'a.*b.*c|d',
+    'a.*.*b|c',
+    '.*a|b',
+    'a.*|b',
+    'a.+b|c',
+    'a.*?b|c',
+    'a.b|c',
+    'a.*b|c+',
+    'a.*b|(c+)+',
+    '(a.*b|c)+',
+    '(a.*b|c)*',
+    '(?:a.*b|c){2}',
+    '(a|b.*c)d',
+    'x(a|b.*c)',
+    '(a|b)|(c.*d)',
+    '(a.*b|.*c)',
+    '(?=a.*b|c)',
+    '(?<n>a.*b|c)',
+    '(a.*b|c',
+    'a.*b|',
+    '|a.*b',
+    '^a.*b|c',
+    'a.*b|c$',
+    '[ab].*c|d',
+    String.raw`a.*\w|b`,
+  ]) {
+    assert.equal(
+      (await checkPatternSafety(pattern, '', 0)).ok,
+      false,
+      `a union outside the literal/single-wildcard grammar must remain analyzer-owned: ${pattern}`
+    );
+  }
+  assert.equal(
+    (await checkPatternSafety('a.*b|c.*d', 'u', 0)).ok,
+    false,
+    'unproved flags remain analyzer-owned'
+  );
+  // Through the real analyzer, unions with a degree > 2 or exponential branch still fail closed.
+  for (const pattern of ['.*a.*a.*X|azure.*credit', '(a|aa)+X|credit.*azure', '(a+)+$|b.*c']) {
+    assert.equal(
+      (await checkPatternSafety(pattern, '')).ok,
+      false,
+      `a union with a catastrophic branch must stay rejected: ${pattern}`
+    );
+  }
+  process.stdout.write('PASS literal/single-wildcard alternation safety proof\n');
+}
+
 async function run(): Promise<void> {
   await testFiniteLiteralAlternations();
+  await testWildcardLiteralAlternations();
   for (const pattern of [
     String.raw`\\bpassport\\b`,
     String.raw`[\b]`,

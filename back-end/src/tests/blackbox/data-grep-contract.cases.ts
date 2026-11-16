@@ -343,16 +343,65 @@ function cases(thread: string): ContractCase[] {
       },
       expect: { accept: true, sources: ['agent_network', 'agent_trajectories'] },
     },
+    // A merged search with agent_trajectories reads newest first, so only
+    // oldest_first needs agent_trajectories alone (newest_first: chat router case below).
     {
-      label: 'agent_network + agent_trajectories + order',
+      label: 'agent_network + agent_trajectories + oldest_first',
       body: {
         pattern: 'Atlas',
         sources: ['agent_network', 'agent_trajectories'],
-        order: 'newest_first',
+        order: 'oldest_first',
         head_limit: 20,
         since: '2026-10-26T18:16:00Z',
       },
       expect: { reject: 'order', says: [/agent_trajectories/, /only source|alone/] },
+    },
+    // Chat-router calls production rejected (2026-11-10 to 2026-11-16), replayed
+    // verbatim: unions of literal and single-wildcard branches the ReDoS gate
+    // could not classify within its deadline, and newest_first on a merged
+    // agent_trajectories search.
+    {
+      label: 'chat router union of single-wildcard branches',
+      body: {
+        pattern:
+          'azure.*credit|credit.*azure|azure.*spend|spend.*azure|azure.*justif|justif.*azure',
+        sources: ['documents', 'email'],
+        '-B': 3,
+        '-A': 3,
+        '-n': true,
+        '-i': true,
+        head_limit: 20,
+        multiline: true,
+      },
+      expect: { accept: true },
+    },
+    {
+      label: 'chat router grouped union after an inline (?i)',
+      body: {
+        pattern: '(?i)(oauth|verification|security review|google.*submit|rose.*oauth|oauth.*rose)',
+        sources: ['email', 'messages'],
+        context: 2,
+        '-i': true,
+        head_limit: 10,
+        since: '30d',
+      },
+      expect: { accept: true },
+    },
+    {
+      label: 'chat router agent_trajectories + documents + newest_first',
+      body: {
+        pattern: 'templater',
+        sources: ['agent_trajectories', 'documents'],
+        order: 'newest_first',
+        '-B': 3,
+        '-A': 8,
+        '-n': true,
+        '-i': true,
+        head_limit: 20,
+        offset: 0,
+        since: '30d',
+      },
+      expect: { accept: true, sources: ['agent_trajectories', 'documents'] },
     },
     {
       label: 'agent_network + top-level until/since',

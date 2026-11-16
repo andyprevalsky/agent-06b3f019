@@ -88,6 +88,47 @@ function isFiniteLiteralAlternation(source: string, flags: string): boolean {
   return hasAlternation && branchLength > 0;
 }
 
+/**
+ * A union of branches that are each a literal or two literals joined by one
+ * `.*` (`azure.*credit|credit.*azure`), optionally wrapped in one unquantified
+ * group, is at most quadratic: nothing repeats the union, so every branch is
+ * searched on its own, and each is the allowed `meeting.*tomorrow` shape.
+ * recheck takes over a second to classify such unions, past its deadline, so
+ * without this proof grep rejected them as unclassified.
+ */
+function isWildcardLiteralAlternation(source: string, flags: string): boolean {
+  if (!/^[ims]*$/.test(flags)) return false;
+  const groupOpen = source.startsWith('(?:') ? 3 : source.startsWith('(') ? 1 : 0;
+  if (groupOpen > 0 && !source.endsWith(')')) return false;
+  const body = groupOpen > 0 ? source.slice(groupOpen, -1) : source;
+  let segmentLength = 0;
+  let branchHasWildcard = false;
+  let hasAlternation = false;
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if (char === '\\') {
+      index += 1;
+      if (index === body.length || !'\\^$.*+?()[]{}|'.includes(body[index])) return false;
+      segmentLength += 1;
+    } else if (char === '.' && body[index + 1] === '*') {
+      if (branchHasWildcard || segmentLength === 0) return false;
+      branchHasWildcard = true;
+      segmentLength = 0;
+      index += 1;
+    } else if (char === '|') {
+      if (segmentLength === 0) return false;
+      hasAlternation = true;
+      segmentLength = 0;
+      branchHasWildcard = false;
+    } else if ('^$.*+?()[]{}'.includes(char)) {
+      return false;
+    } else {
+      segmentLength += 1;
+    }
+  }
+  return hasAlternation && segmentLength > 0;
+}
+
 type PatternAnalyzer = (
   source: string,
   flags: string,
@@ -148,6 +189,7 @@ export async function checkPatternSafety(
     typeof flags === 'string' &&
     (isClearlyLinearPattern(source) ||
       isFiniteLiteralAlternation(source, flags) ||
+      isWildcardLiteralAlternation(source, flags) ||
       isClearlyAtMostQuadraticPattern(source, flags))
   ) {
     return { ok: true };
