@@ -2,6 +2,7 @@
  * Request/option types and the truncation sentinel for response-schema
  * generation (split from setResponseSchema.ts to keep it under max-lines).
  */
+import { RoseAuthError, RoseInvalidRequest } from './rose';
 import type { ArchiveScope } from './llmArchiveRecord';
 
 /**
@@ -14,6 +15,7 @@ import type { ArchiveScope } from './llmArchiveRecord';
 export interface StreamAttemptOptions {
   goal: string;
   maxTokens: number;
+  rejected?: RejectedResponseSchema;
   directAuth?: ResponseSchemaDirectAuth;
   archive?: ResponseSchemaArchiveBinding;
 }
@@ -47,4 +49,39 @@ export class MaxTokensTruncationError extends Error {
     this.maxTokens = maxTokens;
     this.partialContent = partialContent;
   }
+}
+
+/** Preserve a rejected completion so retries can correct it rather than replay it. */
+export class RejectedResponseSchema extends Error {
+  constructor(
+    readonly content: string,
+    detail: string
+  ) {
+    super(detail);
+    this.name = 'RejectedResponseSchema';
+  }
+}
+
+export function isRetryableSchemaError(error: unknown): boolean {
+  // Auth / bad-request errors from the Rose provider are configuration
+  // issues — fail fast rather than burning retries.
+  if (error instanceof RoseAuthError || error instanceof RoseInvalidRequest) {
+    return false;
+  }
+  // max_tokens truncation is handled inline (one-shot escalation), not via
+  // retry-with-backoff. If it bubbles up here it means escalation already ran
+  // and still failed — don't retry.
+  if (error instanceof MaxTokensTruncationError) {
+    return false;
+  }
+  return true;
+}
+
+export function rejectedSchemaMessages(rejected?: RejectedResponseSchema) {
+  return rejected
+    ? [
+        { role: 'assistant' as const, content: rejected.content },
+        { role: 'user' as const, content: rejected.message },
+      ]
+    : [];
 }

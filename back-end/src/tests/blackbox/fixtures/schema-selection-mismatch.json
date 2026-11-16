@@ -1,0 +1,5 @@
+{
+  "content": "{\n  \"presentation\": { \"version\": 1, \"mode\": \"value\", \"field\": \"population\", \"encoding\": \"text\" },\n  \"reasoning\": \"The goal asks for a single concrete number: Tokyo's population. One int field with a specific name is sufficient.\",\n  \"fields\": [\n    { \"name\": \"tokyo_population\", \"type\": \"int\" , \"properties\": []\n    , \"constraints\": [], \"required\": true}\n  ]\n}",
+  "source": ".context/rca-phone/gate-attribution/native/remote-artifact/files/.llm-dumps/user-0f5e2eca-68b4-4500-97cf-eb08da3bd938/1794842403410-2d5fe10531a7-response_schema_generation.json",
+  "source_sha256": "287dfd2d320d5a19c3251b9517075bfc21e80968e6b8c5bef2b4544c7d18c002"
+}

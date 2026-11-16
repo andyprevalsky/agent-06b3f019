@@ -40,10 +40,13 @@ import {
   type FieldConstraints,
 } from './responseSchemaBounds';
 import { retryWithBackoff } from './retry';
-import { createStreamingCompletion, RoseAuthError, RoseInvalidRequest } from './rose';
+import { createStreamingCompletion } from './rose';
 import { StructuredOutputAccumulator } from './rose/structuredOutput';
 import {
   MaxTokensTruncationError,
+  RejectedResponseSchema,
+  rejectedSchemaMessages,
+  isRetryableSchemaError,
   type ResponseSchemaArchiveBinding,
   type ResponseSchemaDirectAuth,
   type StreamAttemptOptions,
@@ -207,7 +210,8 @@ export function parseGeneratedResponseSchemaJson(
   }
   const parsed = ResponseSchemaSchema.safeParse(parsedRaw);
   if (!parsed.success) {
-    throw new Error(
+    throw new RejectedResponseSchema(
+      content,
       `Response schema failed schema: ${parsed.error.issues[0]?.message ?? 'invalid'}`
     );
   }
@@ -287,17 +291,20 @@ export const RESPONSE_SCHEMA_JSON_SCHEMA = {
         {
           type: 'object',
           additionalProperties: false,
-          properties: { version: { const: 1 }, mode: { const: 'report' } },
+          properties: {
+            version: { type: 'integer', enum: [1] },
+            mode: { type: 'string', enum: ['report'] },
+          },
           required: ['version', 'mode'],
         },
         {
           type: 'object',
           additionalProperties: false,
           properties: {
-            version: { const: 1 },
-            mode: { const: 'value' },
+            version: { type: 'integer', enum: [1] },
+            mode: { type: 'string', enum: ['value'] },
             field: { type: 'string', minLength: 1 },
-            encoding: { enum: ['text', 'json'] },
+            encoding: { type: 'string', enum: ['text', 'json'] },
           },
           required: ['version', 'mode', 'field', 'encoding'],
         },
@@ -544,21 +551,6 @@ interface StreamAttemptResult {
   rawContent: string;
 }
 
-function isRetryableSchemaError(error: unknown): boolean {
-  // Auth / bad-request errors from the Rose provider are configuration
-  // issues — fail fast rather than burning retries.
-  if (error instanceof RoseAuthError || error instanceof RoseInvalidRequest) {
-    return false;
-  }
-  // max_tokens truncation is handled inline (one-shot escalation), not via
-  // retry-with-backoff. If it bubbles up here it means escalation already ran
-  // and still failed — don't retry.
-  if (error instanceof MaxTokensTruncationError) {
-    return false;
-  }
-  return true;
-}
-
 /**
  * Drain the Rose Flash stream once and produce a parsed schema.
  *
@@ -575,6 +567,7 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: `Goal: ${opts.goal}` },
+      ...rejectedSchemaMessages(opts.rejected),
     ],
     temperature: 0.3,
     max_tokens: opts.maxTokens,
@@ -651,6 +644,7 @@ export async function generateResponseSchema(
   const escalatedMaxTokens = 4000;
 
   let lastError: unknown;
+  let rejected: RejectedResponseSchema | undefined;
 
   for (let attempt = 1; attempt <= maxGenerationAttempts; attempt++) {
     try {
@@ -658,6 +652,7 @@ export async function generateResponseSchema(
       try {
         result = await attemptSchemaGeneration({
           goal,
+          rejected,
           maxTokens: initialMaxTokens,
           directAuth: opts.directAuth,
           archive: opts.archive,
@@ -677,6 +672,7 @@ export async function generateResponseSchema(
           );
           result = await attemptSchemaGeneration({
             goal,
+            rejected,
             maxTokens: escalatedMaxTokens,
             directAuth: opts.directAuth,
             archive: opts.archive,
@@ -724,6 +720,7 @@ export async function generateResponseSchema(
       };
     } catch (error) {
       lastError = error;
+      if (error instanceof RejectedResponseSchema) rejected = error;
       const shouldRetry = attempt < maxGenerationAttempts && isRetryableSchemaError(error);
 
       log.warn('Response schema generation attempt failed', {
