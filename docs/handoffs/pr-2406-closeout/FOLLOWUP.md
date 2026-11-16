@@ -8,3 +8,5 @@
 - The original telemetry publication failure and successful retry are both preserved.
 - Managed environment and devbox setup identity are regenerated through existing boxes.dev startup. No replacement-devbox delivery test is claimed.
 - Keep Freedom, protected instructions, all branches, and existing external obligations intact. This closeout does not request deletion or resource cleanup.
+
+- Parent post-rollout acceptance found a remaining cleanup limitation: the normal endpoint reported one old settled probe purged and removed its purchase row, but one matching CONSUMED funding row remains because production lacks the declared cascading foreign keys. Parent owns the transactional cleanup follow-up at https://boxes.dev/thread/ph72nkbbmab7svh7hp046h8jyx8jagav on branch `fix/settled-probe-funding-cleanup`. Original gate and rollout passes remain valid for their tested scope; complete funding purge and both owner live benchmarks are not claimed.
