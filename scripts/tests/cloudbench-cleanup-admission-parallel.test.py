@@ -156,24 +156,26 @@ class Fixture:
             process = subprocess.Popen(['bash','-c',self.command,'fixture',str(parent/'cleanup-disk-reserve')],
                                        env=env, stdout=subprocess.PIPE, stderr=stderr, text=True,
                                        start_new_session=True)
-        self.stderr_paths[process.pid] = stderr_path
+        self.stderr_paths[process] = stderr_path
         self.children.append(process)
         return process
 
     def stderr(self, p):
-        return self.stderr_paths[p.pid].read_text()
+        return self.stderr_paths[p].read_text()
 
     def wait_capacity_retries(self, p, count=2, timeout=20):
         # Each capacity-wait retry prints one ⏳ line before its retry sleep; an
         # exit (refusal) ends the wait early so the caller's assertion reports it.
-        wait_until(lambda: p.poll() is not None or self.stderr(p).count('⏳') >= count,
+        # Count bytes: a read racing a write must not decode half of a multi-byte ⏳.
+        wait_until(lambda: p.poll() is not None or self.stderr_paths[p].read_bytes().count('⏳'.encode()) >= count,
                    timeout=timeout, description=str(count) + ' capacity-wait retries or an exit')
 
     def entries(self):
         return [json.loads(p.read_text())for p in (self.root/'events').glob('entry-*.json')]
 
     def backoff_pids(self):
-        return [json.loads(p.read_text())['pid'] for p in (self.root/'events').glob('backoff-*.json')]
+        # The pid is in the name, so a backoff file that is still being written is never parsed.
+        return [int(p.name.split('-')[1]) for p in (self.root/'events').glob('backoff-*.json')]
 
     def wait_entries(self, count, timeout=4):
         def enough():
