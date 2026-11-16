@@ -1,0 +1,19 @@
+{
+  "review": "APPROVED ordinary closeout metadata",
+  "reviewer": "01a1e245-bcbf-75a1-aa8a-126e69748507",
+  "reviewed_snapshot_sha256": "0443470b67805ad0050c229436c0eb335f7f083d4743cfcf5711d1621adbc7f6",
+  "scope": "22 sanitized public closeout files; no runtime change",
+  "checks": [
+    "Archive and source manifest counts/hashes coherent; upload self-verification and separate complete authenticated readback passed",
+    "605 refs audited; exact72 local-only branch tips plus stash covered; zero uncovered",
+    "Private98 packet, both failed production attempts and direct-POST/adoption evidence included",
+    "Managed secret basenames excluded; public metadata secret scan clean; four protected instruction hashes unchanged",
+    "Restore prefix, source/MIGRATION manifests and non-overwriting symlink mapping verified"
+  ],
+  "remaining_conditions": [
+    "Canonical native deletion readiness receipt",
+    "Reviewed records-only merge linked from deployed PR",
+    "Clean published branch native rerun returns READY"
+  ],
+  "destruction_authorized": false
+}

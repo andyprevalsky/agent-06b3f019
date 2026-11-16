@@ -1,0 +1,561 @@
+[
+  {
+    "path": ".cloud-env",
+    "inherited_disposition": "managed-env (boxes.dev project environment; secrets never archived)",
+    "kind": "file",
+    "bytes": 351,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": ".context/",
+    "inherited_disposition": {
+      "archive": "devbox-closeout-private/pr2225/20261115T192439Z-records.tar.gz.aesgcm",
+      "disposition": "archived",
+      "receipt": "docs/handoffs/pr-2225-closeout/private-archive-receipt.json",
+      "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2225-closeout/private-archive-receipt.json --destination <empty dir>",
+      "scope": "every regular file under .context on devbox 8fe8cfb2 after PR #2225 (iPhone cross-lease setup proofs; merged 37308b16bd): gate cycles r1-suspended, r2-envdrift and final READY at c3933ed27d, smoke campaigns, production lanes.",
+      "sha256": "1457ea689d2ac7410eee9ceb7343690dc34e2ecc0b554701e9c7a95cb246bbba"
+    },
+    "kind": "directory",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": ".devbox/",
+    "inherited_disposition": "managed (boxes.dev runtime state)",
+    "kind": "directory",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": ".env.npm",
+    "inherited_disposition": "managed-env (boxes.dev project environment; secrets never archived)",
+    "kind": "file",
+    "bytes": 170,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": ".llm-dumps/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "archived in final-private-archive-receipt.json; exact scope/source manifest applies"
+  },
+  {
+    "path": "agents/.env",
+    "inherited_disposition": "managed-env (boxes.dev project environment; secrets never archived)",
+    "kind": "file",
+    "bytes": 13856,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "agents/.env.benchmark-temporal",
+    "inherited_disposition": "managed-env (generated benchmark Temporal override; secrets never archived)",
+    "kind": "file",
+    "bytes": 695,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "agents/.env.cloudbench-upsert.lock",
+    "inherited_disposition": "reproducible (lock file)",
+    "kind": "file",
+    "bytes": 0,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "agents/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/activities/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/benchmarks/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/benchmarks/runs/20261116_031500_32eab9e1-fd5e-497d-a023-e4f81fc5f84a_browser-smoke.json",
+    "inherited_disposition": null,
+    "kind": "file",
+    "bytes": 10254867,
+    "sha256": "4aaf17ca509d7b11478604ff4d8abd2e040124c0a2708a954609b7fba8ca7299",
+    "current_disposition": "archived in final-private-archive-receipt.json; exact scope/source manifest applies",
+    "exact_copies": [
+      "/home/boxes/rose/.context/benchmarks/b82-harness-eval-20261116/run.json"
+    ]
+  },
+  {
+    "path": "agents/benchmarks/runs/20261116_033134_8ccdf23f-297b-4564-b8e1-0bd7c724bcda_browser-smoke.json",
+    "inherited_disposition": null,
+    "kind": "file",
+    "bytes": 10071461,
+    "sha256": "df397bbf119fcb04a7307b0853ebcf93691e1a1b39c2b89084512cc1dd935455",
+    "current_disposition": "archived in final-private-archive-receipt.json; exact scope/source manifest applies",
+    "exact_copies": [
+      "/home/boxes/rose/.context/benchmarks/b82-final-harness-eval-20261116/run.json"
+    ]
+  },
+  {
+    "path": "agents/browser_tools/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/agent_messaging/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/api_request/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/attempt_completion/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/call_phone_number/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/display/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/gate/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/github_repo_inventory/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/grep/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/knowledge_base/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/message_person/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/param_populator/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/read_message_history/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/reasoning/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/report_bug/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/request_payment_card/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/request_user_approval/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/request_user_signup/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/send_message_to_user/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/set_plan/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/spawn_agent/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/spawn_browser_agent_v3/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/spawn_claude_code_agent/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/spawn_sub_agents/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/user_tools/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/wait_for/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/domains/web_fetch/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/helpers/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/keycap/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/loop/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/navi-worker-log.txt",
+    "inherited_disposition": {
+      "archive": "devbox-closeout-private/pr2192/20261115T064209Z-records.tar.gz.aesgcm",
+      "disposition": "archived",
+      "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+      "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2192-closeout/private-archive-receipt.json --destination <empty dir>",
+      "scope": "template-inherited local log, archived in the same private archive",
+      "sha256": "18ef9901ff01f928f6c8174149207751b0c38063a5ffe8a84083040c8d67ef99"
+    },
+    "kind": "file",
+    "bytes": 3672,
+    "sha256": "f27d818de265d5f4b1d17b7d0ce7f12441dfe097d55ff521d47975c7da59da34",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "agents/providers/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/providers/demo_cache/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/providers/fast_cache/",
+    "inherited_disposition": "reproducible (runtime cache)",
+    "kind": "directory",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "agents/providers/planner_memory/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/providers/rose/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/tests/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/tests/blackbox/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/tools/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/tools/people_search/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/tools/prompts/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/tools/web_search/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/utils/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/venv/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "agents/workflows/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "back-end/.env",
+    "inherited_disposition": "managed-env (boxes.dev project environment; secrets never archived)",
+    "kind": "file",
+    "bytes": 20873,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "back-end/.env.cloudbench-upsert.lock",
+    "inherited_disposition": "reproducible (lock file)",
+    "kind": "file",
+    "bytes": 0,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "back-end/backend-logs.log",
+    "inherited_disposition": {
+      "archive": "devbox-closeout-private/pr2192/20261115T064209Z-records.tar.gz.aesgcm",
+      "disposition": "archived",
+      "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+      "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2192-closeout/private-archive-receipt.json --destination <empty dir>",
+      "scope": "template-inherited local log, archived in the same private archive",
+      "sha256": "18ef9901ff01f928f6c8174149207751b0c38063a5ffe8a84083040c8d67ef99"
+    },
+    "kind": "file",
+    "bytes": 90996,
+    "sha256": "410b8cbb68448ecf7b1fa33f4cd69d4762f5815f43177ba85a87297f65b6b5b8",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "back-end/node_modules/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "codex/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "docs/handoffs/whm-b07d9037-preservation/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "docs/rca/INDEX.md",
+    "inherited_disposition": "reproducible (generated by python3 scripts/rca_archive.py reindex)",
+    "kind": "file",
+    "bytes": 630199,
+    "sha256": "5022e947dfc513dfa706df4ce22ec8e672df7d7eb3de874a357b17963625f5e1",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "front-end/.env",
+    "inherited_disposition": "managed-env (boxes.dev project environment; secrets never archived)",
+    "kind": "file",
+    "bytes": 556,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "front-end/frontend-logs.log",
+    "inherited_disposition": {
+      "archive": "devbox-closeout-private/pr2192/20261115T064209Z-records.tar.gz.aesgcm",
+      "disposition": "archived",
+      "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+      "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2192-closeout/private-archive-receipt.json --destination <empty dir>",
+      "scope": "template-inherited local log, archived in the same private archive",
+      "sha256": "18ef9901ff01f928f6c8174149207751b0c38063a5ffe8a84083040c8d67ef99"
+    },
+    "kind": "file",
+    "bytes": 115,
+    "sha256": "23b2c1e9976d9ae1917c1d4505ee8d0cf52c59f405982f0d814f4ffbb04ade51",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "front-end/node_modules/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "front-end/playwright-report/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "archived in final-private-archive-receipt.json; exact scope/source manifest applies"
+  },
+  {
+    "path": "hermes-agent/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "hub-poller-logs.log",
+    "inherited_disposition": {
+      "archive": "devbox-closeout-private/pr2192/20261115T064209Z-records.tar.gz.aesgcm",
+      "disposition": "archived",
+      "receipt": "docs/handoffs/pr-2192-closeout/private-archive-receipt.json",
+      "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2192-closeout/private-archive-receipt.json --destination <empty dir>",
+      "scope": "template-inherited local log, archived in the same private archive",
+      "sha256": "18ef9901ff01f928f6c8174149207751b0c38063a5ffe8a84083040c8d67ef99"
+    },
+    "kind": "file",
+    "bytes": 100,
+    "sha256": "711d40c91bee9edba88f1f8fa8940d3ee84ea9e6817cf595242ea6211010d0a6",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "kimi-code/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "mac-app/.env",
+    "inherited_disposition": "managed-env (boxes.dev project environment; secrets never archived)",
+    "kind": "file",
+    "bytes": 840,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "node_modules/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "openclaw/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "package-lock.json",
+    "inherited_disposition": "reproducible (ignored root install lock)",
+    "kind": "file",
+    "bytes": 1049317,
+    "sha256": "bc06dbd925decdec5a1d9add5855eec7b63023691cd40b9af354f3e2891b0958",
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "prime-agent/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "research/.env",
+    "inherited_disposition": "managed-env (boxes.dev project environment; secrets never archived)",
+    "kind": "file",
+    "bytes": 1632,
+    "current_disposition": "inherited policy; current contents require comparison for archived entries"
+  },
+  {
+    "path": "scripts/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "scripts/lib/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  },
+  {
+    "path": "scripts/tests/__pycache__/",
+    "inherited_disposition": null,
+    "kind": "directory",
+    "current_disposition": "reproducible per scripts/deploy_cli.py REPRODUCIBLE"
+  }
+]

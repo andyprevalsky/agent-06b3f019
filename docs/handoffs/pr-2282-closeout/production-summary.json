@@ -1,0 +1,136 @@
+{
+  "primary_pr": 2282,
+  "merged_sha": "888b6e40bde0f70c3f090675be500a82707ce882",
+  "reviewed_head": "60f72992887bab99109105cfc702054dae516df2",
+  "selected_premerge_gates": 17,
+  "selected_premerge_gates_passed": 17,
+  "smoke_passed": 8,
+  "smoke_cleanup_verified": true,
+  "quarantine_report": "Tests skipped (quarantined): 12 \u2014 0 failed (non-blocking), 12 passed",
+  "production_status": "PASS",
+  "lanes": {
+    "render": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "fly": {
+      "status": "PASS",
+      "reason": "deploy-agents run 43807444719 attempt 1 job c0935364354a79cbccd66c85786d110ef6db8ce3a4b4507ae3c920e077963b70 SUCCEEDED + monitor --verify",
+      "started_at": "2026-11-16T05:16:20Z",
+      "finished_at": "2026-11-16T05:22:42Z",
+      "exit_code": 0
+    },
+    "vercel": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no front-end/ change",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "mac-release": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #2282 without MAC-APP-RELEASE)",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "backend-probes": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end change",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "workflow-migration": {
+      "status": "PASS",
+      "reason": "every migration row PASS",
+      "started_at": "2026-11-16T05:22:42Z",
+      "finished_at": "2026-11-16T05:28:55Z",
+      "exit_code": 0
+    },
+    "agentcard": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no AgentCard payment path change (benchmark history ledgers excluded)",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "semantic": {
+      "status": "PASS-verified-by-descendant",
+      "reason": "verified by descendant 530b71fe93a6bc39dc73b771c8e6e2b4f405abef: chat-lifecycle-ratchet run 43813691792 success with the specs of live frontend 530b71fe93a6 (a descendant of 888b6e40bde0)",
+      "started_at": "2026-11-16T06:06:56Z",
+      "finished_at": "2026-11-16T06:06:57Z",
+      "exit_code": 0
+    }
+  },
+  "fly": {
+    "required": true,
+    "run_id": "43807444719",
+    "attempt": "1",
+    "job_id": "c0935364354a79cbccd66c85786d110ef6db8ce3a4b4507ae3c920e077963b70",
+    "job_stage": "SUCCEEDED",
+    "expected_hash": null,
+    "observed_hash": null
+  },
+  "semantic": {
+    "run_id": "43813691792",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43813691792",
+    "attempt": 1,
+    "source_sha": "530b71fe93a6bc39dc73b771c8e6e2b4f405abef",
+    "head_sha": "530b71fe93a6bc39dc73b771c8e6e2b4f405abef",
+    "created_at": "2026-11-16T05:58:47Z",
+    "completed_at": "2026-11-16T06:06:31Z",
+    "conclusion": "success",
+    "outcome": "passed",
+    "binding": {
+      "build_id": "530b71fe93a6-mwiuo5r4",
+      "kind": "verified-by-descendant",
+      "live_frontend_commit": "530b71fe93a6bc39dc73b771c8e6e2b4f405abef",
+      "observed_at": "2026-11-16T05:58:46Z",
+      "polls": 1,
+      "version_url": "https://www.roselabs.ai/version.json"
+    }
+  },
+  "semantic_jobs": [
+    {
+      "name": "Chat full-lifecycle latency ratchet (agent_execute)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Semantic frontend flows",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Chat full-lifecycle latency ratchet (web_search)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Chat full-lifecycle latency ratchet (agent_plan)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Chat full-lifecycle latency ratchet (direct_answer)",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "original_failed_fly_workflow": 43807444719,
+  "original_failed_workflow_conclusion": "failure; preserved, not relabelled",
+  "same_job_recovery": true,
+  "marker_only_pr": 2337,
+  "marker_merge": "530b71fe93a6bc39dc73b771c8e6e2b4f405abef"
+}

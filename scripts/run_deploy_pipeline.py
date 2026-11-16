@@ -4567,6 +4567,13 @@ SEMANTIC_DISPATCH_REF = "main"
 SEMANTIC_FRONTEND_URL = "https://www.roselabs.ai"
 SEMANTIC_BACKEND_URL = "https://navi-j9a9.onrender.com"
 SEMANTIC_TITLE_PATTERN = re.compile(r"source_sha=([0-9a-f]{40})")
+# Every dispatch also sends a fresh dispatch_id that the run title echoes
+# (" dispatch=<id>"). Since the live-frontend binding, two concurrent
+# verifications of different merges can dispatch the same live descendant
+# (identical source_sha titles), so the source alone no longer identifies the
+# run a dispatch created (2026-11-15: runs 43690260324 and 43690277150, 12 s
+# apart, both titled source_sha=31641a670910...).
+SEMANTIC_DISPATCH_PATTERN = re.compile(r"(?:^|\s)dispatch=([0-9a-f]{32})(?:\s|$)")
 # Both workflow jobs allow 30 minutes plus runner queueing; the run is polled
 # every 30 s (the repo's 5000/h token quota is shared with other lanes).
 DEFAULT_SEMANTIC_START_TIMEOUT = 300.0
@@ -4613,13 +4620,17 @@ def _parse_github_time(value: object) -> datetime | None:
         return None
 
 
-def semantic_select_run(rows: object, source_sha: str, dispatched_at: datetime) -> dict | None:
+def semantic_select_run(rows: object, source_sha: str, dispatched_at: datetime,
+                        dispatch_id: str | None = None) -> dict | None:
     """The newest ``workflow_dispatch`` run this dispatch created: created no
     earlier than the dispatch clock (minus ``DISPATCH_CLOCK_SKEW_S``) and
     titled ``source_sha=<source_sha>`` (the dispatched commit: the merge or its
-    bound live descendant) by the workflow's run-name. Older runs and runs of
-    another source commit never match, whatever their headSha (the branch
-    head at dispatch time, which may be a later commit)."""
+    bound live descendant) by the workflow's run-name, plus
+    ``dispatch=<dispatch_id>`` when the dispatch sent one (only entries
+    recorded before the id existed have none). Older runs, runs of another
+    source commit and another dispatch's run of the same source never match,
+    whatever their headSha (the branch head at dispatch time, which may be a
+    later commit)."""
     earliest = dispatched_at - timedelta(seconds=DISPATCH_CLOCK_SKEW_S)
     matches: list[tuple[datetime, int, dict]] = []
     for row in rows if isinstance(rows, list) else []:
@@ -4628,6 +4639,9 @@ def semantic_select_run(rows: object, source_sha: str, dispatched_at: datetime) 
         created = _parse_github_time(row.get("createdAt"))
         title = SEMANTIC_TITLE_PATTERN.search(str(row.get("displayTitle") or ""))
         if created is None or created < earliest or title is None or title.group(1) != source_sha:
+            continue
+        marker = SEMANTIC_DISPATCH_PATTERN.search(str(row.get("displayTitle") or ""))
+        if dispatch_id is not None and (marker is None or marker.group(1) != dispatch_id):
             continue
         if row.get("event") not in (None, "workflow_dispatch"):
             continue
@@ -4859,7 +4873,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         return {"workflow": SEMANTIC_WORKFLOW, "merged_sha": merged_sha, "started_at": _now(), "outcome": "running",
                 "dispatch": {"ref": SEMANTIC_DISPATCH_REF, "at": None,
                              "inputs": {"source_sha": merged_sha, "frontend_url": frontend_url,
-                                        "backend_url": backend_url}},
+                                        "backend_url": backend_url, "dispatch_id": uuid.uuid4().hex}},
                 "run_id": None, "url": None, "head_sha": None, "source_sha": None, "display_title": None,
                 "created_at": None, "completed_at": None, "attempt": None, "status": None, "conclusion": None,
                 "jobs": [], "retry": None, "binding": None}
@@ -4921,11 +4935,13 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         _write_production_receipt(receipt_path, receipt)
         _gh_text(["workflow", "run", SEMANTIC_WORKFLOW, "--ref", SEMANTIC_DISPATCH_REF,
                   "-f", f"source_sha={dispatch_source()}", "-f", f"frontend_url={frontend_url}",
-                  "-f", f"backend_url={backend_url}"], root)
+                  "-f", f"backend_url={backend_url}", "-f", f"dispatch_id={entry['dispatch']['inputs']['dispatch_id']}"],
+                 root)
         entry["status"] = "dispatched"
         _write_production_receipt(receipt_path, receipt)
         print(f"PIPELINE_SEMANTIC dispatched workflow={SEMANTIC_WORKFLOW} ref={SEMANTIC_DISPATCH_REF} "
-              f"source_sha={dispatch_source()} at={entry['dispatch']['at']}", flush=True)
+              f"source_sha={dispatch_source()} dispatch_id={entry['dispatch']['inputs'].get('dispatch_id')} "
+              f"at={entry['dispatch']['at']}", flush=True)
         return dispatched_at
 
     def discover(dispatched_at: datetime, limit: float) -> tuple[dict | None, int, float]:
@@ -4937,7 +4953,8 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
             polls += 1
             rows = _gh_json(["run", "list", "--workflow", SEMANTIC_WORKFLOW, "--event", "workflow_dispatch",
                              "--branch", SEMANTIC_DISPATCH_REF, "--limit", "20", "--json", SEMANTIC_RUN_FIELDS], root)
-            row = semantic_select_run(rows, dispatch_source(), dispatched_at)
+            row = semantic_select_run(rows, dispatch_source(), dispatched_at,
+                                      entry["dispatch"]["inputs"].get("dispatch_id"))
             if row is not None or time.monotonic() - started >= limit:
                 return row, polls, round(time.monotonic() - started, 1)
             sleep(min(10.0, poll_seconds))
@@ -4991,7 +5008,8 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                 waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": None,
                               "polls": polls, "waited_s": waited_s, "outcome": "timeout"})
                 raise ProductionGateError(
-                    f"no {SEMANTIC_WORKFLOW} run titled source_sha={dispatch_source()} created after the dispatch at "
+                    f"no {SEMANTIC_WORKFLOW} run titled source_sha={dispatch_source()} "
+                    f"dispatch={entry['dispatch']['inputs'].get('dispatch_id')} created after the dispatch at "
                     f"{entry['dispatch']['at']} appeared within {start_timeout:.0f}s; the dispatch is unconfirmed: "
                     f"inspect `gh run list --workflow {SEMANTIC_WORKFLOW} --event workflow_dispatch` (an older run "
                     f"is never adopted; a run GitHub stamped more than {DISPATCH_CLOCK_SKEW_S:.0f}s before this "
