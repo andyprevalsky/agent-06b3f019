@@ -16,6 +16,11 @@
  * config also holds the cached tool list and the pending OAuth `state`.
  * Everything is per user and per row: no fan-in across users (10k agents read
  * one indexed row set per user).
+ *
+ * Team sharing (docs/plans/completed/share-mcp-servers.md): agents also list and
+ * call servers a teammate currently shares (`resolveTeamDataAccess`, revalidated
+ * on every list and call). The call runs with the OWNER's headers / OAuth token
+ * server-side; the teammate never receives them.
  */
 import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
@@ -30,6 +35,7 @@ import {
   type McpOAuthGrant,
 } from './oauth';
 import { mcpNetwork, McpUrlError } from './publicFetch';
+import { resolveTeamDataAccess } from '../teamAccess';
 import { McpProbeUnauthorized, openMcpSession, type McpTool } from './session';
 
 const log = createLogger('McpServers');
@@ -354,35 +360,102 @@ export async function deleteMcpServer(userId: string, id: string): Promise<void>
   log.info('[McpServers] deleted', { userId, integrationId: id });
 }
 
-/** Connected servers with full tool schemas, for agent sessions. */
+export interface McpShare {
+  team_id: string;
+  team_name: string;
+  owner_user_id: string;
+  owner_name: string | null;
+}
+
+/** Live 'mcp' grants a teammate holds, one per shared integration (lowest team id wins). */
+async function mcpGrants(userId: string, integrationId?: string) {
+  const byIntegration = new Map<string, McpShare>();
+  const grants = (await resolveTeamDataAccess(userId)).sort((a, b) =>
+    a.teamId.localeCompare(b.teamId)
+  );
+  for (const grant of grants) {
+    if (grant.provider !== 'mcp' || grant.ownerUserId === userId) continue;
+    if (integrationId !== undefined && grant.integrationId !== integrationId) continue;
+    if (byIntegration.has(grant.integrationId)) continue;
+    byIntegration.set(grant.integrationId, {
+      team_id: grant.teamId,
+      team_name: grant.teamName,
+      owner_user_id: grant.ownerUserId,
+      owner_name: grant.ownerName,
+    });
+  }
+  return byIntegration;
+}
+
+/** Shared servers' rows, still owned by the granting teammate (one indexed read). */
+async function sharedRows(grants: Map<string, McpShare>) {
+  if (grants.size === 0) return [];
+  const found = await prisma.integration.findMany({
+    where: { id: { in: [...grants.keys()] }, name: 'mcp', type: 'TOOL_SETUP' },
+    // Stable order keeps each shared server's de-collided slug (and tool names) fixed.
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  return found.filter(
+    (row) => mcpConfig(row.config) !== null && grants.get(row.id)?.owner_user_id === row.userId
+  );
+}
+
+/** Connected servers (own, then teammate-shared) with full tool schemas, for agent sessions. */
 export async function listAgentMcpServers(userId: string) {
-  return {
-    servers: (await rows(userId))
-      .filter((row) => row.status === 'CONNECTED')
-      .map((row) => {
-        const config = mcpConfig(row.config)!;
-        // Normalization can collide (search.docs vs search_docs): suffix later ones.
-        const used = new Set<string>();
-        return {
-          id: row.id,
-          name: config.name,
-          tools: config.tools.map((tool) => {
-            let agentName = mcpAgentToolName(config.slug, tool.name);
-            for (let n = 2; used.has(agentName); n += 1)
-              agentName = mcpAgentToolName(config.slug, `${tool.name}_${n}`);
-            used.add(agentName);
-            return { ...tool, agent_name: agentName };
-          }),
-        };
+  const own = (await rows(userId)).filter((row) => row.status === 'CONNECTED');
+  const grants = await mcpGrants(userId);
+  const shared = (await sharedRows(grants)).filter((row) => row.status === 'CONNECTED');
+  // Shared slugs never collide with the reader's own (or another share's) tool names.
+  const taken = new Set(own.map((row) => mcpConfig(row.config)!.slug));
+  const view = (row: (typeof own)[number], share: McpShare | null) => {
+    const config = mcpConfig(row.config)!;
+    const slug = share === null ? config.slug : slugFor(config.slug, taken);
+    if (share !== null) taken.add(slug);
+    // Normalization can collide (search.docs vs search_docs): suffix later ones.
+    const used = new Set<string>();
+    return {
+      id: row.id,
+      name: config.name,
+      ...(share === null ? {} : { shared: share }),
+      tools: config.tools.map((tool) => {
+        let agentName = mcpAgentToolName(slug, tool.name);
+        for (let n = 2; used.has(agentName); n += 1)
+          agentName = mcpAgentToolName(slug, `${tool.name}_${n}`);
+        used.add(agentName);
+        return { ...tool, agent_name: agentName };
       }),
+    };
   };
+  return {
+    servers: [
+      ...own.map((row) => view(row, null)),
+      ...shared.map((row) => view(row, grants.get(row.id)!)),
+    ],
+  };
+}
+
+/** The server `userId` may call: their own, else one a teammate currently shares. */
+async function usable(userId: string, id: string) {
+  const own = await prisma.integration.findFirst({
+    where: { id, userId, name: 'mcp', type: 'TOOL_SETUP' },
+  });
+  const ownConfig = own === null ? null : mcpConfig(own.config);
+  if (own !== null && ownConfig !== null) return { row: own, config: ownConfig, share: null };
+  const grants = await mcpGrants(userId, id);
+  const [row] = await sharedRows(grants);
+  if (row === undefined) throw new McpServerError(404, 'MCP server not found');
+  return { row, config: mcpConfig(row.config)!, share: grants.get(row.id)! };
 }
 
 /** Current auth headers; refreshes an OAuth access token under the row lock. */
 type AuthResult =
   { kind: 'headers'; headers: Record<string, string> } | { kind: 'expired'; name: string };
 
-async function authHeaders(id: string, force: boolean): Promise<Record<string, string>> {
+async function authHeaders(
+  id: string,
+  force: boolean,
+  shared: boolean
+): Promise<Record<string, string>> {
   const result: AuthResult = await runTransactionWithRetry(
     async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Integration" WHERE id = ${id} FOR UPDATE`;
@@ -414,7 +487,12 @@ async function authHeaders(id: string, force: boolean): Promise<Record<string, s
   );
   if (result.kind === 'headers') return result.headers;
   // Thrown after commit, so the EXPIRED status survives the refusal.
-  throw new McpServerError(401, `${result.name} needs you to sign in again in Integrations`);
+  throw new McpServerError(
+    401,
+    shared
+      ? `${result.name} needs its owner to sign in again in Integrations`
+      : `${result.name} needs you to sign in again in Integrations`
+  );
 }
 
 export async function callMcpTool(
@@ -423,19 +501,26 @@ export async function callMcpTool(
   tool: string,
   args: Record<string, unknown>
 ) {
-  const { row, config } = await owned(userId, id);
+  const { row, config, share } = await usable(userId, id);
   if (row.status !== 'CONNECTED')
-    throw new McpServerError(409, `${config.name} is not connected. Reconnect it in Integrations.`);
+    throw new McpServerError(
+      409,
+      share === null
+        ? `${config.name} is not connected. Reconnect it in Integrations.`
+        : `${config.name} is not connected. Ask its owner to reconnect it in Integrations.`
+    );
+  const ownerUserId = row.userId;
   const started = Date.now();
   const run = (headers: Record<string, string>) =>
     openMcpSession(config.url, headers, (session) => session.callTool(tool, args, CALL_TIMEOUT_MS));
   let result;
   try {
-    result = await run(await authHeaders(id, false));
+    result = await run(await authHeaders(id, false, share !== null));
   } catch (error) {
     if (!(error instanceof McpProbeUnauthorized) || config.auth !== 'oauth') {
       log.warn('[McpServers] tool call failed', {
         userId,
+        ownerUserId,
         integrationId: id,
         tool,
         error: reason(error),
@@ -443,11 +528,13 @@ export async function callMcpTool(
       if (error instanceof McpServerError) throw error;
       throw new McpServerError(502, `${config.name} ${tool} failed: ${reason(error)}`);
     }
-    result = await run(await authHeaders(id, true));
+    result = await run(await authHeaders(id, true, share !== null));
   }
   await prisma.integration.updateMany({ where: { id }, data: { lastUsedAt: new Date() } });
   log.info('[McpServers] tool call', {
     userId,
+    ownerUserId,
+    ...(share === null ? {} : { teamId: share.team_id }),
     integrationId: id,
     tool,
     args: JSON.stringify(args).slice(0, 200),

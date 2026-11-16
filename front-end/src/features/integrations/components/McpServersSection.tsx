@@ -2,7 +2,9 @@
  * STATE MACHINE: McpServersSection (state in useMcpServers)
  *
  *   [LOADING] --> [LISTED] each server: name · URL host · status
- *     (connected + tool count | "Sign in required" | the error) and actions
+ *     (connected + tool count | "Sign in required" | the error) and actions;
+ *     a connected server the backend lists as shareable also gets its
+ *     team-sharing caption (AccountTeamShare) beside its name
  *   [LISTED] --server URL (+ optional "API key header" name/value) · Connect-->
  *     [CONNECTING] --ok--> [LISTED] (form cleared)
  *                  --authorize_url--> browser goes to the server's OAuth sign-in;
@@ -23,6 +25,8 @@
 import { useState, type FormEvent } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Plug, Plus, X } from 'lucide-react';
 
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 import { MCP_DEFAULT_HEADER_NAME, mcpHeaders, useMcpServers } from '../hooks/useMcpServers';
 import {
   INTEGRATION_CARD_CLASSES,
@@ -79,6 +83,8 @@ function ServerStatus({ server }: { server: McpServer }) {
 }
 
 function ServerRow({ server, mcp }: { server: McpServer; mcp: McpState }) {
+  const { shareTarget } = useAccountShares();
+  const share = server.status === 'connected' && shareTarget('mcp', server.id);
   const busy = mcp.busyId === server.id;
   const action = server.status === 'needs_auth' ? 'Sign in' : 'Reconnect';
   return (
@@ -87,6 +93,7 @@ function ServerRow({ server, mcp }: { server: McpServer; mcp: McpState }) {
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate font-medium">{server.name}</span>
           <span className="truncate text-xs text-muted-foreground">{urlHost(server.url)}</span>
+          {share && <AccountTeamShare {...share} />}
         </div>
         <ServerStatus server={server} />
       </div>

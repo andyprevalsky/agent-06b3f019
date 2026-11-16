@@ -1195,9 +1195,16 @@ const mcpTools = () => [
   CLI_MCP_TOOL,
 ];
 
-// The user's connected MCP servers (Integrations page), proxied by the backend:
-// their headers and OAuth tokens never enter this sandbox. Never replayed.
+// The user's connected MCP servers (Integrations page) and servers teammates share
+// with them, proxied by the backend: their headers and OAuth tokens never enter this
+// sandbox. A shared server's tools name its owner and team. Never replayed.
 let userMcpTools = new Map();
+function mcpServerLabel(server) {
+  const shared = server.shared;
+  if (!shared || typeof shared !== 'object') return `[${server.name} MCP server]`;
+  const owner = shared.owner_name || 'a teammate';
+  return `[${server.name} MCP server, shared by ${owner} (ownerUserId ${shared.owner_user_id}) via team ${shared.team_name}]`;
+}
 async function loadUserMcpTools() {
   try {
     const data = await call('GET', '/mcp', undefined, 2, 15_000);
@@ -1212,7 +1219,7 @@ async function loadUserMcpTools() {
   }
   return [...userMcpTools.values()].map(({ server, tool }) => ({
     name: tool.agent_name,
-    description: `[${server.name} MCP server] ${tool.description}`,
+    description: `${mcpServerLabel(server)} ${tool.description}`,
     inputSchema: tool.input_schema || { type: 'object' },
   }));
 }
