@@ -54,7 +54,13 @@ async function main(): Promise<void> {
 
   const missingDenied = await checkGithubRepoAccess(randomUUID(), missingRepoUrl);
   assert.strictEqual(missingDenied.allowed, false);
-  assert.match(missingDenied.error ?? '', /permission to clone/i);
+  assert.match(missingDenied.error ?? '', /can't reach test-owner\/test-repo/i);
+  assert.match(missingDenied.error ?? '', /Import it from your computer in the Rose Mac app/);
+  assert.doesNotMatch(
+    missingDenied.error ?? '',
+    /private/i,
+    'a missing repo is not called private'
+  );
 
   process.stdout.write('github-public-repo-access: ok\n');
 }

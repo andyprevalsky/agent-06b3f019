@@ -61,9 +61,10 @@ require_text "$DEPLOY_CLI" "'--json', 'mergeCommit', '--jq', '.mergeCommit.oid'"
 require_text "$PROD" "io.capture(['git', 'diff', '--name-only', f'{sha}^1', sha], root, environ)" "/deploy must freeze the exact merged change set before cutover"
 require_text "$PIPELINE" '["git", "diff", "--name-only", f"{merged_sha}^1", merged_sha]' "production gate must classify the exact merged change set"
 require_text "$PIPELINE" 'changed = merged_changes(merged_sha, root)' "production gate must derive agent classification from the frozen merged change set"
-require_text "$PIPELINE" 'cutover = agent_cutover_required(changed, root)' "production gate must classify the merged change set before waiting for cutover"
+require_text "$PIPELINE" 'cutover = agent_cutover_required(changed, root, merged_sha)' "production gate must classify the merged change set before waiting for cutover"
 require_text "$PIPELINE" 'workflow = AGENTS_WORKFLOW_PATH in changed' "production gate must include deploy-workflow-only changes in cutover classification"
-require_text "$PIPELINE" '"required": bool(runtime or workflow)' "production gate cutover classification must match GitHub activation inputs"
+require_text "$PIPELINE" '"required": bool(runtime or workflow or triggers)' "production gate cutover classification must match GitHub activation inputs"
+require_text "$PIPELINE" 'deploy_agents_push_matches(changed, workflow_text)' "production gate must apply deploy-agents.yml's own push paths (cutover controller scripts start a cutover)"
 require_text "$PROD" "fly_reason = '; '.join(filter(None, ['agent runtime files: '" "lane planner must derive cutover from the classified runtime files"
 require_text "$PROD" "f'{AGENTS_WORKFLOW_PATH} changed' if workflow else ''" "lane planner must include deploy-workflow-only changes in cutover classification"
 # One canonical cutover condition: the Fly cutover lane and the production
@@ -164,7 +165,15 @@ require_text "$PROD_VALIDATOR" "prisma.toolUsage.createMany" "production validat
 require_text "$PROD_VALIDATOR" "tokenCountCheckpoint: 950" "production validator must preserve the durable context checkpoint"
 require_text "$PROD_VALIDATOR" "tokensInCheckpoint: 680" "production validator must preserve the durable input-token checkpoint"
 require_text "$PROD_VALIDATOR" "tokensOutCheckpoint: 270" "production validator must preserve the durable output-token checkpoint"
-require_text "$PROD_VALIDATOR" "DEPLOYMENT_LEASE_WAIT_MS = 10 * 60_000" "production validator must bound deployment-lease contention"
+# Deploys never serialize on each other: the validator admits itself with a
+# run-scoped lease and never takes the production cutover lease, and its only
+# fleet-wide mutation (marker retirement) runs through a run-scoped client.
+if grep -Eq 'acquireWorkflowDeploymentLease|WORKFLOW_DEPLOYMENT_LEASE_KEY|cleanupSupersededWorkerActivationMarkers\(' "$PROD_VALIDATOR"; then
+  fail "production validator must not take the production cutover lease or retire markers fleet-wide"
+fi
+require_text "$PROD_VALIDATOR" "validationRunLease = await beginValidationRun(runId)" "production validator must admit itself with its run-scoped lease"
+require_text "$PROD_VALIDATOR" "cleanupSupersededWorkerActivationMarkersWithClient(scopedClient, currentMarkerId)" "production validator must retire only its own activation markers"
+require_text "$PROD_VALIDATOR" "liveConcurrentValidationUserIds(" "fleet stuck-state check must exclude only live concurrent validation runs"
 require_text "$PROD_VALIDATOR" 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"' "production validator must wait with the same visibility query used by marker cleanup"
 require_text "$CANDIDATE_VALIDATOR" "toolUsage.count" "candidate validator must prove no LLM/tool usage was billed"
 require_text "$CANDIDATE_VALIDATOR" "candidate_fixture_cleanup" "candidate validator must report fixture cleanup"

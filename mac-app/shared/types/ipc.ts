@@ -186,6 +186,21 @@ export interface IPC {
     onStatus: (callback: (status: LocalCodeStatus) => void) => () => void;
   };
 
+  // The `rose` CLI this app provides: ~/.rose/bin/rose runs the bundled CLI
+  // (no `npm i -g @roselabs.ai/cli`; PATH and shell rc files are never edited)
+  roseCli?: {
+    /** (Re)writes the launcher when missing or stale; resolves to its absolute path. */
+    ensureInstalled: () => Promise<RoseCliInstallResult>;
+    /** Native folder picker ("Choose a project to import"). */
+    pickProjectFolder: () => Promise<RoseCliFolderPickResult>;
+    /** Runs `rose import detect|scan|apply --json` (main builds the argv); one run at a time. */
+    importProject: (request: RoseCliImportRequest) => Promise<RoseCliImportStartResult>;
+    /** Every stdout JSON object of a run (+ runId), then a final { event: 'exit', code }. */
+    onImportEvent: (listener: (event: RoseCliImportEvent) => void) => () => void;
+    /** SIGTERM the run's process group, SIGKILL after a grace period. */
+    cancelImport: (runId: string) => Promise<void>;
+  };
+
   // Atlas credentials
   atlas?: {
     storePassword: (password: string) => Promise<{ success: boolean; error?: string }>;
@@ -470,4 +485,53 @@ export interface LocalCodeGrantResult {
   success: boolean;
   error?: string;
   status: LocalCodeStatus;
+}
+
+/** roseCli.ensureInstalled: the absolute launcher path on success, a readable error otherwise. */
+export interface RoseCliInstallResult {
+  success: boolean;
+  path?: string;
+  error?: string;
+}
+
+export interface RoseCliFolderPickResult {
+  canceled: boolean;
+  /** Absolute folder path when not canceled. */
+  path?: string;
+}
+
+export type RoseCliImportAgent = 'codex' | 'claude';
+
+/** What the renderer may ask for; the main process builds and validates the argv itself. */
+export type RoseCliImportRequest =
+  | { action: 'detect' }
+  | {
+      action: 'scan';
+      folder: string;
+      /**
+       * One-time Rose CLI login code (rlc_ + 32 of [A-Za-z0-9_-]). Main passes it
+       * to `rose import scan` as ROSE_LOGIN_CODE, never on argv.
+       */
+      loginCode: string;
+      apiUrl: string;
+      project?: string;
+      agent?: RoseCliImportAgent;
+    }
+  | { action: 'apply'; folder: string; plan: unknown; githubImport: boolean; apiUrl: string };
+
+export type RoseCliImportStartResult = { runId: string } | { error: string };
+
+/**
+ * One JSON object from the CLI's stdout (`event`: 'progress' | 'plan' | 'done' |
+ * 'error'; `detect` prints a single result object), tagged with its runId. A
+ * run always ends with exactly one `{ runId, event: 'exit', code }` (code null
+ * when killed). A non-zero exit with no CLI error event is preceded by
+ * `{ runId, event: 'error', message, canceled? }`. Malformed lines and stderr
+ * are never forwarded.
+ */
+export interface RoseCliImportEvent {
+  runId: string;
+  event?: string;
+  code?: number | null;
+  [key: string]: unknown;
 }

@@ -10,8 +10,8 @@ and editing go to a code agent (the sandbox ``rose video`` tool + ffmpeg).
 CODE_VIDEO_SENTENCE = "Send video generation or editing to a code agent; tell it to make real footage with `rose video` and edit with ffmpeg."
 CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
-    "Anthropic's Claude Code. After completion it syncs results to the current project's GitHub repo, or "
-    "outside a project to a repo created for this agent tree. The task should be tightly scoped and "
+    "Anthropic's Claude Code. After completion it syncs results to its project's repo (github_repo_ref), or "
+    "without one to a repo created for this agent tree. The task should be tightly scoped and "
     "self-sufficient. " + CODE_VIDEO_SENTENCE
 )
 CODE_LINE_ROSE_DESKTOP = (

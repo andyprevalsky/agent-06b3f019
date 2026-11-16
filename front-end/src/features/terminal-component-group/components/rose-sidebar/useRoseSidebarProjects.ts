@@ -1,13 +1,10 @@
 /**
- * STATE MACHINE: useRoseSidebarProjects (project rows + panels beside the left bar)
+ * STATE MACHINE: useRoseSidebarProjects (folder rows in the left bar)
  *
- * Projects are shown as Folders (same rows and ids; lib/api/folders.ts).
- *
- * FOLDER SETTINGS PANEL (beside the left bar):
- *   [NONE] --⚙ / "Folder settings" on folder P--> [PROJECT(P)]
- *   [PROJECT(P)] --⚙ on project Q--> [PROJECT(Q)]
- *   [PROJECT(P)] --same ⚙ again | close | Escape | P deleted--> [NONE]
- * (Account settings open in the right-panel slot, owned by RoseAppsProvider.)
+ * Folders only organize agents (lib/api/folders.ts; same ids as their project
+ * rows). Only rows the server marks as folders are listed: a repository that
+ * was connected or imported in Integrations › GitHub Repositories is not a
+ * folder. Folders have no settings here (Andy, 2026-11-15).
  *
  * FOLDER MUTATIONS (useProjects, /api/folders): create (inline "+ New folder",
  * POST { name } only, never a repo), rename (inline, PATCH { name }), delete
@@ -15,7 +12,7 @@
  * name on create (409), which the inline input shows.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
 import { DuplicateFolderNameError } from '@/lib/api/folders';
@@ -34,11 +31,13 @@ export function useRoseSidebarProjects(
 ) {
   const { toast } = useToast();
   const projectQuery = useProjectsQuery();
-  const projects = projectQuery.data ?? [];
+  const projects = useMemo(
+    () => (projectQuery.data ?? []).filter((project) => project.isFolder !== false),
+    [projectQuery.data],
+  );
   const createMutation = useCreateProject();
   const renameMutation = useRenameProject();
   const deleteMutation = useDeleteProject();
-  const [settingsProjectId, setSettingsProjectId] = useState<string | null>(null);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
 
@@ -47,21 +46,15 @@ export function useRoseSidebarProjects(
     [toast],
   );
 
-  const toggleProjectSettings = useCallback((project: Project) => {
-    setSettingsProjectId((prev) => (prev === project.id ? null : project.id));
-  }, []);
-
   const confirmDelete = useCallback(() => {
     const target = deleteTarget;
     setDeleteTarget(null);
     if (target === null) return;
-    setSettingsProjectId((prev) => (prev === target.id ? null : prev));
     deleteMutation.mutate(target.id, { onError: () => fail('Could not delete folder') });
   }, [deleteMutation, deleteTarget, fail]);
 
   const projectActions: RoseProjectActions = {
     onCreateAgentInProject,
-    onOpenProjectSettings: toggleProjectSettings,
     onStartRename: (project) => setRenamingProjectId(project.id),
     onCancelRename: () => setRenamingProjectId(null),
     onRename: (project, name) => {
@@ -88,14 +81,9 @@ export function useRoseSidebarProjects(
     },
   };
 
-  const openProject =
-    settingsProjectId === null ? null : (projects.find((p) => p.id === settingsProjectId) ?? null);
-
   return {
     projects,
     projectQuery,
-    openProject,
-    closeProjectSettings: () => setSettingsProjectId(null),
     renamingProjectId,
     deleteTarget,
     cancelDelete: () => setDeleteTarget(null),

@@ -632,6 +632,17 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
 _DOMAIN_SINGLE_FAILURE = re.compile(r'\((?:\d+ passed, 1 failed; )?1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
 
 
+def _single_failed_case(detail: str) -> str | None:
+    """The case named by the runner's own (first) failure summary when it reports exactly one failed case.
+
+    A summary quoted later inside a case's error text never counts.
+    """
+    head, separator, _ = detail.partition(' failed case(s): ')
+    start = head.rfind('(')
+    match = _DOMAIN_SINGLE_FAILURE.match(detail, start) if separator and start >= 0 else None
+    return match.group(1) if match else None
+
+
 def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) -> list[dict]:
     """The marker for one recorded case of a blackbox-domain FLAKY unit (e.g. `rose-browser-use`).
 
@@ -643,15 +654,16 @@ def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) 
         return _ts_domain_case_markers(occurrence, case, root, path)
     if not isinstance(case, str) or not re.fullmatch(r'[A-Za-z_]\w*', case):
         raise ValueError('case must be the recorded blackbox case label')
-    failed = _DOMAIN_SINGLE_FAILURE.findall(str(occurrence.get('detail') or ''))
-    if failed != [case]:
+    if _single_failed_case(str(occurrence.get('detail') or '')) != case:
         raise ValueError(f"case {case} is not the single failed case of FLAKY unit {occurrence['unit']}")
     try:
         text = (root / path).read_text(errors='replace')
     except OSError:
         return []
-    functions = set(re.findall(r'\brecord(?:_async)?\(\s*([\'"])' + re.escape(case) + r'\1\s*,\s*([A-Za-z_]\w*)\s*\)',
-                               text))
+    # The label is recorded by `record("case", fn)` or listed as a bare `("case", fn)` pair fed to record_async;
+    # any other call naming the label (e.g. `log("case", fn)`) is not a registration.
+    functions = set(re.findall(r'(?:\brecord(?:_async)?\(|(?<![\w.)\]])\()\s*([\'"])' + re.escape(case)
+                               + r'\1\s*,\s*([A-Za-z_]\w*)\s*,?\s*\)', text))
     names = {name for _quote, name in functions}
     if len(names) != 1:
         raise ValueError(f'{path} must record case {case} with exactly one test function')

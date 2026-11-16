@@ -1,13 +1,16 @@
 /**
  * /api/projects — owner-scoped Projects (settings, env files, codebase sync).
  *
- *   GET    /api/projects                        list (with env-file counts)
- *   POST   /api/projects                        create
- *   PUT    /api/projects                        upsert by name (rose-sync, seeds)
+ *   GET    /api/projects                        list (with env-file counts): own rows, then
+ *                                               repositories teammates share (`shared`)
+ *   POST   /api/projects                        create (a repository, not a folder)
+ *   PUT    /api/projects                        upsert by name (rose-sync, seeds; a new row
+ *                                               is a repository, an existing one keeps its flag)
  *   GET    /api/projects/sync-key               public key for client-side encryption
  *   GET    /api/projects/:id                    one project
  *   PUT    /api/projects/:id                    update settings
- *   DELETE /api/projects/:id                    delete (agents fall back to Home)
+ *   DELETE /api/projects/:id                    delete (agents fall back to Home); a
+ *                                               folder keeps its agents and loses its repository
  *   GET    /api/projects/:id/env-files[?q=]     list / search (never values)
  *   POST   /api/projects/:id/env-files          add (values encrypted at rest)
  *   PUT    /api/projects/:id/env-files/:fileId  edit values / description / path
@@ -16,6 +19,8 @@
  *   POST   /api/projects/:id/sync               push an encrypted checkout snapshot
  *   POST   /api/projects/:id/sessions/:sessionId/startup  re-run the startup script
  *   POST   /api/projects/cli-login-codes        mint a one-time CLI login code (user session)
+ *   GET|PUT|DELETE /api/projects/github-credential  the caller's own GitHub credential
+ *                                               (routes.githubCredential.ts, same auth)
  *   POST   /api/projects/cli-login-codes/exchange  CLI trades the code once (no auth;
  *                                               10 failed attempts per address per 15 min
  *                                               then 429) for a rose_cli_ credential
@@ -58,10 +63,10 @@ import {
 const log = createLogger('ProjectsRoutes');
 const router = Router();
 
-type ProjectsRequest = HybridAuthRequest & { cliScope?: cliLogin.CliCredentialScope };
+export type ProjectsRequest = HybridAuthRequest & { cliScope?: cliLogin.CliCredentialScope };
 
 /** A `Bearer rose_cli_…` credential is resolved here; anything else goes to hybridAuth. */
-function withProjectsAuth(req: ProjectsRequest, res: Response, next: NextFunction): void {
+export function withProjectsAuth(req: ProjectsRequest, res: Response, next: NextFunction): void {
   const header = req.headers.authorization;
   const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : '';
   if (!cliLogin.isCliCredential(token)) {
@@ -73,7 +78,8 @@ function withProjectsAuth(req: ProjectsRequest, res: Response, next: NextFunctio
     .then((scope) => {
       if (scope === null) {
         res.status(401).json({
-          error: 'Rose CLI login expired or revoked. Copy a fresh setup prompt from Rose.',
+          error:
+            'Rose CLI login expired or revoked. Start the import again from Rose (Integrations › GitHub Repositories › Import from your computer).',
           code: 'cli_credential_invalid',
         });
         return;
@@ -162,7 +168,8 @@ router.post(
     if (!verdict.allowed) {
       res.setHeader('Retry-After', String(verdict.retryAfterS));
       res.status(429).json({
-        error: 'Too many failed login attempts. Wait and copy a fresh prompt from Rose.',
+        error:
+          'Too many failed login attempts. Wait a few minutes, then start the import again from Rose.',
         code: 'rate_limited',
       });
       return;
@@ -207,9 +214,12 @@ router.post(
 router.get(
   '/',
   handle(async (req, res, userId) => {
-    const result = await service.listProjects(userId);
-    const bound = req.cliScope?.projectId ?? null;
-    res.json(bound === null ? result : { projects: result.projects.filter((p) => p.id === bound) });
+    const scope = req.cliScope;
+    res.json(
+      scope === undefined
+        ? await service.listProjects(userId)
+        : await service.listCliProjects(userId, scope.projectId)
+    );
   })
 );
 

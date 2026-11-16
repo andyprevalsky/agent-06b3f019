@@ -67,6 +67,10 @@ async function testReadableInboxProjection() {
     path.join(backendDir, 'src/domains/integrations/service.lantern.ts'),
     'utf8'
   );
+  const githubCredentials = fs.readFileSync(
+    path.join(backendDir, 'src/providers/githubUserCredentials.ts'),
+    'utf8'
+  );
   function extract(source: string, name: string) {
     const start = source.indexOf(`function ${name}`);
     assert(start >= 0);
@@ -119,6 +123,10 @@ async function testReadableInboxProjection() {
   const redactLanternIntegration = Function(
     `return (${extract(lanternService, 'redactLanternIntegration')});`
   )();
+  const redactGithubUserCredential = Function(
+    'GITHUB_USER_CREDENTIAL_INTEGRATION',
+    `return (${extract(githubCredentials, 'redactGithubUserCredential')});`
+  )('github_user_credential');
   const integrationQueries: IntegrationQuery[] = [];
   let healthCalls = 0;
   const list = Function(
@@ -139,6 +147,17 @@ async function testReadableInboxProjection() {
               name: 'lantern_people',
               status: 'CONNECTED',
               config: { encryptedCredentials: 'secret-lantern-envelope' },
+              emailCredentials: [],
+            },
+            {
+              name: 'github_user_credential',
+              status: 'CONNECTED',
+              config: {
+                login: 'octo',
+                scopes: ['repo'],
+                verified_at: 'now',
+                encrypted_token: 'secret-github-envelope',
+              },
               emailCredentials: [],
             },
           ];
@@ -162,6 +181,7 @@ async function testReadableInboxProjection() {
     'withDerivedConnectedEmails',
     'findReadableInboxEmails',
     'redactLanternIntegration',
+    'redactGithubUserCredential',
     'settleLinkedInSync',
     `return (${extract(service, 'getIntegrations')});`
   )(
@@ -170,6 +190,7 @@ async function testReadableInboxProjection() {
     derive,
     readable,
     redactLanternIntegration,
+    redactGithubUserCredential,
     // No LinkedIn row here; its settle behavior is owned by the integrations blackbox.
     async (_userId: string, rows: unknown[]) => rows
   );
@@ -193,6 +214,12 @@ async function testReadableInboxProjection() {
   assert(!JSON.stringify(one).includes('secret-refresh'));
   assert.deepEqual(one.integrations[3].config, {}, 'actual Lantern redactor remains applied');
   assert(!JSON.stringify(one).includes('secret-lantern-envelope'));
+  assert.deepEqual(
+    one.integrations[4].config,
+    { login: 'octo', scopes: ['repo'], verified_at: 'now' },
+    'the GitHub credential redactor keeps only login, scopes and verified_at'
+  );
+  assert(!JSON.stringify(one).includes('secret-github-envelope'));
   const empty = await get('empty');
   assert.deepEqual(empty.integrations[0].readableInboxEmails, []);
   const foreign = await get('foreign');

@@ -7,13 +7,13 @@
  * then the created projects, the Home project last (Andy, 2026-10-28); a thin
  * divider line separates consecutive groups:
  *   + New project  (inline: Enter creates, Escape cancels)
- *   [icon] Project A   [+ new agent here] [⚙ settings]   (right-click: rename/settings/delete)
+ *   [folder] Folder A   [+ new agent here] [folder-plus]   (right-click: rename/delete)
  *       project A agents (indented)
  *       folder rows (one level; collapse/expand, count, +, rename/delete menu)
  *         folder agents; folder-plus on project opens the create editor
  *   ──────
  *   [icon] Project B   [+] [⚙]
- *   (icon = GitHub repo owner's avatar when connected to a GitHub repo, else folder)
+ *   (folders only organize agents: no settings, repo or avatar in the bar)
  *       ...
  *   ──────
  *   [⌂] Home   [+ new agent in Home]     (every agent without a project)
@@ -72,7 +72,6 @@ export interface RoseProjectActions {
   onCreateAgentInProject: (project: Project, folderId?: string | null) => void;
   /** "+" on the Home project row (a new agent without a project). */
   onCreateHomeAgent?: () => void;
-  onOpenProjectSettings: (project: Project) => void;
   onStartRename: (project: Project) => void;
   onRename: (project: Project, name: string) => void;
   onCancelRename: () => void;
@@ -91,8 +90,6 @@ export interface RoseAgentGroupsProps {
   isFiltering: boolean;
   selectedAgentId: string | null;
   attentionAgentIds: ReadonlySet<string>;
-  /** Project whose settings panel is open (its row shows as active). */
-  settingsProjectId: string | null;
   renamingProjectId: string | null;
   /** Group (project id or HOME_GROUP) the next new agent is created in, if marked. */
   pendingGroupKey?: string | null;
@@ -171,9 +168,7 @@ function ProjectGroupRow({
 }) {
   const [creatingFolder, setCreatingFolder] = useState(false);
   const a = props.projectActions;
-  const isActive =
-    props.settingsProjectId === project.id ||
-    agents.some((agent) => agent.agent_id === props.selectedAgentId);
+  const isActive = agents.some((agent) => agent.agent_id === props.selectedAgentId);
   return (
     <>
       <RoseProjectRow
@@ -190,7 +185,6 @@ function ProjectGroupRow({
           onExpand();
           setCreatingFolder(true);
         }}
-        onOpenSettings={() => a.onOpenProjectSettings(project)}
         onStartRename={() => a.onStartRename(project)}
         onRename={(name) => a.onRename(project, name)}
         onCancelRename={a.onCancelRename}

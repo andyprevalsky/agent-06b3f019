@@ -20,7 +20,9 @@ Two sources produce the same "control facts" dict:
 ``target_from_facts`` turns those facts into the signals the classifiers read.
 Every function returns ``None`` when it cannot resolve the target (including a
 point or focus inside a cross-origin frame) so callers keep their previous
-signal.
+signal. The one exception: a click the page cannot see into is hit-tested
+through the frame over CDP, and a hit on a text field resolves to "cannot
+commit" so page prose around the frame is never read as its label.
 
     action ──► facts (cached AX node │ live PROBE_JS) ──► WriteLockTarget
                                                           ├─ commits=False → no lock
@@ -29,6 +31,7 @@ signal.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -75,6 +78,8 @@ _CONTEXT_ID_DEPTH = 6
 _WRAPPER_DEPTH = 3
 _WRAPPER_MAX_CHARS = 200
 _GENERIC_NAME_MAX_CHARS = 200
+_FRAME_HOPS = 4
+_FRAME_PROBE_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -578,6 +583,8 @@ function (mode, intent, x, y) {
 
     let start = mode === 'element' ? this : (mode === 'point' ? deepFromPoint(Number(x), Number(y)) : deepActive());
     if (start && !isElement(start)) start = start.parentElement;
+    // The frame probe asks for the hit frame element itself, to look inside it.
+    if (intent === 'frame_owner') return start && (start.localName === 'iframe' || start.localName === 'frame') ? start : null;
     // A cross-origin frame hides the element actually hit or focused; its title
     // says nothing about that control, so leave the target unresolved.
     if (start && mode !== 'element' && (start.localName === 'iframe' || start.localName === 'frame')) {
@@ -642,8 +649,113 @@ async def _run_probe(session: Any, *, element: Any, coords: Optional[dict], inte
         return None
     if data.get("ok") is not True:
         logger.info("Write-lock probe left the %s target unresolved (%s): %s", intent, mode, data.get("reason"))
-        return None
+        return data if data.get("reason") == "opaque_frame" and intent == "click" else None
     return data
+
+
+def _parse_probe_response(response: Any) -> Optional[dict]:
+    if not isinstance(response, dict) or response.get("exceptionDetails"):
+        logger.warning("Write-lock frame probe raised: %s", str(response)[:200])
+        return None
+    value = (response.get("result") or {}).get("value")
+    data = json.loads(value) if isinstance(value, str) else None
+    return data if isinstance(data, dict) else None
+
+
+async def _evaluate_in(cdp_session: Any, context_id: Optional[int], expression: str, *, by_value: bool = True) -> dict:
+    params: dict = {"expression": expression, "returnByValue": by_value}
+    if context_id is not None:
+        params["contextId"] = context_id
+    return await cdp_session.cdp_client.send.Runtime.evaluate(params=params, session_id=cdp_session.session_id)
+
+
+def _probe_expression(intent: str, x: float, y: float) -> str:
+    return f"({PROBE_JS}).call(null, 'point', {json.dumps(intent)}, {x}, {y})"
+
+
+async def _frame_context(session: Any, cdp_session: Any, frame_id: str) -> tuple[Any, Optional[int]]:
+    """An out-of-process frame is its own target; an in-process one gets an isolated world in its parent's."""
+    infos = (await cdp_session.cdp_client.send.Target.getTargets()).get("targetInfos") or []
+    if any(info.get("targetId") == frame_id for info in infos):
+        return await session.get_or_create_cdp_session(frame_id, focus=False), None
+    world = await cdp_session.cdp_client.send.Page.createIsolatedWorld(
+        params={"frameId": frame_id, "worldName": "rose-write-lock-probe"}, session_id=cdp_session.session_id
+    )
+    return cdp_session, world["executionContextId"]
+
+
+def _axis_aligned(quad: list) -> bool:
+    """A rotated or skewed frame's content quad is not a translated, scaled rectangle."""
+    x1, y1, x2, y2, x3, y3, x4, y4 = quad
+    return abs(y1 - y2) < 0.5 and abs(x2 - x3) < 0.5 and abs(y3 - y4) < 0.5 and abs(x4 - x1) < 0.5
+
+
+async def _probe_through_frames(session: Any, x: float, y: float) -> Optional[dict]:
+    """Run PROBE_JS inside the cross-origin frame a click lands in, at frame viewport coordinates.
+
+    Every coordinate here is a viewport coordinate: the click point, the
+    frame's content box (``DOM.getBoxModel``) and ``elementFromPoint`` inside
+    the frame, so page and frame scroll never shift the hit. A CSS-scaled frame
+    is mapped through its ``innerWidth`` / ``innerHeight``; a rotated or skewed
+    frame, or a hop through an in-process frame, cannot be mapped and returns None.
+    """
+    cdp_session = await session.get_or_create_cdp_session(session.agent_focus_target_id, focus=False)
+    context_id: Optional[int] = None
+    for _ in range(_FRAME_HOPS):
+        if context_id is not None:
+            # Inside an in-process frame, DOM.getBoxModel answers in the root
+            # viewport, not this frame's, so a further hop cannot be mapped.
+            return None
+        send = cdp_session.cdp_client.send
+        sid = cdp_session.session_id
+        owner = await _evaluate_in(cdp_session, context_id, _probe_expression("frame_owner", x, y), by_value=False)
+        object_id = (owner.get("result") or {}).get("objectId")
+        if not object_id:
+            return None
+        try:
+            frame_id = (await send.DOM.describeNode(params={"objectId": object_id}, session_id=sid))["node"].get(
+                "frameId"
+            )
+            quad = (await send.DOM.getBoxModel(params={"objectId": object_id}, session_id=sid))["model"]["content"]
+        finally:
+            await send.Runtime.releaseObject(params={"objectId": object_id}, session_id=sid)
+        box_width, box_height = quad[2] - quad[0], quad[5] - quad[1]
+        if not frame_id or box_width <= 0 or box_height <= 0 or not _axis_aligned(quad):
+            return None
+        cdp_session, context_id = await _frame_context(session, cdp_session, frame_id)
+        size = await _evaluate_in(cdp_session, context_id, "[innerWidth, innerHeight]")
+        inner_width, inner_height = (size.get("result") or {}).get("value") or (0, 0)
+        if not inner_width or not inner_height:
+            return None
+        x = (x - quad[0]) * inner_width / box_width
+        y = (y - quad[1]) * inner_height / box_height
+        data = _parse_probe_response(await _evaluate_in(cdp_session, context_id, _probe_expression("click", x, y)))
+        if data is None or data.get("ok") is True:
+            return data
+        if data.get("reason") != "opaque_frame":
+            return None
+    return None
+
+
+async def _cross_origin_field_click(session: Any, coords: dict) -> Optional[WriteLockTarget]:
+    """A click the page probe could not see into: ``commits=False`` only when it lands in a text field.
+
+    Fields never commit, so page prose around the frame cannot make that click
+    a purchase. Any other control inside the frame (a wallet button), an
+    unloaded frame, or an unresolvable hit returns None so the caller keeps
+    its page signal.
+    """
+    try:
+        data = await asyncio.wait_for(
+            _probe_through_frames(session, float(coords["x"]), float(coords["y"])), _FRAME_PROBE_TIMEOUT_S
+        )
+    except Exception as error:
+        logger.warning("Write-lock frame probe unavailable: %s", str(error)[:200])
+        return None
+    target = data.get("target") if data else None
+    if not isinstance(target, dict) or not target.get("editable"):
+        return None
+    return target_from_facts(target)
 
 
 async def probe_click_target(session: Any, coords: Optional[dict]) -> Optional[WriteLockTarget]:
@@ -653,6 +765,8 @@ async def probe_click_target(session: Any, coords: Optional[dict]) -> Optional[W
     data = await _run_probe(session, element=None, coords=coords, intent="click")
     if data is None:
         return None
+    if data.get("reason") == "opaque_frame":
+        return await _cross_origin_field_click(session, coords)
     target = data.get("target")
     if not isinstance(target, dict):
         return WriteLockTarget(commits=False, reason="no element at click point")

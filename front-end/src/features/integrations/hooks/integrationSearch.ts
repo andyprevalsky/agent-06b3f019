@@ -15,7 +15,7 @@ export function integrationMatchesSearch(key: IntegrationCatalogKey, query: stri
 export function hasIntegrationSearchResults(query: string, signedIn: boolean): boolean {
   return (Object.keys(INTEGRATION_CATALOG) as IntegrationCatalogKey[]).some(
     (key) =>
-      (signedIn || !['compute', 'banks', 'meetingNotes', 'githubRepos'].includes(key)) &&
+      (signedIn || !['compute', 'banks', 'meetingNotes', 'projects'].includes(key)) &&
       integrationMatchesSearch(key, query),
   );
 }

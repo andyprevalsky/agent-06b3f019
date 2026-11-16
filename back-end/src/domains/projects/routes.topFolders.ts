@@ -1,11 +1,13 @@
 /**
  * /api/folders — folders replace projects in the product (topFolderService.ts).
  *
- *   GET    /api/folders        list {folders: [{id, name, legacy_project_id, subfolders, github_repo}]}
+ *   GET    /api/folders        list the left-bar folders (isFolder rows)
+ *                              {folders: [{id, name, legacy_project_id, subfolders, github_repo}]}
  *   POST   /api/folders        create {name} (never a repo: connect repos on the integrations panel)
  *   GET    /api/folders/:id    one folder
  *   PATCH  /api/folders/:id    rename {name}
- *   DELETE /api/folders/:id    delete (agents fall back to Home, as for projects)
+ *   DELETE /api/folders/:id    delete (agents fall back to Home); a folder that is also a
+ *                              repository stays a repository, one that is only a repository 404s
  *
  * Subfolders keep their routes: /api/projects/:id/folders. Auth: user JWT or
  * hybrid API key (X-API-Key + X-User-Id). A foreign folder is a 404.

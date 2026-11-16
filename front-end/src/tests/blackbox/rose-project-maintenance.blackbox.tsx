@@ -3,6 +3,7 @@
  * version of a boxes.dev Template box's maintenance settings): Last snapshot +
  * Snapshot now, the sync script with a timeout up to 8 minutes, Run on a
  * schedule, Run when files change on GitHub, Run now, and Recent runs with logs.
+ * The settings open from a project row's ⚙ in Integrations › Projects.
  *
  * The Projects API is the in-memory MSW mock in rose-sidebar.fixtures.tsx
  * (strict like the server: unknown write fields are a 400; POST …/maintenance/runs
@@ -12,32 +13,25 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import { Toaster } from '@/components/ui/toaster';
+import ProjectsSection from '@/features/integrations/components/ProjectsSection';
+import RoseProjectSettingsPanel from '@/features/terminal-component-group/components/rose-sidebar/RoseProjectSettingsPanel';
 
-import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
+import { mockSession } from './app-sidebar.fixtures';
 import { capturedRequests, clearCaptures } from './msw/capture';
-import {
-  expandBar,
-  makeProject,
-  makeRun,
-  mockProjectsApi,
-  signedInUser,
-} from './rose-sidebar.fixtures';
+import { makeProject, makeRun, mockProjectsApi } from './rose-sidebar.fixtures';
 import { renderWithProviders } from './test-wrapper';
 
+/** Integrations › Projects with the real settings panel in its ⚙ slot (as the apps panel wires it). */
 function renderBar() {
-  const props = defaultProps({
-    agents: [makeAgent({ agent_id: 'a-rose', goal: 'Rose UI polish', project_id: 'p-rose' })],
-    user: signedInUser(),
-  });
   renderWithProviders(
     <>
-      <AppSidebar {...props} />
+      <ProjectsSection
+        projectSettings={(p) => <RoseProjectSettingsPanel key={p.id} project={p} />}
+      />
       <Toaster />
     </>,
   );
-  expandBar();
 }
 
 function requests(method: string, path: string) {
@@ -47,8 +41,8 @@ function requests(method: string, path: string) {
 }
 
 async function openSettings(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
-  const panel = screen.getByTestId('rose-project-settings');
+  await user.click(await screen.findByRole('button', { name: 'Rose settings' }));
+  const panel = screen.getByTestId('project-settings-content');
   return within(await within(panel).findByRole('region', { name: 'Template sync' }));
 }
 
@@ -100,7 +94,7 @@ describe('Rose project template sync settings', () => {
     const user = userEvent.setup();
     renderBar();
     const sync = await openSettings(user);
-    const panel = screen.getByTestId('rose-project-settings');
+    const panel = screen.getByTestId('project-settings-content');
     await user.click(sync.getByRole('button', { name: 'Run on a schedule' }));
     await user.click(sync.getByRole('button', { name: 'Run when files change on GitHub' }));
     const timeout = sync.getByRole('spinbutton', { name: 'Sync timeout (seconds)' });
@@ -142,7 +136,7 @@ describe('Rose project template sync settings', () => {
     const user = userEvent.setup();
     renderBar();
     const sync = await openSettings(user);
-    const panel = screen.getByTestId('rose-project-settings');
+    const panel = screen.getByTestId('project-settings-content');
     const timeout = sync.getByRole('spinbutton', { name: 'Sync timeout (seconds)' });
     for (const bad of ['0', '481']) {
       await user.clear(timeout);
@@ -168,7 +162,7 @@ describe('Rose project template sync settings', () => {
     );
     expect(sync.getByRole('button', { name: 'Snapshot now' })).toBeDisabled();
     await user.click(
-      within(screen.getByTestId('rose-project-settings')).getByRole('button', { name: 'Save' }),
+      within(screen.getByTestId('project-settings-content')).getByRole('button', { name: 'Save' }),
     );
     await waitFor(() => expect(sync.getByRole('button', { name: 'Run now' })).toBeEnabled());
     expect(requests('POST', '/projects/p-rose/maintenance/runs')).toHaveLength(0);

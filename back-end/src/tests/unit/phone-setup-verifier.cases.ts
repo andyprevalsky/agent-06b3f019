@@ -13,14 +13,20 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
     priced = '';
   let captured: CompletionOptions | undefined;
   let deadline = 0;
+  let calls = 0;
+  // Per-sample outputs, in call order, before falling back to `text`.
+  const queued: string[] = [];
   await mock.module('../../providers/rose', {
     namedExports: {
       StructuredOutputAccumulator,
       createStreamingCompletion: async (options: CompletionOptions) => {
         captured = options;
+        calls++;
+        const content = queued.shift() ?? text;
+        if (content === 'OUTAGE') throw new Error('synthetic sample outage');
         return (async function* () {
           yield {
-            choices: [{ delta: { content: text } }],
+            choices: [{ delta: { content } }],
             actual_model: actual,
             requested_model: 'rose-labs/rose-1-mini',
             pool_name: 'mini',
@@ -61,8 +67,12 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
     const result = await verifyPhoneSetup(input);
     assert.equal(result.identityConfirmed, true);
     assert.equal(priced, 'actual-identity-model');
-    assert.equal(result.usage.totalCostCents, 1);
-    assert.equal(result.usage.promptTokens, 1000);
+    // Every independent sample is billed: 3 samples x ceil(1 cent), 3 x 1000 prompt tokens.
+    assert.equal(calls, 3);
+    assert.equal(result.usage.model, 'actual-identity-model');
+    assert.equal(result.usage.totalCostCents, 3);
+    assert.equal(result.usage.promptTokens, 3000);
+    assert.equal(result.usage.totalTokens, 3030);
     assert.equal(deadline, 60000);
     assert.equal(captured?.messages[0].content, PHONE_SETUP_PURPOSE);
     assert.equal(captured?.route_key, input.agentId);
@@ -78,6 +88,87 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
       observations: input.evidence,
     });
     assert.equal(captured?.max_tokens, 128);
+    // One outlier sample never decides; two agreeing samples do (negative control).
+    queued.push('{"identityConfirmed":true}', '{"identityConfirmed":false}', 'not-json');
+    assert.equal(
+      (await verifyPhoneSetup(input)).identityConfirmed,
+      false,
+      'One confirming sample established readiness'
+    );
+    queued.push(
+      '{"identityConfirmed":false}',
+      '{"identityConfirmed":true}',
+      '{"identityConfirmed":true}'
+    );
+    assert.equal((await verifyPhoneSetup(input)).identityConfirmed, true);
+    const receive = { ...input, verificationTarget: 'receive_address' as const };
+    for (const [samples, expected] of [
+      [['confirmed', 'unknown', 'disabled'], 'unknown'],
+      [['disabled', 'confirmed', 'unknown'], 'unknown'],
+      [['unknown', 'disabled', 'disabled'], 'disabled'],
+      [['confirmed', 'disabled', 'confirmed'], 'confirmed'],
+    ] as const) {
+      queued.push(...samples.map((status) => JSON.stringify({ status })));
+      assert.equal(
+        (await verifyPhoneSetup(receive)).status,
+        expected,
+        `samples ${samples.join(',')} must verify ${expected}`
+      );
+    }
+    assert.equal(queued.length, 0);
+    // One failed sample is not an outage: the two completed samples still need to agree.
+    queued.push(
+      JSON.stringify({ status: 'disabled' }),
+      'OUTAGE',
+      JSON.stringify({ status: 'disabled' })
+    );
+    const partial = await verifyPhoneSetup(receive);
+    assert.equal(partial.status, 'disabled');
+    assert.equal(partial.usage.samples?.length, 2, 'Only completed samples are billed');
+    assert.equal(partial.usage.promptTokens, 2000);
+    queued.push(
+      JSON.stringify({ status: 'confirmed' }),
+      'OUTAGE',
+      JSON.stringify({ status: 'unknown' })
+    );
+    assert.equal((await verifyPhoneSetup(receive)).status, 'unknown');
+    queued.push('OUTAGE', JSON.stringify({ status: 'confirmed' }), 'OUTAGE');
+    await assert.rejects(verifyPhoneSetup(receive), /synthetic sample outage/);
+    // A runtime tuple is one sample's own observation, never assembled across samples.
+    const runtime = { ...input, verificationTarget: 'runtime' as const };
+    const observed = (sync: string, reason: string) =>
+      JSON.stringify({ status: 'confirmed', runtime: { sync, activation: 'active', reason } });
+    queued.push(
+      observed('paused', 'low_power'),
+      observed('paused', 'network'),
+      observed('syncing', 'network')
+    );
+    const mixed = await verifyPhoneSetup(runtime);
+    assert.equal(mixed.status, 'unknown', 'Field-wise majorities invented a runtime');
+    assert.equal(mixed.runtime, undefined);
+    queued.push(
+      observed('syncing', 'network'),
+      observed('paused', 'low_power'),
+      observed('paused', 'low_power')
+    );
+    assert.deepEqual((await verifyPhoneSetup(runtime)).runtime, {
+      sync: 'paused',
+      activation: 'active',
+      reason: 'low_power',
+    });
+    // Usage is itemized per sample at the model that actually served it.
+    actual = 'served-model-a';
+    const itemized = await verifyPhoneSetup(input);
+    assert.deepEqual(
+      itemized.usage.samples?.map((sample) => [sample.model, sample.promptTokens]),
+      [
+        ['served-model-a', 1000],
+        ['served-model-a', 1000],
+        ['served-model-a', 1000],
+      ]
+    );
+    actual = 'actual-identity-model';
+    assert.equal(queued.length, 0);
     text = '{"identityConfirmed":false}';
     assert.equal((await verifyPhoneSetup(input)).identityConfirmed, false);
     text = 'not-json';

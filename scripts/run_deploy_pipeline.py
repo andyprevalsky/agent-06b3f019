@@ -3658,9 +3658,43 @@ def merged_changes(merged_sha: str, root: Path | None = None) -> list[str]:
     return [line for line in output.splitlines() if line]
 
 
-def agent_cutover_required(changed: list[str], root: Path | None = None) -> dict:
+def _github_path_glob(pattern: str) -> re.Pattern[str]:
+    """GitHub Actions ``paths`` glob: ``**`` spans directories, ``*`` and ``?`` stay within one."""
+    if re.search(r"[\[\]{}+]", pattern):
+        raise ValueError(f"unsupported {AGENTS_WORKFLOW_PATH} push path pattern: {pattern!r}")
+    regex = re.escape(pattern).replace(r"\*\*/", "(?:.*/)?").replace(r"\*\*", ".*")
+    return re.compile("^" + regex.replace(r"\*", "[^/]*").replace(r"\?", "[^/]") + "$")
+
+
+def deploy_agents_push_matches(changed: list[str], workflow_text: str) -> list[str]:
+    """Changed paths that start a deploy-agents.yml run, and so a cutover, under its own
+    ``on.push.paths`` filter (ordered; a later ``!`` pattern excludes, a later pattern re-includes)."""
+    import yaml
+
+    try:
+        config = yaml.safe_load(workflow_text)
+    except yaml.YAMLError as error:
+        raise ValueError(f"could not parse {AGENTS_WORKFLOW_PATH}: {error}") from error
+    trigger = config.get("on", config.get(True)) if isinstance(config, dict) else None  # YAML 1.1: on -> True
+    paths = trigger.get("push", {}).get("paths") if isinstance(trigger, dict) else None
+    if not isinstance(paths, list) or not paths or not all(isinstance(item, str) for item in paths):
+        raise ValueError(f"{AGENTS_WORKFLOW_PATH} has no on.push.paths list")
+    rules = [(not item.startswith("!"), _github_path_glob(item.removeprefix("!"))) for item in paths]
+    matched = []
+    for path in changed:
+        included = False
+        for include, pattern in rules:
+            if pattern.match(path):
+                included = include
+        if included:
+            matched.append(path)
+    return matched
+
+
+def agent_cutover_required(changed: list[str], root: Path | None = None, merged_sha: str | None = None) -> dict:
     """deploy.md Step 13's rule: runtime files selected by
-    ``scripts/classify-agent-runtime-changes.sh`` or the workflow file itself
+    ``scripts/classify-agent-runtime-changes.sh``, the workflow file itself, or
+    any path in the workflow's own push filter (the cutover controller scripts)
     require the exact deploy-agents.yml run; tests, benchmarks, docs and
     coverage harnesses under agents/ never do."""
     root = SOURCE_ROOT if root is None else root
@@ -3670,7 +3704,14 @@ def agent_cutover_required(changed: list[str], root: Path | None = None) -> dict
     ).stdout
     runtime = [line for line in classified.splitlines() if line]
     workflow = AGENTS_WORKFLOW_PATH in changed
-    return {"required": bool(runtime or workflow), "runtime_files": runtime, "workflow_changed": workflow}
+    # The filter that governed the merge's push is the one committed in it.
+    workflow_text = subprocess.run(
+        ["git", "show", f"{merged_sha}:{AGENTS_WORKFLOW_PATH}"], cwd=root, check=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
+    ).stdout if merged_sha else (root / AGENTS_WORKFLOW_PATH).read_text(encoding="utf-8")
+    triggers = [path for path in deploy_agents_push_matches(changed, workflow_text) if path not in runtime]
+    return {"required": bool(runtime or workflow or triggers), "runtime_files": runtime,
+            "workflow_changed": workflow, "trigger_files": triggers}
 
 
 def _gh_executable() -> str:
@@ -3957,6 +3998,46 @@ def _descendant_cutover(job: dict, merged_sha: str, *, backend: Path, env: dict,
             "descendant_surface_hash": current["identity"].get("surfaceHash"), "chain": chain}
 
 
+def _live_successor(target_id: str, merged_sha: str, *, app: object, backend: Path, env: dict, root: Path) -> dict | None:
+    """The verified job's own generation can be replaced by a later cutover before
+    this gate runs; its monitor then fails on the moved pointer forever. The live
+    pointer names its owning job (``updatedBy``): accept it only when that job is
+    SUCCEEDED in the same app and the merged SHA is a real ancestor of its commit.
+    None when the pointer still belongs to the target or names no other job."""
+    probe = subprocess.run(["node", "--import", "tsx", "scripts/monitor-cooperative-cutover.ts", "--job-id", target_id,
+                            "--json"], cwd=backend, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, timeout=600)
+    report = None
+    for line in reversed(probe.stdout.splitlines()):
+        if line.startswith("{"):
+            try:
+                report = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            break
+    if not isinstance(report, dict) or report.get("pointerMatchesExpected") is not False:
+        return None
+    live_id = (report.get("livePointer") or {}).get("updatedBy")
+    if not isinstance(live_id, str) or not live_id or live_id == target_id:
+        return None
+    live = _queue_read(live_id, backend=backend, env=env)
+    if live["identity"].get("app") != app:
+        raise ProductionGateError(f"live job {live_id} belongs to another app queue")
+    if str(live["stage"]) != "SUCCEEDED":
+        raise ProductionGateError(f"job {target_id} was replaced by live job {live_id}, which is {live['stage']}, "
+                                  "not SUCCEEDED; rerun this gate once that cutover finishes")
+    live_commit = live["identity"]["sourceCommit"]
+    ancestry = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", merged_sha, live_commit],
+                              env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=120)
+    if ancestry.returncode != 0:
+        verdict = "is not" if ancestry.returncode == 1 else "could not be proven (missing history)"
+        raise ProductionGateError(f"live job {live_id} commit {live_commit} {verdict} a descendant of {merged_sha}; "
+                                  "the live generation cannot verify this merge")
+    return {"live_job_id": live_id, "live_source_commit": live_commit,
+            "live_surface_hash": live["identity"].get("surfaceHash"), "replaced_job_id": target_id}
+
+
 def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path) -> dict:
     """deploy.md Step 13ab for the cooperative route: the saved job must be
     ``SUCCEEDED`` (CI cut over only when its durable job is; a green build or
@@ -4007,14 +4088,29 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
     monitor = subprocess.run(command, cwd=backend, env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=3600)
     tail = monitor.stdout[-2000:]
+    successor = None
     if monitor.returncode != 0:
-        raise ProductionGateError(
-            f"monitor-cooperative-cutover.ts --verify failed (exit {monitor.returncode}) for job {command[6]}: {tail.strip()}"
-        )
+        successor = _live_successor(command[5], merged_sha, app=identity.get("app"), backend=backend, env=env,
+                                    root=root)
+        if successor is None:
+            raise ProductionGateError(
+                f"monitor-cooperative-cutover.ts --verify failed (exit {monitor.returncode}) for job {command[5]}: "
+                f"{tail.strip()}")
+        fly["verified_by_live_successor"] = successor
+        command = ["node", "--import", "tsx", "scripts/monitor-cooperative-cutover.ts", "--job-id",
+                   successor["live_job_id"], "--verify"]
+        monitor = subprocess.run(command, cwd=backend, env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=3600)
+        tail = monitor.stdout[-2000:]
+        if monitor.returncode != 0:
+            raise ProductionGateError(f"monitor-cooperative-cutover.ts --verify failed (exit {monitor.returncode}) "
+                                      f"for live job {command[5]}: {tail.strip()}")
     result = {"job_id": job_id, "job_stage": stage, "source_commit": source_commit, "attempt": attempt,
               "expected_hash": expected_hash, "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
     if descendant:
         result.update(verified_by="descendant-cutover", **descendant)
+    if successor:
+        result.update(verified_by="live-successor-cutover", **successor)
     return result
 
 
@@ -4074,7 +4170,7 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
 
     try:
         changed = merged_changes(merged_sha, root)
-        cutover = agent_cutover_required(changed, root)
+        cutover = agent_cutover_required(changed, root, merged_sha)
         receipt["changed_files"] = len(changed)
         receipt["agent_cutover"] = cutover
         if cutover["required"]:
@@ -4098,11 +4194,13 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
                 _write_production_receipt(receipt_path, receipt)  # keeps fly.job_stage for the operator
                 raise
             carried = receipt["cutover_verify"].get("descendant_job_id")
+            live = receipt["cutover_verify"].get("live_job_id")
             print(f"PIPELINE_PRODUCTION cutover=verified job={fly['job_id']} job_stage={fly['job_stage']} "
-                  f"hash={expected}" + (f" verified_by=descendant-cutover descendant={carried}" if carried else ""),
-                  flush=True)
+                  f"hash={expected}" + (f" verified_by=descendant-cutover descendant={carried}" if carried else "")
+                  + (f" verified_by=live-successor-cutover live={live}" if live else ""), flush=True)
         else:
-            receipt["fly"] = {"required": False, "reason": "no agent runtime or deploy-agents.yml change in the merge"}
+            receipt["fly"] = {"required": False,
+                              "reason": "no agent runtime or deploy-agents.yml push-path change in the merge"}
             print(f"PIPELINE_PRODUCTION fly=not-required head={merged_sha} ({len(changed)} changed files, "
                   "no agent runtime change): no deploy-agents.yml wait", flush=True)
     except ProductionGateError as error:

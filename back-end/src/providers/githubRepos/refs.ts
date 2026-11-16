@@ -52,6 +52,19 @@ export function githubRepoIdentity(value: string | null | undefined): GithubRepo
   };
 }
 
+/**
+ * `git@github.com:owner/repo(.git)` or `ssh://git@github.com/owner/repo(.git)`
+ * (the SSH aliases projects/store projectRepositoryKey accepts) as
+ * https://github.com/owner/repo, case kept; null for any other remote.
+ */
+export function githubHttpsUrlOfSshRemote(value: string): string | null {
+  const match =
+    /^(?:ssh:\/\/)?git@github\.com[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i.exec(
+      value.trim()
+    );
+  return match === null ? null : `https://github.com/${match[1]}/${match[2]}`;
+}
+
 /** Canonical ref of any GitHub spelling, or null. */
 export function canonicalGithubRepoRef(value: string | null | undefined): string | null {
   return githubRepoIdentity(value)?.canonicalRef ?? null;

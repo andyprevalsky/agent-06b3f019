@@ -10,24 +10,30 @@ export {
   createProject,
   deleteEnvFile,
   deleteEnvFilesByPath,
-  deleteProject,
   findEnvFile,
   findEnvFileById,
   findGithubConnectedRepoUrls,
   findProject,
   findProjectByName,
   findSyncSnapshot,
+  isRepositoryProject,
   listEnvFiles,
   listProjects,
+  listSharedRepositoryProjects,
+  removeFolder,
+  removeRepository,
   updateProject,
   ProjectRepositoryBusyError,
   upsertEnvFile,
   userExists,
   writeSyncSnapshot,
   type EnvFileWrite,
+  type FolderRemoval,
   type ProjectEnvFileRecord,
   type ProjectRecord,
   type ProjectWithCount,
+  type RepositoryRemoval,
+  type SharedProjectRecord,
 } from '../../providers/projects/store';
 
 /** Settings the Rose project setup writes (domains/projects/roseProject.ts). */
@@ -90,9 +96,12 @@ export async function writeRoseProjectSetup(
     if (write.createProject) {
       const project = await tx.project.upsert({
         where: { userId_name: { userId, name: write.name } },
+        // Created as a repository, not a left-bar folder (a renamed or
+        // pristine existing row keeps its own flag).
         create: {
           userId,
           name: write.name,
+          isFolder: false,
           defaultBranch: write.defaultBranch,
           syncSalt: newSyncSalt(),
           startupTimeoutS: write.startupTimeoutS,
@@ -151,6 +160,9 @@ export async function writeRoseProjectSetup(
 
 /** Idempotent GithubRepoAccess grant (shared with the GitHub repo integration). */
 export { grantGithubRepoAccess } from '../../providers/githubRepos/store';
+
+/** Connected repos without a project get one (a connected repo is a project). */
+export { linkUnlinkedRepoConnections } from '../../providers/githubRepos/repoProjects';
 
 /** Indexed one-level folder CRUD; service checks the owning project first. */
 export function listFolders(projectId: string) {

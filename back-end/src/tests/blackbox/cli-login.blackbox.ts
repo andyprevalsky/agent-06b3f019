@@ -24,6 +24,8 @@
  *   - real CLI: `rose-sync agent-init --login-code` stores the credential 0600
  *     outside the repo, prints the agent steps without the secret, and a
  *     follow-up `push` syncs through the saved credential
+ *   - unbound login (POST {} → exchange): `push --project <name>` creates the
+ *     project by name (PUT /api/projects) and uploads its env files
  *
  * Usage: bash scripts/run-blackbox-tests.sh cli-login
  */
@@ -363,7 +365,11 @@ test('real CLI: agent-init stores the credential 0600 outside the repo; push use
   assert(!login.stdout.includes(record.credential), 'stdout never shows the credential');
   assert(!login.stdout.includes(secret), 'stdout never shows env values');
   assert(login.stdout.includes('FIXTURE_TOKEN') === false, 'guide does not dump variables');
-  assert(/APPROVAL: ask before uploading secrets/.test(login.stdout), 'approval step printed');
+  assert(/4\. APPROVAL: ask before uploading\./.test(login.stdout), 'approval step printed');
+  assert(
+    login.stdout.includes('the setup commands every new workspace will run'),
+    'approval covers the setup commands'
+  );
   assert(login.stdout.includes(`push --project '${project.id}'`), 'push targets the bound project');
 
   const push = spawnSync(process.execPath, [ROSE_SYNC, 'push', '--dir', repo, '--json'], {
@@ -400,7 +406,75 @@ test('real CLI: agent-init stores the credential 0600 outside the repo; push use
     { env: { ...env, ROSE_CONFIG_DIR: join(scratch, 'config-2') }, encoding: 'utf8' }
   );
   assert(reuse.status !== 0, 'a used code cannot sign in again');
-  assert(/copy a fresh setup prompt/i.test(reuse.stderr), `reuse guidance: ${reuse.stderr}`);
+  assert(/start the import again/i.test(reuse.stderr), `reuse guidance: ${reuse.stderr}`);
+});
+
+test('real CLI: an unbound login creates the named project on push and uploads its env files', async () => {
+  const s = await anonymousSession();
+  const repo = join(scratch, 'unbound-checkout');
+  mkdirSync(repo);
+  git(repo, 'init', '-q', '-b', 'main');
+  writeFileSync(join(repo, '.gitignore'), '.env\n');
+  writeFileSync(join(repo, 'README.md'), 'unbound fixture\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-qm', 'fixture');
+  const secret = `cli-unbound-secret-${randomBytes(8).toString('hex')}`;
+  writeFileSync(join(repo, '.env'), `UNBOUND_TOKEN=${secret}\n`);
+  const env = {
+    ...process.env,
+    ROSE_CONFIG_DIR: join(scratch, 'unbound-config'),
+    ROSE_TOKEN: '',
+    ROSE_API_KEY: '',
+    ROSE_USER_ID: '',
+    ROSE_API_URL: BASE_URL,
+  };
+  // "Import from your computer" mints with body {}: the code names no project.
+  const minted = await mint(s);
+  assert(minted.project === null, 'unbound code');
+  const login = spawnSync(
+    process.execPath,
+    [ROSE_SYNC, 'agent-init', '--login-code', minted.code, '--dir', repo],
+    { env, encoding: 'utf8' }
+  );
+  assert(login.status === 0, `agent-init failed: ${login.stderr}${login.stdout}`);
+  const name = `Imported ${randomBytes(4).toString('hex')}`;
+  assert(
+    (await prisma.project.count({ where: { userId: s.userId, name } })) === 0,
+    'no project before the push'
+  );
+
+  // push --project <name>: PUT /api/projects creates it, POST /:id/sync uploads the env file;
+  // --branch records the starting branch (the remote's default).
+  const push = spawnSync(
+    process.execPath,
+    [ROSE_SYNC, 'push', '--dir', repo, '--project', name, '--branch', 'develop', '--json'],
+    { env, encoding: 'utf8' }
+  );
+  assert(push.status === 0, `push failed: ${push.stderr}${push.stdout}`);
+  assert(!push.stdout.includes(secret) && !push.stderr.includes(secret), 'names only');
+  const pushed = JSON.parse(push.stdout) as { projectId: string; revision: number };
+  assert(pushed.revision === 1, `first sync revision ${pushed.revision}`);
+  const project = await call(`/api/projects/${pushed.projectId}`, { auth: s.token });
+  expectStatus(project, 200, 'the pushed project belongs to the user');
+  assert(project.data.name === name, `created by name: ${project.text}`);
+  assert(project.data.defaultBranch === 'develop', `starting branch: ${project.text}`);
+  const files = await call(`/api/projects/${pushed.projectId}/env-files`, { auth: s.token });
+  expectStatus(files, 200, 'env files');
+  const envFiles = files.data.envFiles as Array<{
+    path: string;
+    hasContent: boolean;
+    variables: Array<{ name: string }>;
+  }>;
+  assert(
+    envFiles.some(
+      (f) =>
+        f.path === '.env' && f.hasContent && f.variables.some((v) => v.name === 'UNBOUND_TOKEN')
+    ),
+    `env file uploaded: ${files.text}`
+  );
+  assert(!files.text.includes(secret), 'env-file responses never carry values');
+  const rows = await prisma.project.findMany({ where: { userId: s.userId, name } });
+  assert(rows.length === 1, `exactly one project named ${name}`);
 });
 
 test('rate limit: distributed failures retain per-client denial without blocking unrelated clients', () => {

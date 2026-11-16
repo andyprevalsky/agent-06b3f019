@@ -13,11 +13,24 @@
  * 10k-agent behaviour: every call touches one user's project rows (bounded by
  * PROJECT_LIST_LIMIT / MAX_ENV_FILES); listing uses one query with counts.
  * Rose repo owners get their "Rose" project set up on list (roseProject.ts).
+ * A connected GitHub repo is a project: listing first links connections that
+ * have none (one indexed query; writes only when such connections exist), and
+ * deleting a project disconnects its repo so the link never resurrects it.
+ *
+ * A row is a left-bar folder (isFolder: POST /api/folders), a repository
+ * (isRepository: GitHub connect, POST/PUT /api/projects, rose push), or both:
+ *
+ *   DELETE /api/folders/:id   both → stays a repository (agents Home, subfolders gone)
+ *                             folder only → deleted;  repository only → 404
+ *   DELETE /api/projects/:id  both → stays a folder (repo, env files, synced code gone)
+ *                             otherwise → deleted
+ *
+ * The list also carries repositories teammates shared through a team
+ * (`shared`), read-only: no env files, scripts or subfolders, and every
+ * write route stays owner-scoped (404). One extra indexed query per list.
  */
 import { createLogger } from '../../providers/logger';
-import type { EnvVariableMeta } from '../../providers/projects/envFile';
-import { nextNightlyRun } from '../../providers/projects/maintenanceSchedule';
-import { canonicalGithubRepoRef, sandboxSizeColumn } from '../../providers/projects/store';
+import { sandboxSizeColumn } from '../../providers/projects/store';
 import * as repo from './repo';
 import {
   DEFAULT_ROSE_SETUP,
@@ -25,7 +38,18 @@ import {
   planRoseProjectSetup,
   type RoseSetupDeps,
 } from './roseProject';
+import { toProjectDto, toSharedProjectDto, type ProjectDto } from './servicePresentation';
 import type { CreateProjectBody, UpdateProjectBody } from './types';
+
+/** DTO assembly lives in servicePresentation.ts; callers keep importing it from here. */
+export {
+  sandboxSizeOf,
+  toEnvFileDto,
+  toProjectDto,
+  variablesOf,
+  type EnvFileDto,
+  type ProjectDto,
+} from './servicePresentation';
 
 export class ProjectError extends Error {
   constructor(
@@ -35,140 +59,6 @@ export class ProjectError extends Error {
   ) {
     super(message);
   }
-}
-
-export interface ProjectDto {
-  folders: { id: string; name: string; projectId: string }[];
-  id: string;
-  name: string;
-  repoUrl: string | null;
-  /** Rose has verified clone access to repoUrl for this user (GithubRepoAccess grant). */
-  githubConnected: boolean;
-  github_repo_ref: string | null; // connected repo's canonical ref (null: none granted)
-  defaultBranch: string;
-  startupScript: string | null;
-  startupTimeoutS: number;
-  lifecycle: { autoWake: boolean };
-  /** Default code-sandbox size of new sessions (C16); null = deployment default. */
-  sandboxSize: { cpu?: number; memoryGb?: number } | null;
-  sync: { revision: number; lastSyncedAt: string | null };
-  /** Template sync (Rose's equivalent of a Template box's maintenance script). */
-  maintenance: {
-    script: string | null;
-    timeoutS: number;
-    nightly: boolean;
-    onGithubChange: boolean;
-    /** Next nightly run (UTC slot); null when the schedule is off. */
-    nextRunAt: string | null;
-    watchCheckedAt: string | null;
-    running: boolean;
-  };
-  /** Latest published template snapshot new code sessions start from; null: none yet. */
-  snapshot: { takenAt: string; sha: string | null } | null;
-  envFileCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface EnvFileDto {
-  id: string;
-  path: string;
-  description: string | null;
-  kind: string;
-  source: string;
-  variables: EnvVariableMeta[];
-  hasContent: boolean;
-  sizeBytes: number;
-  linkTarget: string | null;
-  updatedAt: string;
-  /** Variable names that matched `q` (search responses only). */
-  matches?: string[];
-}
-
-export function toProjectDto(
-  project: repo.ProjectRecord,
-  envFileCount: number,
-  githubConnected: boolean
-): ProjectDto {
-  return {
-    id: project.id,
-    folders: project.folders ?? [],
-    name: project.name,
-    repoUrl: project.repoUrl,
-    githubConnected,
-    github_repo_ref: githubConnected ? canonicalGithubRepoRef(project.repoUrl) : null,
-    defaultBranch: project.defaultBranch,
-    startupScript: project.startupScript,
-    startupTimeoutS: project.startupTimeoutS,
-    lifecycle: { autoWake: project.autoWake },
-    sandboxSize: sandboxSizeOf(project.sandboxSize),
-    sync: {
-      revision: project.syncRevision,
-      lastSyncedAt: project.lastSyncedAt ? project.lastSyncedAt.toISOString() : null,
-    },
-    maintenance: {
-      script: project.maintenanceScript === '' ? null : project.maintenanceScript,
-      timeoutS: project.maintenanceTimeoutS,
-      nightly: project.maintenanceNightly,
-      onGithubChange: project.maintenanceOnGithubChange,
-      nextRunAt: project.maintenanceNightly ? nextNightlyRun(new Date()).toISOString() : null,
-      watchCheckedAt: project.maintenanceOnGithubChange
-        ? (project.maintenanceWatchCheckedAt?.toISOString() ?? null)
-        : null,
-      running:
-        project.maintenanceRunId !== null &&
-        project.maintenanceLeaseUntil !== null &&
-        project.maintenanceLeaseUntil.getTime() > Date.now(),
-    },
-    snapshot:
-      project.templateSnapshotId !== null && project.templateSnapshotAt !== null
-        ? {
-            takenAt: project.templateSnapshotAt.toISOString(),
-            sha: project.templateSnapshotSha,
-          }
-        : null,
-    envFileCount,
-    createdAt: project.createdAt.toISOString(),
-    updatedAt: project.updatedAt.toISOString(),
-  };
-}
-
-/** The stored `{cpu?, memoryGb?}`, or null for anything else. */
-export function sandboxSizeOf(value: unknown): { cpu?: number; memoryGb?: number } | null {
-  if (typeof value !== 'object' || value === null) return null;
-  const { cpu, memoryGb } = value as { cpu?: unknown; memoryGb?: unknown };
-  const size = {
-    ...(Number.isInteger(cpu) ? { cpu: cpu as number } : {}),
-    ...(Number.isInteger(memoryGb) ? { memoryGb: memoryGb as number } : {}),
-  };
-  return Object.keys(size).length > 0 ? size : null;
-}
-
-export function variablesOf(file: repo.ProjectEnvFileRecord): EnvVariableMeta[] {
-  if (!Array.isArray(file.variables)) return [];
-  return (file.variables as unknown[]).flatMap((entry) => {
-    if (typeof entry !== 'object' || entry === null) return [];
-    const { name, description } = entry as { name?: unknown; description?: unknown };
-    if (typeof name !== 'string') return [];
-    return typeof description === 'string' && description !== ''
-      ? [{ name, description }]
-      : [{ name }];
-  });
-}
-
-export function toEnvFileDto(file: repo.ProjectEnvFileRecord): EnvFileDto {
-  return {
-    id: file.id,
-    path: file.path,
-    description: file.description,
-    kind: file.kind,
-    source: file.source,
-    variables: variablesOf(file),
-    hasContent: file.encryptedContent !== null,
-    sizeBytes: file.sizeBytes,
-    linkTarget: file.linkTarget,
-    updatedAt: file.updatedAt.toISOString(),
-  };
 }
 
 /** Strip userinfo (tokens) from a remote URL before it is stored or shown. */
@@ -240,15 +130,68 @@ function isUniqueViolation(err: unknown): boolean {
 
 const log = createLogger('Projects');
 
+/** The owner's project rows and the repo URLs among them the owner may clone. */
+async function readProjects(userId: string) {
+  const rows = await repo.listProjects(userId);
+  const urls = rows.map((row) => row.repoUrl);
+  return { rows, connected: await repo.findGithubConnectedRepoUrls(userId, urls) };
+}
+
+/** The caller's own rows, then the repositories teammates share with them (deduplicated). */
 export async function listProjects(
   userId: string,
   roseSetup: RoseSetupDeps = DEFAULT_ROSE_SETUP
 ): Promise<{ projects: ProjectDto[] }> {
-  let rows = await repo.listProjects(userId);
-  let connected = await repo.findGithubConnectedRepoUrls(
+  const [{ projects }, shared] = await Promise.all([
+    listOwnedProjects(userId, roseSetup),
+    repo.listSharedRepositoryProjects(userId),
+  ]);
+  const owned = new Set(projects.map((project) => project.id));
+  const others = shared.filter((row) => !owned.has(row.project.id));
+  const connected = await repo.findGithubConnectedRepoUrls(
+    userId,
+    others.map((row) => row.project.repoUrl)
+  );
+  return {
+    projects: [
+      ...projects,
+      ...others.map((row) =>
+        toSharedProjectDto(row, row.project.repoUrl !== null && connected.has(row.project.repoUrl))
+      ),
+    ],
+  };
+}
+
+/** A CLI credential (rose push) lists the user's own projects only: its bound one, if any. */
+export async function listCliProjects(
+  userId: string,
+  boundProjectId: string | null
+): Promise<{ projects: ProjectDto[] }> {
+  const { projects } = await listOwnedProjects(userId, DEFAULT_ROSE_SETUP);
+  return { projects: projects.filter((p) => boundProjectId === null || p.id === boundProjectId) };
+}
+
+/** GET /api/folders: the caller's left-bar folders only (one query + one grant read). */
+export async function listFolderProjects(userId: string): Promise<{ projects: ProjectDto[] }> {
+  const rows = await repo.listProjects(userId, { foldersOnly: true });
+  const connected = await repo.findGithubConnectedRepoUrls(
     userId,
     rows.map((row) => row.repoUrl)
   );
+  return {
+    projects: rows.map((row) =>
+      toProjectDto(row, row._count.envFiles, row.repoUrl !== null && connected.has(row.repoUrl))
+    ),
+  };
+}
+
+async function listOwnedProjects(
+  userId: string,
+  roseSetup: RoseSetupDeps
+): Promise<{ projects: ProjectDto[] }> {
+  // A connected repo is a project: link the ones without one (never fails the list).
+  await repo.linkUnlinkedRepoConnections(userId);
+  let { rows, connected } = await readProjects(userId);
   const rosePlan = planRoseProjectSetup(userId, rows, connected, roseSetup.isOwner);
   if (rosePlan !== null) {
     log.info('Setting up the Rose project', { userId, ...rosePlan });
@@ -261,11 +204,7 @@ export async function listProjects(
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    rows = await repo.listProjects(userId);
-    connected = await repo.findGithubConnectedRepoUrls(
-      userId,
-      rows.map((row) => row.repoUrl)
-    );
+    ({ rows, connected } = await readProjects(userId));
   }
   return {
     projects: rows.map((row) =>
@@ -291,10 +230,20 @@ export async function getProject(userId: string, id: string): Promise<ProjectDto
   return projectDto(userId, await requireProject(userId, id));
 }
 
-export async function createProject(userId: string, body: CreateProjectBody): Promise<ProjectDto> {
+/** A new row is a repository (the API and CLI), or a left-bar folder for /api/folders. */
+export async function createProject(
+  userId: string,
+  body: CreateProjectBody,
+  options: { isFolder?: boolean } = {}
+): Promise<ProjectDto> {
   await requireUser(userId);
   try {
-    const project = await repo.createProject({ userId, ...settingsData(body), name: body.name });
+    const project = await repo.createProject({
+      userId,
+      ...settingsData(body),
+      name: body.name,
+      isFolder: options.isFolder ?? false,
+    });
     return await projectDto(userId, project);
   } catch (err) {
     if (isUniqueViolation(err)) throw new ProjectError(409, 'A project with this name exists');
@@ -344,7 +293,26 @@ export async function updateProject(
   }
 }
 
+/** DELETE /api/projects/:id: a folder keeps its folder role; anything else is deleted. */
 export async function deleteProject(userId: string, id: string): Promise<void> {
   const project = await requireProject(userId, id);
-  await repo.deleteProject(project.id);
+  let removal: repo.RepositoryRemoval;
+  try {
+    removal = await repo.removeRepository(project.id);
+  } catch (error) {
+    if (error instanceof repo.ProjectRepositoryBusyError) {
+      throw new ProjectError(409, 'Wait for the project sync to finish before removing it');
+    }
+    throw error;
+  }
+  if (removal === 'missing') throw new ProjectError(404, 'Project not found');
+  log.info('Project removed', { userId, projectId: project.id, removal });
+}
+
+/** DELETE /api/folders/:id: a repository keeps its repository role; a plain folder is deleted. */
+export async function deleteFolderProject(userId: string, id: string): Promise<void> {
+  const project = await requireProject(userId, id);
+  const removal = await repo.removeFolder(project.id);
+  if (removal === 'not_a_folder') throw new ProjectError(404, 'Project not found');
+  log.info('Folder removed', { userId, projectId: project.id, removal });
 }

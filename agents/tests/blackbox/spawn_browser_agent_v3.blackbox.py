@@ -38822,7 +38822,7 @@ async def test_playwright_focus_diagnostics_preserve_failure_and_cancellation():
 
 
 
-async def _exercise_terminal_phone_custody(*, terminal=True, local_only=False, paused=None, foreign=False, release_ok=True, provider_state=None):
+async def _exercise_terminal_phone_custody(*, terminal=True, local_only=False, paused=None, foreign=False, release_ok=True, provider_state=None, fresh_lease=False):
     """A capped child ends while its root and shared browser session remain live."""
     import httpx
     from domains.spawn_browser_agent_v3 import handler as h
@@ -38837,7 +38837,8 @@ async def _exercise_terminal_phone_custody(*, terminal=True, local_only=False, p
             return httpx.Response(200, json={'enabled': True, 'source': 'ready'})
         if request.url.path.endswith('/interactions/task-owned'):
             return httpx.Response(200, json={'lease': {'id': 'lease-owned', 'agentId': 'agent-owned',
-                'browserTaskId': 'foreign-task' if foreign else 'task-owned', 'status': 'ACTIVE'}})
+                'browserTaskId': 'foreign-task' if foreign else 'task-owned', 'status': 'ACTIVE',
+                **({'leaseExpiresAt': '2030-01-01T00:01:50Z'} if fresh_lease else {})}})
         if request.url.path.endswith('/heartbeat'):
             return httpx.Response(200, json={})
         if request.url.path.endswith('/leases/lease-owned/release'):
@@ -38851,7 +38852,11 @@ async def _exercise_terminal_phone_custody(*, terminal=True, local_only=False, p
              patch.object(h, 'load_config', return_value=config), \
              patch.object(h, 'save_browser_action_message', AsyncMock()) as saved, \
              patch.object(h, 'acknowledge_browser_activity_cleanup', AsyncMock()):
-            await phone.observe_phone(config, 'user-owned', 'task-owned', client=client)
+            with patch.object(phone.time, 'time', return_value=1893456000.0):
+                await phone.observe_phone(config, 'user-owned', 'task-owned', client=client)
+            if fresh_lease:
+                assert calls == [('GET', '/api/iphone/availability/task-owned'),
+                    ('GET', '/api/iphone/interactions/task-owned')], 'Fresh custody should not require a heartbeat'
             before = len(calls)
             await h._schedule_browser_cleanup(agent_id='agent-owned', task_id='task-owned', user_id='user-owned',
                 browser_url='', browser_session_metadata={}, input_page=None, start_url='', cursor_streamer=None,
@@ -38880,6 +38885,7 @@ async def _exercise_terminal_phone_custody(*, terminal=True, local_only=False, p
 
 async def test_terminal_browser_cleanup_releases_only_recorded_phone_custody():
     await _exercise_terminal_phone_custody()
+    await _exercise_terminal_phone_custody(fresh_lease=True)
     await _exercise_terminal_phone_custody(provider_state="cleanup_complete")
     await _exercise_terminal_phone_custody(provider_state="cleanup_pending")
 
@@ -42235,6 +42241,7 @@ async def run_all_tests():
     await r.record_async("phone_task_availability_is_authoritative", test_phone_task_availability_is_authoritative)
     await r.record_async("phone_durable_http_contract", test_phone_durable_http_contract)
     await r.record_async("phone_busy_error_names_holder_agent", test_phone_busy_error_names_holder_agent)
+    await r.record_async("phone_observe_renews_lease_only_near_expiry", test_phone_observe_renews_lease_only_near_expiry)
     await r.record_async("phone_denied_before_dom_and_private_binding", test_phone_denied_before_dom_and_private_binding)
     await r.record_async("phone_reattach_reacquire_and_stale_cursor", test_phone_reattach_reacquire_and_stale_cursor)
     await r.record_async("phone_model_observation_and_account_isolation", test_phone_model_observation_and_account_isolation)
@@ -42296,6 +42303,45 @@ async def test_phone_durable_http_contract():
         acquire = next(body for method, path, body in calls if method == 'POST' and '/interactions/' in path)
         assert acquire['requestKey']
         assert 'agentId' not in acquire
+
+
+async def test_phone_observe_renews_lease_only_near_expiry():
+    """Observation renews an active claim only when its observed TTL is short; 403 still revokes."""
+    teardown_mock()
+    from datetime import datetime, timedelta, timezone
+    from domains.spawn_browser_agent_v3.phone import observe_phone
+    import httpx
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+
+    async def observe(expires, heartbeat_status=200):
+        calls = []
+        lease = {'id': 'lease', 'status': 'ACTIVE', 'browserTaskId': 'task'}
+        if expires is not None:
+            lease['leaseExpiresAt'] = expires
+        def backend(request):
+            calls.append((request.method, request.url.path))
+            if '/availability/' in request.url.path:
+                return httpx.Response(200, json={'source': 'ready', 'enabled': True})
+            if request.url.path.endswith('/heartbeat'):
+                return httpx.Response(heartbeat_status, json={})
+            if '/interactions/' in request.url.path and request.method == 'GET':
+                return httpx.Response(200, json={'lease': lease, 'cursor': 7})
+            raise AssertionError(request.url.path)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+            snapshot = await observe_phone(config, 'user', 'task', client=client)
+        return snapshot, sum(path.endswith('/heartbeat') for _, path in calls)
+
+    now = datetime.now(timezone.utc)
+    fresh, beats = await observe((now + timedelta(seconds=110)).isoformat().replace('+00:00', 'Z'))
+    assert beats == 0 and fresh['enabled'] is True and fresh['interaction']['cursor'] == 7
+    _, beats = await observe((now + timedelta(seconds=60)).isoformat().replace('+00:00', 'Z'))
+    assert beats == 1
+    _, beats = await observe(None)
+    assert beats == 1, 'unknown expiry must renew'
+    _, beats = await observe('not-a-timestamp')
+    assert beats == 1, 'unparseable expiry must renew'
+    revoked, beats = await observe((now + timedelta(seconds=30)).isoformat().replace('+00:00', 'Z'), heartbeat_status=403)
+    assert beats == 1 and revoked == {'enabled': False}
 
 
 async def test_phone_busy_error_names_holder_agent():

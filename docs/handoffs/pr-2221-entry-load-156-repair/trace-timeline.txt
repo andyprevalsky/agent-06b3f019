@@ -1,0 +1,21 @@
+Production semantic run 43691173465 (job 132741958284), entry-load-recovery.spec.ts:156, source 55655e6544 (PR #2221)
+Trace: artifact semantic-frontend-43691173465 (id 14152438267) test-results/entry-load-recovery-an-ent-f41ee-.../trace.zip
+All times 2026-11-15Z. Test origin = 127.0.0.1:41051 proxy in front of https://www.roselabs.ai.
+
+07:44:15.984 entryPath() HTML: age=1 (build of f6a9e3b47b, promoted 07:44:15Z), entry /assets/index-BkA2eS2J.js
+07:44:16.027 doc1 (goto)                     HTML age=1
+07:44:16.120 doc1 entry                      404 injected by the test's origin (immutable)
+07:44:16.689 doc1 recovery revalidate        404 REAL from Vercel edge sfo1::v84cb, cache-control immutable  <-- un-injected fault
+07:44:16.723 doc2 (reload #1, counted)       HTML age=2
+07:44:16.797 doc2 entry                      404 replayed from browser cache (same x-vercel-id v84cb)
+07:44:17.846 doc2 recovery revalidate        200 (sfo1::xhcw2)
+07:44:17.950 doc3 (reload #2, counted)       HTML age=3
+07:44:18.018 doc3 entry                      200 -> app mounts
+07:44:18.578 version.json                    200 (matches)
+07:44:19.662 entry index-ChM7AtzN.js + doc4  (8207c0b361 promoted 07:44:19Z; after the assertion, not counted)
+Result: loads.count 3 (expected 2). All three documents are the same build; the extra reload is the build's own
+correct recovery from a real edge 404 of its freshly promoted entry (edge propagation), not a next-build reload.
+Local repro: repro/edge-sim.mjs (first upstream entry request -> immutable 404) in front of production;
+FRONTEND_URL=http://127.0.0.1:4517 npx playwright test tests-e2e/entry-load-recovery.spec.ts -g "cached as immutable"
+-> Expected 2, Received 3 at :168:25 on origin/main 888b6e40bd (2026-11-16T05:0xZ).
+Baseline on origin/main against stable https://www.roselabs.ai: 3/3 pass.
