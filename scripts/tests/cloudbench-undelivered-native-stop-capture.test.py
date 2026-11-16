@@ -504,5 +504,233 @@ class UndeliveredPrestackZeroProvider(UndeliveredNativeStopCapture):
         self.skipTest("parent class covers next-step")
 
 
+# A delivered shutdown found the driver already exited before run.sh started
+# the backend (owner 7a0da79e, polar-bu-090): no services manifest, backend log
+# or run record ever existed, so the guest could not ACK and recovery could not
+# build a provider manifest. Its exact original files, as an inert capture sees them.
+PREBACKEND_FILES = {
+    "bench.log": (f"RUNSTAMP-{TOKEN}\n[boot 01:24:10] bootstrap-checkout 5b1f0b51867368\n"
+                  "[cloudbench 01:25:41] STEP stack_launch\n"
+                  "[cloudbench 01:25:41] launching stack (run.sh --benchmark) — base_port=3001\n"
+                  "[cloudbench 01:25:41] waiting for stack to become healthy (services.json + backend + worker + WMH)...\n"
+                  "[cloudbench 01:26:10] …still waiting (30s): status=none wmh=[]\n"
+                  "[cloudbench 01:26:43] guest shutdown requested; draining benchmark root before stack teardown\n"
+                  "[cloudbench 01:26:44] FATAL: stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement\n"
+                  "[boot 01:26:44] driver exited rc=143; holding for controller collection\n").encode(),
+    "cloudbench-driver.state": b"exited\n",
+    f"cloudbench-shutdown-{TOKEN}.request": (TOKEN + "\n").encode(),
+    "repo/.context/cloudbench/stack.log": ("Applied local workflow and trajectory search functions and triggers.\n"
+                                           "📦 Ensuring Playwright browser assets...\n"
+                                           "Installing Chromium assets for Node Playwright\n").encode(),
+}
+ABSENT = {"bytes": None, "exists": False, "regular": False, "symlink": False, "within_limit": False}
+PREBACKEND_STATE = {
+    "backend_closed": None, "backend_log": ABSENT, "backend_port": None, "driver_descendants": [],
+    "driver_pid": None, "driver_process_state": None, "driver_state": "exited", "driver_token_match": False,
+    "guest_run_token": TOKEN, "live_service_pids": [], "machine_id": MACHINE,
+    "reason": "missing exact guest services manifest", "run_json": ABSENT,
+    "schema_version": "cloudbench-guest-state-v1", "services_manifest": ABSENT, "services_status": None,
+    "state": "exited", "stopped_service_pids": [], "version": 1,
+}
+STOPPED_STATUS = (f"Machine ID: {MACHINE}\nState: stopped\n\nVM\n  ID    = {MACHINE}\n"
+                  f"  Name  = {CLONE}\n  State = stopped\n\nEvent Logs\n")
+
+
+class PrebackendExitNativeStop(unittest.TestCase):
+    """Recovery records a pre-backend guest's exact native stop; capture proves zero sessions."""
+
+    setUp = UndeliveredNativeStopCapture.setUp
+    tearDown = UndeliveredNativeStopCapture.tearDown
+    main = UndeliveredNativeStopCapture.main
+    capture = UndeliveredNativeStopCapture.capture
+    write_native_stop = UndeliveredNativeStopCapture.write_native_stop
+    session = UndeliveredPrestackZeroProvider.session
+    recover_stopped_guest = UndeliveredPrestackZeroProvider.recover_stopped_guest
+
+    def prepare(self, state: dict | None = None) -> None:
+        (self.out / "guest-native-stop.json").unlink(missing_ok=True)
+        self.state["prestack"] = dict(PREBACKEND_FILES)
+        write(self.out / "guest-cleanup.state.json", json.dumps(state or PREBACKEND_STATE, sort_keys=True))
+        write(self.out / "guest-shutdown.requested", json.dumps({"http_status": 202, "machine_id": MACHINE}))
+
+    def publish(self, *, status: str = STOPPED_STATUS, requests: str = "0") -> subprocess.CompletedProcess:
+        write(self.out / "guest-cleanup.machine-status.txt", status)
+        return subprocess.run([
+            sys.executable, str(SESSION), "publish-prebackend-native-stop",
+            "--owner", OWNER, "--fleet-run-id", RUN_ID, "--bench", BENCH, "--machine-id", MACHINE,
+            "--output-dir", str(self.out), "--guest-run-token", TOKEN,
+            "--state-receipt", str(self.out / "guest-cleanup.state.json"), "--clone-name", CLONE,
+            "--volume-id", VOLUME, "--machine-status", str(self.out / "guest-cleanup.machine-status.txt"),
+            "--stop-requests", requests,
+        ], capture_output=True, text=True)
+
+    def recover_with_fleet(self, machine_state: str) -> subprocess.CompletedProcess:
+        """The real run-bench-fleet guest-cleanup recovery with provider/guest I/O stubbed."""
+        source = (ROOT / "scripts/run-bench-fleet").read_text()
+        start = source.index("cloudbench_recover_guest_cleanup_receipts() {")
+        body = source[start:source.index("\nfleet_has_replaced_preconfig() {", start)]
+        self.fly_calls = self.tmp / "fly-calls"
+        write(self.tmp / "native-status.txt", STOPPED_STATUS)
+        command = f"""set -u
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+{body}
+EXACT_SESSION_CLEANUP_HELPER={SESSION}
+GUEST_RECOVERY_HELPER={ROOT / "scripts/cloudbench-guest-recovery.py"}
+CLOUDBENCH_SCRIPT_SNAPSHOT={ROOT / "scripts"}
+ROOT_DIR={self.tmp}
+RUN_ID={RUN_ID}
+APP={APP}
+CLOUDBENCH_BARRIER_TOKEN=unused
+CLOUDBENCH_POOL_STOP_ATTEMPTS=2
+recovery_benches=({BENCH})
+recovery_machine_ids=({MACHINE})
+recovery_clone_names=({CLONE})
+recovery_machine_states=({machine_state})
+recovery_guest_tokens=({TOKEN})
+recovery_proxy_ports=(8802)
+recovery_outputs=({self.out})
+FLY() {{
+  printf '%s\\n' "$*" >> {self.fly_calls}
+  case "$*" in *quiesce*) echo 'ERROR: missing exact guest services manifest'; return 1 ;; esac
+  return 0
+}}
+cloudbench_fetch_guest_evidence() {{
+  case "$4" in
+    /cloudbench-guest-state-*) cp {self.tmp / "guest-state.json"} "$5"; printf -v "$1" 200 ;;
+    *) printf -v "$1" 404 ;;
+  esac
+}}
+machine_status_exact_read() {{ cat {self.tmp / "native-status.txt"}; }}
+cloudbench_seal_guest_evidence_file() {{ mv -f "$1" "$2"; }}
+cloudbench_publish_guest_shutdown_confirmation() {{ printf '%s\\n' "$2" > "$1/guest-shutdown.confirmed"; }}
+cloudbench_recover_guest_cleanup_receipts {self.registry}
+"""
+        env = {**os.environ, "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]}
+        return subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, check=False)
+
+    def test_already_stopped_guest_is_recorded_captured_and_recovered(self) -> None:
+        self.prepare()
+        first = self.recover_with_fleet("stopped")
+        self.assertNotEqual(first.returncode, 0, "capture is still required before cleanup")
+        record = json.loads((self.out / "guest-native-stop.json").read_text())
+        self.assertEqual((record["delivery_receipt"], record["stop_requests"], record["stop_requested"],
+                          record["verified_state"], record["volume_id"]),
+                         ("pre-backend-exit", 0, False, "stopped", VOLUME))
+        self.assertIn("--undelivered-native-stop", first.stdout + first.stderr)
+        self.assertFalse((self.out / "guest-shutdown.confirmed").exists())
+        status, _, stderr = self.capture()
+        self.assertEqual(status, 0, stderr)
+        manifest = json.loads((self.out / "guest-cleanup.provider-manifest.json").read_text())
+        self.assertEqual((manifest["kind"], manifest["sessions"], manifest["evidence"]["driver_state"],
+                          manifest["evidence"]["delivery_receipt"]),
+                         ("provider-undelivered-prestack-zero-manifest", {"kernel": [], "steel": []},
+                          "exited", "pre-backend-exit"))
+        second = self.recover_with_fleet("stopped")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual((self.out / "guest-shutdown.confirmed").read_text(), RUN_ID + "\n")
+        receipt = json.loads((self.out / "guest-cleanup.recovery-receipt.json").read_text())
+        self.assertEqual((receipt["kind"], receipt["results"]), ("provider-exact-cleanup", []))
+        # Latches remain for the exact-owner recovery to discharge.
+        self.assertTrue((self.registry / "guest-cleanup-unconfirmed").is_file())
+
+    def test_started_guest_is_natively_stopped_and_recorded(self) -> None:
+        self.prepare()
+        write(self.tmp / "guest-state.json", json.dumps(PREBACKEND_STATE, sort_keys=True))
+        result = self.recover_with_fleet("started")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("natively stopping it for original-volume capture", result.stdout)
+        self.assertIn(f"machine stop {MACHINE} -a {APP}", self.fly_calls.read_text())
+        record = json.loads((self.out / "guest-native-stop.json").read_text())
+        self.assertEqual((record["stop_requests"], record["stop_requested"]), (1, True))
+        self.assertIn("--undelivered-native-stop", result.stderr)
+
+    def test_started_guest_with_service_evidence_is_never_stopped_as_prebackend(self) -> None:
+        for change in ({"live_service_pids": [4242]}, {"backend_port": 3001},
+                       {"backend_log": dict(ABSENT, exists=True, regular=True, bytes=10, within_limit=True)},
+                       {"services_manifest": dict(ABSENT, exists=True, regular=True, bytes=9, within_limit=True)}):
+            with self.subTest(change=change):
+                self.prepare(dict(PREBACKEND_STATE, **change))
+                write(self.tmp / "guest-state.json", json.dumps(dict(PREBACKEND_STATE, **change), sort_keys=True))
+                result = self.recover_with_fleet("started")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no sealed provider-session identity", result.stderr)
+                self.assertNotIn("machine stop", self.fly_calls.read_text())
+                self.assertFalse((self.out / "guest-native-stop.json").exists())
+                self.fly_calls.unlink()
+
+    def test_partial_state_evidence_refuses_the_record(self) -> None:
+        for change in ({"live_service_pids": [4242]}, {"driver_state": "running"}, {"backend_port": 3001},
+                       {"driver_pid": 77}, {"backend_closed": True}, {"reason": "exact guest state captured"},
+                       {"backend_log": dict(ABSENT, exists=True)}, {"run_json": dict(ABSENT, exists=True)},
+                       {"machine_id": "aaaaaaaaaaaaaa"}, {"extra": 1}):
+            with self.subTest(change=change):
+                self.prepare(dict(PREBACKEND_STATE, **change))
+                result = self.publish()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("did not prove", result.stderr.replace("does not prove", "did not prove"))
+                self.assertFalse((self.out / "guest-native-stop.json").exists())
+
+    def test_local_backend_log_refuses_prebackend_admission(self) -> None:
+        self.prepare()
+        write(self.out / "guest-cleanup.backend.log", "[Server] Server started\n")
+        result = self.recover_with_fleet("stopped")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.out / "guest-native-stop.json").exists())
+
+    def test_running_machine_status_refuses_the_record(self) -> None:
+        self.prepare()
+        result = self.publish(status=STOPPED_STATUS.replace("stopped", "started"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not proven stopped", result.stderr)
+        self.assertFalse((self.out / "guest-native-stop.json").exists())
+
+    def assert_capture_refused(self) -> None:
+        self.assertEqual(self.publish().returncode, 0)
+        status, _, stderr = self.capture()
+        subprocess.run(["rm", "-rf", str(self.capture_dir)], check=True)
+        self.assertEqual(status, self.helper["EXIT_FAILED"], stderr)
+        # The capture's own cross-check against the sealed state may refuse first.
+        self.assertRegex(stderr, "does not prove zero provider sessions|contradicts the recovery observation")
+        self.assertFalse((self.out / "guest-cleanup.provider-manifest.json").exists())
+        self.assertFalse((self.out / "guest-cleanup.undelivered-capture.json").exists())
+        machine = self.state["machines"][MACHINE]
+        self.assertEqual((machine["state"], machine["config"]), ("stopped", self.original_config))
+
+    def test_backend_or_service_files_on_the_volume_refuse_zero_sessions(self) -> None:
+        extra = {
+            "repo/.context/cloudbench/logs/backend.log": b"[Server] Server started\n",
+            "repo/.context/cloudbench/logs/worker.log": b"Worker started\n",
+            "repo/.context/cloudbench/logs/frontend.log": b"vite\n",
+            "repo/.context/cloudbench/services.json": b'{"status":"stopped"}',
+            "repo/.context/cloudbench/run.json": b"{}",
+            "cloudbench-driver.pid": b"123\n",
+            f"cloudbench-interrupt-cleanup-{TOKEN}.status": b"state=clean\n",
+        }
+        for name, data in extra.items():
+            with self.subTest(name=name):
+                self.prepare()
+                self.state["prestack"][name] = data
+                self.assert_capture_refused()
+
+    def test_driver_or_log_past_backend_launch_refuses_zero_sessions(self) -> None:
+        for name, data in (("cloudbench-driver.state", b"running\n"),
+                           ("bench.log", PREBACKEND_FILES["bench.log"] + b"stack healthy - backend :3001\n"),
+                           ("repo/.context/cloudbench/stack.log", b"Service manifest: x\n")):
+            with self.subTest(name=name):
+                self.prepare()
+                self.state["prestack"][name] = data
+                self.assert_capture_refused()
+
+    def test_state_changed_after_record_refuses_capture(self) -> None:
+        self.prepare()
+        self.assertEqual(self.publish().returncode, 0)
+        write(self.out / "guest-cleanup.state.json",
+              json.dumps(dict(PREBACKEND_STATE, live_service_pids=[4242]), sort_keys=True))
+        status, _, stderr = self.capture()
+        self.assertEqual(status, self.helper["EXIT_REFUSED"], stderr)
+        self.assertIn("not an exact verified pre-backend stop", stderr)
+        self.assertEqual(self.state["mutations"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
