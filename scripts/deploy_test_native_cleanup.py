@@ -2477,7 +2477,8 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
              and (reference.get('native_directory') == str(campaign) or (staged_preallocation or layout == 'campaign-v1')
                   and reference.get('native_directory') is None and adapter.get('fleet_directory') is None
-                  and adapter.get('reason') == 'cloud command interrupted or source changed')
+                  and adapter.get('reason') in {'cloud command interrupted or source changed',
+                                               'cloud command ran while the source changed'})
              and str(campaign) in cli_text, 'campaign root binding')
         summary = document(campaign / 'summary.json')
         checks, jobs = request['checks'], summary['jobs']

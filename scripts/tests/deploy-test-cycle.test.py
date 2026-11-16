@@ -7189,15 +7189,21 @@ class Cycle(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'campaign root binding'):
             c.reconcile(state, occurrence['id'], refused)
         self.assertEqual(before, state)
-        accepted = interrupted('cloud command interrupted or source changed')
-        stale = copy.deepcopy(state)  # the refresh's stale attempt: no occurrence, identified by its token
-        stale['phase'] = 'stale'; stale['attempts'][-1]['stale'] = True
-        stale_receipt = stale['attempts'][-1]['results'][0]
-        stale_receipt.update(executed=True)
-        c.write(paths['receipt'], stale_receipt)
-        accepted.update(receipt_sha256=c.sha_file(paths['receipt']))
-        c.reconcile(stale, stale_receipt['token'], accepted)
-        self.assertFalse(stale['reconciled_owners'][c.sha_file(paths['receipt'])]['credit_granted'])
+        for reason in ('cloud command interrupted or source changed',
+                       'cloud command ran while the source changed'):
+            with self.subTest(reason=reason):
+                accepted = interrupted(reason)
+                stale = copy.deepcopy(state)  # Stale attempts are selected by their original token.
+                stale['phase'] = 'stale'; stale['attempts'][-1]['stale'] = True
+                stale_receipt = stale['attempts'][-1]['results'][0]
+                stale_receipt.update(executed=True)
+                c.write(paths['receipt'], stale_receipt)
+                accepted.update(receipt_sha256=c.sha_file(paths['receipt']))
+                original_attempts = copy.deepcopy(stale['attempts'])
+                c.reconcile(stale, stale_receipt['token'], accepted)
+                self.assertEqual(original_attempts, stale['attempts'])
+                self.assertEqual(set(stale_receipt['cases'].values()), {'UNVERIFIED'})
+                self.assertFalse(stale['reconciled_owners'][c.sha_file(paths['receipt'])]['credit_granted'])
 
     def unlaunched_campaign_state(self):
         import shutil
