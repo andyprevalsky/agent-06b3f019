@@ -637,6 +637,11 @@ def lane_fly(ctx: Ctx) -> Result:
     fly = ctx.production_receipt().get('fly') or {}
     if fly.get('required') is False:
         return True, 'production gate open (no agent runtime change in the merge)', 0
+    proof = ctx.production_receipt().get('cutover_verify') or {}
+    if proof.get('verified_by') == 'prequeue-live-descendant':
+        return True, Descendant(f'qualified by live strict descendant {proof.get("live_source_commit")} '
+                      f'job {proof.get("live_job_id")} + monitor --verify; original run {fly.get("run_id")} '
+                      f'concluded {fly.get("conclusion")}, no original job'), 0
     carried = (fly.get('verified_by_descendant') or {}).get('descendant_job_id')
     live = (fly.get('verified_by_live_successor') or {}).get('live_job_id')
     return True, (f'deploy-agents run {fly.get("run_id")} attempt {fly.get("attempt")} job {fly.get("job_id")} '
@@ -646,6 +651,19 @@ def lane_fly(ctx: Ctx) -> Result:
 
 
 def lane_workflow_migration(ctx: Ctx) -> Result:
+    receipt = ctx.production_receipt()
+    proof = receipt.get('cutover_verify') or {}
+    if proof.get('verified_by') == 'prequeue-live-descendant':
+        source, token = proof.get('source_commit'), proof.get('attempt')
+        if (receipt.get('status') != 'passed' or receipt.get('merged_sha') != ctx.sha
+                or proof.get('original_source_commit') != ctx.sha
+                or proof.get('monitor_verify_exit') != 0 or not source or not token):
+            return False, 'invalid qualified descendant Fly proof; run the fly lane first', 1
+        code = ctx.sh('workflow-migration', MIGRATION_ARGV, cwd=ctx.root / 'back-end',
+                      extra=migration_env(source, token))
+        reason = (Descendant(f'every migration row PASS (qualified descendant {source}, original CI failure retained)')
+                  if code == 0 else f'validate-prod-workflow-migration exited {code}')
+        return (code == 0), reason, code
     token = (ctx.production_receipt().get('fly') or {}).get('deployment_token')
     if not token:
         return False, 'no fly.deployment_token for this sha in production.json; run the fly lane first', 1
