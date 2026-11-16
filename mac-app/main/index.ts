@@ -26,6 +26,7 @@ import { createMainWindow } from './app/mainWindow';
 import { QuickQueryController } from './app/quickQuery';
 import { saveWindowState } from './app/windowState';
 import { startLocalCodeRunner } from './domains/local-code-runner/runtime';
+import { startRoseCli } from './domains/rose-cli/runtime';
 import { getErrorMessage } from '../shared/utils/error';
 
 app.name = 'Rose';
@@ -143,6 +144,8 @@ void app
     createAppMenu();
     // C14: this Mac can run code agents in folders the user shares with Rose.
     startLocalCodeRunner();
+    // The `rose` CLI ships with the app: (re)write ~/.rose/bin/rose for this app location.
+    startRoseCli();
     IMessageReader.checkAccess();
     handleInitialDeepLink();
     initializeShortcuts();

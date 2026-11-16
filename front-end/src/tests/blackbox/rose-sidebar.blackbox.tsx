@@ -194,12 +194,17 @@ describe('Rose left bar (flag on)', () => {
     // Agents sit indented under their project, Home included.
     expect(screen.getByTestId('rose-agent-row-rose-run').className).toContain('pl-[34px]');
     expect(screen.getByTestId('rose-agent-row-home-run').className).toContain('pl-[34px]');
-    // Project rows carry + (new agent here) and ⚙ (settings); Home carries +.
+    // Folder rows carry + (new agent here) and a new-subfolder button, never a
+    // settings ⚙ or a repo avatar: folders only organize agents (Andy,
+    // 2026-11-15); repositories and their settings live in Integrations.
     const project = screen.getByTestId('rose-project-row-p-rose');
     expect(within(project).getByRole('button', { name: 'Create Super Agent' })).toBeInTheDocument();
     expect(
-      within(project).getByRole('button', { name: 'Rose folder settings' }),
+      within(project).getByRole('button', { name: 'New subfolder in Rose' }),
     ).toBeInTheDocument();
+    expect(within(project).queryByRole('button', { name: /settings/i })).toBeNull();
+    expect(project.querySelector('img')).toBeNull();
+    expect(project.querySelector('svg.lucide-folder')).not.toBeNull();
     const home = screen.getByTestId('rose-home-project-row');
     expect(home).toHaveTextContent('Home');
     expect(within(home).getByRole('button', { name: 'Create Super Agent' })).toBeInTheDocument();

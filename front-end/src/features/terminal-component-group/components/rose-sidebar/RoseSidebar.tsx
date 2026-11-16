@@ -54,8 +54,9 @@
  *   [MOVING] --PATCH ok--> [PLACED at target] | --PATCH fails--> [PLACED at origin] + toast
  *   Sub-agent rows move their root. One PATCH per move; the list is not refetched.
  *
- * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
- * rename dialog (useAgentRowActions); delete-project confirm dialog.
+ * PANELS: archive dialog; rename dialog (useAgentRowActions); delete-folder confirm
+ * dialog. Folders have no settings in the bar: repositories and their settings
+ * live in Integrations › GitHub Repositories (Andy, 2026-11-15).
  *
  * APP VIEW (AppViewProvider; opened from a code-agent chip's preview card): an
  * agent or code-agent row and every "+" (a project's or Home's) close it first.
@@ -83,7 +84,6 @@ import { useSidebarSearch } from '../useSidebarSearch';
 import { DeleteProjectDialog } from './DeleteProjectDialog';
 import { groupAgentsByProject } from './groupAgentsByProject';
 import RoseAgentGroups, { HOME_GROUP } from './RoseAgentGroups';
-import RoseProjectSettingsPanel from './RoseProjectSettingsPanel';
 import {
   RoseAccountRow,
   RoseMacTitleBarInset,
@@ -319,7 +319,6 @@ function RoseSidebarBar(props: AppSidebarProps) {
               isFiltering={isFiltering}
               selectedAgentId={props.selectedAgentId}
               attentionAgentIds={attention}
-              settingsProjectId={projects.openProject?.id ?? null}
               renamingProjectId={projects.renamingProjectId}
               pendingGroupKey={pendingGroup.pending}
               onSelectAgent={codeAgentRows.selectAgentRow}
@@ -396,14 +395,6 @@ function RoseSidebarBar(props: AppSidebarProps) {
           />
         </aside>,
         document.body,
-      )}
-      {projects.openProject !== null && (
-        <RoseProjectSettingsPanel
-          project={projects.openProject}
-          barExpanded={isExpanded}
-          barExpandedWidth={expansion.width}
-          onClose={projects.closeProjectSettings}
-        />
       )}
       {renameDialog}
       <DeleteProjectDialog

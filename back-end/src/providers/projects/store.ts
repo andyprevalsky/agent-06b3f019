@@ -1,7 +1,12 @@
 /**
  * Project persistence (Prisma). Owner scoping is enforced here: every lookup
  * takes the caller's userId, and a foreign project is indistinguishable from a
- * missing one.
+ * missing one. The one exception is listSharedRepositoryProjects: read-only
+ * rows a teammate shared through a team (the domain strips owner settings).
+ *
+ * A row is a left-bar folder (isFolder), a repository (isRepositoryProject),
+ * or both; removeFolder / removeRepository take away one role and keep the
+ * other.
  *
  * 10k-agent behaviour: rows are keyed per project; a session start reads one
  * project + its env files (bounded by MAX_ENV_FILES) + one snapshot row. No
@@ -10,7 +15,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
 import { normalizeGithubUrl } from '../github';
-import { findGrantedRepoUrls } from '../githubRepos/store';
+import { disconnectProjectRepos, findGrantedRepoUrls } from '../githubRepos/store';
 
 /** Projects expose their connected repo's canonical ref (GitHub repo integration). */
 export { canonicalGithubRepoRef } from '../githubRepos/refs';
@@ -52,6 +57,8 @@ export interface ProjectRecord {
   userId: string;
   name: string;
   repoUrl: string | null;
+  /** Shown as a left-bar folder; false: only a repository (isRepositoryProject). */
+  isFolder: boolean;
   defaultBranch: string;
   startupScript: string | null;
   startupTimeoutS: number;
@@ -103,13 +110,72 @@ export async function userExists(userId: string): Promise<boolean> {
 
 export type ProjectWithCount = ProjectRecord & { _count: { envFiles: number } };
 
-/** One query: projects + env-file counts (no N+1). */
-export async function listProjects(userId: string): Promise<ProjectWithCount[]> {
+/**
+ * A repository (Integrations › GitHub Repositories): it has a repo, synced code,
+ * or is not a left-bar folder at all. A folder can also be a repository.
+ */
+export function isRepositoryProject(project: {
+  repoUrl: string | null;
+  syncRevision: number;
+  isFolder: boolean;
+}): boolean {
+  return project.repoUrl !== null || project.syncRevision > 0 || !project.isFolder;
+}
+
+/** The SQL form of isRepositoryProject. */
+const repositoryWhere: Prisma.ProjectWhereInput = {
+  OR: [{ repoUrl: { not: null } }, { syncRevision: { gt: 0 } }, { isFolder: false }],
+};
+
+/** One query: projects + env-file counts (no N+1); `foldersOnly` lists left-bar folders. */
+export async function listProjects(
+  userId: string,
+  options: { foldersOnly?: boolean } = {}
+): Promise<ProjectWithCount[]> {
   return prisma.project.findMany({
-    where: { userId },
+    where: { userId, ...(options.foldersOnly === true ? { isFolder: true } : {}) },
     orderBy: { createdAt: 'asc' },
     take: PROJECT_LIST_LIMIT,
     include: { _count: { select: { envFiles: true } }, folders: folderSelection },
+  });
+}
+
+export interface SharedProjectRecord {
+  project: ProjectRecord;
+  ownerName: string;
+  teamName: string;
+}
+
+/**
+ * Repository projects teammates share with `userId` (TeamProjectShare), valid
+ * under the same rules as the teams discovery list: the caller's and the
+ * owner's memberships are ACCEPTED and the owner still owns the project. One
+ * bounded query (TeamMember (userId, status) index, then the shares of those
+ * teams); a project shared through several teams is listed once.
+ */
+export async function listSharedRepositoryProjects(userId: string): Promise<SharedProjectRecord[]> {
+  const rows = await prisma.teamProjectShare.findMany({
+    where: {
+      ownerUserId: { not: userId },
+      team: { members: { some: { userId, status: 'ACCEPTED' } } },
+      member: { status: 'ACCEPTED' },
+      project: repositoryWhere,
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: PROJECT_LIST_LIMIT,
+    select: {
+      ownerUserId: true,
+      team: { select: { name: true } },
+      member: { select: { email: true, user: { select: { name: true } } } },
+      project: true,
+    },
+  });
+  const seen = new Set<string>();
+  return rows.flatMap((row) => {
+    if (row.project.userId !== row.ownerUserId || seen.has(row.project.id)) return [];
+    seen.add(row.project.id);
+    const ownerName = row.member.user?.name?.trim() || row.member.email || 'Teammate';
+    return [{ project: row.project, ownerName, teamName: row.team.name }];
   });
 }
 
@@ -227,16 +293,104 @@ export async function updateProject(
   });
 }
 
-/** Works with both immediate db-push FKs and deferred migration FKs. */
-export async function deleteProject(id: string): Promise<void> {
-  await runTransactionWithRetry(async (tx) => {
-    // Match folder writes' lock order before touching agents or cascading folders.
-    await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = ${id} FOR UPDATE`;
+/** Lock the row (folder writes' lock order) and read what a removal decides on. */
+async function lockForRemoval(tx: Prisma.TransactionClient, id: string) {
+  await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = ${id} FOR UPDATE`;
+  return tx.project.findUnique({
+    where: { id },
+    select: {
+      isFolder: true,
+      repoUrl: true,
+      syncRevision: true,
+      maintenanceRunId: true,
+      maintenanceLeaseUntil: true,
+    },
+  });
+}
+
+/** Works with both immediate db-push FKs and deferred migration FKs (row already locked). */
+async function deleteLockedProject(tx: Prisma.TransactionClient, id: string): Promise<void> {
+  await tx.agent.updateMany({
+    where: { projectId: id, folderId: { not: null } },
+    data: { folderId: null },
+  });
+  // Its GitHub repo goes with it (left unlinked, the next list would re-create it).
+  await disconnectProjectRepos(tx, id);
+  await tx.project.delete({ where: { id } });
+}
+
+/** deleted: a plain folder; repository_kept: the row stays a repository; not_a_folder: untouched. */
+export type FolderRemoval = 'deleted' | 'repository_kept' | 'not_a_folder';
+
+/**
+ * DELETE /api/folders/:id. A folder that is also a repository stops being a
+ * folder: its agents go Home and its subfolders are removed, the repository
+ * (repo, env files, synced code) stays. Any other folder is deleted.
+ */
+export async function removeFolder(id: string): Promise<FolderRemoval> {
+  return runTransactionWithRetry(async (tx) => {
+    const current = await lockForRemoval(tx, id);
+    if (current === null || !current.isFolder) return 'not_a_folder';
+    if (!isRepositoryProject(current)) {
+      await deleteLockedProject(tx, id);
+      return 'deleted';
+    }
     await tx.agent.updateMany({
-      where: { projectId: id, folderId: { not: null } },
-      data: { folderId: null },
+      where: { projectId: id },
+      data: { projectId: null, folderId: null },
     });
-    await tx.project.delete({ where: { id } });
+    await tx.projectFolder.deleteMany({ where: { projectId: id } });
+    await tx.project.update({ where: { id }, data: { isFolder: false } });
+    return 'repository_kept';
+  });
+}
+
+/** deleted: the row is gone; folder_kept: only its repository was removed. */
+export type RepositoryRemoval = 'deleted' | 'folder_kept' | 'missing';
+
+/**
+ * DELETE /api/projects/:id. A repository that is also a folder keeps the
+ * folder (its agents and subfolders): the repo, env files, synced code, sync
+ * revision, template snapshot and the automatic template-sync triggers go,
+ * and its GitHub repo connections are disconnected as a delete does. Any other
+ * row is deleted. Refused (ProjectRepositoryBusyError) while a template sync
+ * run holds a live lease, since it would publish onto the stripped folder.
+ */
+export async function removeRepository(id: string): Promise<RepositoryRemoval> {
+  return runTransactionWithRetry(async (tx) => {
+    const current = await lockForRemoval(tx, id);
+    if (current === null) return 'missing';
+    if (!current.isFolder || !isRepositoryProject(current)) {
+      await deleteLockedProject(tx, id);
+      return 'deleted';
+    }
+    const leaseLive =
+      current.maintenanceRunId !== null &&
+      current.maintenanceLeaseUntil !== null &&
+      current.maintenanceLeaseUntil.getTime() > Date.now();
+    if (leaseLive) throw new ProjectRepositoryBusyError();
+    await disconnectProjectRepos(tx, id);
+    await tx.projectEnvFile.deleteMany({ where: { projectId: id } });
+    await tx.projectSyncSnapshot.deleteMany({ where: { projectId: id } });
+    await tx.project.update({
+      where: { id },
+      data: {
+        repoUrl: null,
+        syncRevision: 0,
+        lastSyncedAt: null,
+        maintenanceNightly: false,
+        maintenanceOnGithubChange: false,
+        maintenanceWatchedSha: null,
+        maintenanceWatchCheckedAt: null,
+        // As a repo change does: keep both ids for the publication cleanup, but
+        // the snapshot is unusable from now on.
+        templateSnapshotAt: null,
+        templateSnapshotSha: null,
+        templateSnapshotRunId: null,
+        templateSnapshotSize: Prisma.DbNull,
+      },
+    });
+    return 'folder_kept';
   });
 }
 

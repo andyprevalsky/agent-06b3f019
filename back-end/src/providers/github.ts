@@ -10,6 +10,7 @@ import {
   type GithubRateLimitInfo,
 } from './githubRateLimit';
 import { githubPoolFetch } from './githubTokenPool';
+import { userTokenRepoAccess } from './githubUserCredentials';
 import { createLogger } from './logger';
 
 const log = createLogger('GitHub');
@@ -179,7 +180,9 @@ async function grantGithubRepoAccess(userId: string, repoUrl: string): Promise<v
 
 /**
  * Check if a user has access to clone a specific GitHub repo.
- * Checks the GithubRepoAccess allowlist table, then auto-grants public repos.
+ * Checks the GithubRepoAccess allowlist table, then the user's own GitHub
+ * credential (never stored as a grant: access follows the live credential, so
+ * removing it takes effect at once), then auto-grants public repos.
  */
 export async function checkGithubRepoAccess(
   userId: string,
@@ -190,6 +193,8 @@ export async function checkGithubRepoAccess(
   error?: string;
   /** Set when GitHub's rate limit, not a denial, stopped the check. */
   rateLimit?: GithubRateLimitInfo;
+  /** How access was established: an existing grant, the user's own token, a public repo. */
+  via?: 'grant' | 'user_token' | 'public';
 }> {
   const normalizedUrl = normalizeGithubUrl(repoUrl);
 
@@ -211,12 +216,22 @@ export async function checkGithubRepoAccess(
   });
 
   if (access) {
-    return { allowed: true, normalizedUrl };
+    return { allowed: true, normalizedUrl, via: 'grant' };
   }
 
   const parsed = parseGithubUrl(normalizedUrl);
   const repoName = parsed ? `${parsed.owner}/${parsed.repo}` : normalizedUrl;
   if (parsed) {
+    // The user's own GitHub credential first: a repo it can push is theirs to use.
+    const own = await userTokenRepoAccess(userId, parsed.owner, parsed.repo);
+    if (own?.canPush === true) {
+      log.info("Allowed GitHub repo access through the user's own credential", {
+        userId,
+        repoUrl: normalizedUrl,
+        login: own.login,
+      });
+      return { allowed: true, normalizedUrl, via: 'user_token' };
+    }
     const { visibility, rateLimit } = await lookupRepoVisibility(parsed.owner, parsed.repo);
     if (rateLimit !== undefined) {
       return {
@@ -232,13 +247,13 @@ export async function checkGithubRepoAccess(
         userId,
         repoUrl: normalizedUrl,
       });
-      return { allowed: true, normalizedUrl };
+      return { allowed: true, normalizedUrl, via: 'public' };
     }
     if (visibility === 'private') {
       return {
         allowed: false,
         normalizedUrl,
-        error: `Access denied: ${repoName} is private. Please contact support to request access.`,
+        error: `Access denied: Rose can't reach the private repository ${repoName}. Import it from your computer in the Rose Mac app, which brings your GitHub login.`,
       };
     }
   }
@@ -246,7 +261,7 @@ export async function checkGithubRepoAccess(
   return {
     allowed: false,
     normalizedUrl,
-    error: `Access denied: You don't have permission to clone ${repoName}. Please contact support to request access.`,
+    error: `Access denied: Rose can't reach ${repoName}. Import it from your computer in the Rose Mac app, which brings your GitHub login.`,
   };
 }
 

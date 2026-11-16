@@ -77,7 +77,7 @@ describe('Rose Desktop integrations: one account per integration', () => {
       'Banks & Financial Accounts',
       'Socials',
       'File System',
-      'GitHub Repos',
+      'GitHub Repositories',
       'CLIs',
       'MCP servers',
       'Meeting note taker',

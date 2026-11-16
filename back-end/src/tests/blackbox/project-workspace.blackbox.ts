@@ -19,6 +19,9 @@
  *     reported to the CLI prompt and by runProjectStartup(); the timeout is
  *     enforced (the session does not hang); the runner also runs under the E2B
  *     templates' HOME, whose package.json declares "type": "module"
+ *   - project ref (project-workspace-project-ref.cases.ts): a spawn's
+ *     github_repo_ref=<project id> restores exactly that project, one without
+ *     GitHub from its synced bundle; another user's id is refused
  *   - secret-leak scan: the fixture secret never appears in API responses,
  *     CLI output, DB rows, startup log/report or the backend log
  *
@@ -54,6 +57,7 @@ import {
   registerFilesOnlyRejectionCase,
   verifyFilesOnlyPush,
 } from './project-workspace-files-only.cases';
+import { registerProjectRefCase } from './project-workspace-project-ref.cases';
 import { registerSeedRoseCase } from './project-workspace-seed-rose.cases';
 import { prepareSessionProject } from '../../providers/projects/session';
 import {
@@ -618,6 +622,8 @@ registerCodexProjectWorkspaceCases({
   leakTexts,
   createProject,
 });
+
+registerProjectRefCase({ fixture, secret: SECRET, leakTexts, runSync, createProject });
 
 test('secret-leak scan: fixture secret absent from every surface', async () => {
   const artifactDir = process.env.BLACKBOX_TEST_ARTIFACT_DIR;
