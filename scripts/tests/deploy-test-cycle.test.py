@@ -14185,6 +14185,7 @@ class RelayStartupEvidence(unittest.TestCase):
                    '--forward-arg=--ref','--forward-arg='+'a'*40,*['--task='+name for name in tasks]]
         def refuse_inventory(*_args,**_kwargs):raise RuntimeError('fixture refuses before controller admission')
         replacements=dict(campaign_workspace=lambda root,_forward:(root,None),provider_capacity_refusal=lambda _n,_tasks=None:None,
+                          delegating_ceiling_refusal=lambda _n,_tasks=None:None,
                           scorecard_hooks=lambda:None,start_shared_inventory=refuse_inventory,
                           publish_campaign_group=lambda *_a,**_kw:True)
         with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),             patch.dict(os.environ,{'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'command-proof'}):
