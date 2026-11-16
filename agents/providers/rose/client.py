@@ -62,20 +62,20 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
+from providers.rose.flash_agent import is_flash_agent_call, pool_for_call
 from providers.rose.foundry import _NO_REASONING_MODELS, foundry_candidates, foundry_complete, foundry_configured
 from providers.rose.gpt_auth import _normalize_reasoning_effort, gpt_auth_complete, openai_api_key_complete
 from providers.rose.inter_agent_context import settle_trailing_inter_agent_messages
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, foundry_model, get_pool
-from providers.rose.flash_agent import is_flash_agent_call, pool_for_call
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
 from providers.rose.speed import current_agent_speed, normalize_agent_speed
-from providers.rose.streaming import _stream_progress
+from providers.rose.streaming import REASONING_BLOCKS_USAGE_KEY, _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import messages_contain_images, route_model_accepts_images
 from providers.rose.truncation import model_key, needs_result, recover_truncated
@@ -163,52 +163,98 @@ class _FallThrough(Exception):
 # workers + workflows, no hammering. A short in-memory cache keeps the LLM hot
 # path off the backend on the common (clear) case.
 _ANTHROPIC_COOLDOWN_RECHECK_S = 15.0
-_anthropic_cooldown_skip_until = 0.0  # time.monotonic() < this ⇒ locally known cooled
-_anthropic_cooldown_last_check = 0.0
+
+
+class _FundedKeyCooldown:
+    """Per-process cache of one funded key's shared backend cooldown row.
+
+    At most one backend read runs per key. Concurrent callers await that
+    in-flight read through ``asyncio.shield`` instead of answering "not on
+    cooldown" before it lands, and one caller's cancellation never reaches the
+    shared read. A failed read is treated as "not on cooldown" so a transient
+    backend blip never disables the fallback. State per key: two clocks and at
+    most one in-flight task.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self.skip_until = 0.0  # time.monotonic() < this ⇒ locally known cooled
+        self._last_check = 0.0
+        self._inflight: Optional[asyncio.Task[bool]] = None
+
+    def reset(self) -> None:
+        self.skip_until = 0.0
+        self._last_check = 0.0
+        self._inflight = None
+
+    def mark(self) -> None:
+        self.skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+
+    async def on_cooldown(self) -> bool:
+        now = time.monotonic()
+        if now < self.skip_until:
+            return True
+        loop = asyncio.get_running_loop()
+        read = self._inflight
+        if read is None or read.done() or read.get_loop() is not loop:
+            if now - self._last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
+                return False
+            self._last_check = now
+            read = loop.create_task(self._read())
+            self._inflight = read
+
+            def _on_done(done: asyncio.Task[bool]) -> None:
+                if self._inflight is done:
+                    self._inflight = None
+                if not done.cancelled():
+                    done.exception()
+
+            read.add_done_callback(_on_done)
+        cooled = await asyncio.shield(read)
+        # A failure marked while the read was pending still counts.
+        return cooled or time.monotonic() < self.skip_until
+
+    async def _read(self) -> bool:
+        cfg = load_config()
+        base = (cfg.backend.api_url or "").rstrip("/")
+        if not base:
+            return False
+        try:
+            resp = await get_http_client().get(
+                f"{base}{self._path}",
+                timeout=5.0,
+                headers={"X-API-Key": cfg.backend.api_key or ""},
+            )
+            cooled = resp.status_code == 200 and resp.json().get("onCooldown") is True
+        except Exception:
+            return False
+        # Both windows start when the answer is known, so a read slowed past
+        # the recheck interval cannot hand later callers an expired answer.
+        answered = time.monotonic()
+        self._last_check = answered
+        if cooled:
+            self.skip_until = max(self.skip_until, answered + _ANTHROPIC_COOLDOWN_RECHECK_S)
+        return cooled
+
+
+_anthropic_api_key_cooldown = _FundedKeyCooldown("/api/integrations/compute-code/anthropic-key/cooldown")
 
 
 def _reset_anthropic_api_key_cooldown_cache() -> None:
     """Test-only: clear the in-memory cooldown cache between cases."""
-    global _anthropic_cooldown_skip_until, _anthropic_cooldown_last_check
-    _anthropic_cooldown_skip_until = 0.0
-    _anthropic_cooldown_last_check = 0.0
+    _anthropic_api_key_cooldown.reset()
 
 
 async def _anthropic_api_key_on_cooldown() -> bool:
     """Whether the shared funded key is backed off (in-memory fast path, then
-    a throttled backend read). Failures are treated as 'not on cooldown' so a
-    transient backend blip never disables the fallback."""
-    global _anthropic_cooldown_skip_until, _anthropic_cooldown_last_check
-    now = time.monotonic()
-    if now < _anthropic_cooldown_skip_until:
-        return True
-    if now - _anthropic_cooldown_last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
-        return False
-    _anthropic_cooldown_last_check = now
-    cfg = load_config()
-    base = (cfg.backend.api_url or "").rstrip("/")
-    if not base:
-        return False
-    try:
-        client = get_http_client()
-        resp = await client.get(
-            f"{base}/api/integrations/compute-code/anthropic-key/cooldown",
-            timeout=5.0,
-            headers={"X-API-Key": cfg.backend.api_key or ""},
-        )
-        if resp.status_code == 200 and resp.json().get("onCooldown") is True:
-            _anthropic_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
-            return True
-    except Exception:
-        return False
-    return False
+    one shared, throttled backend read)."""
+    return await _anthropic_api_key_cooldown.on_cooldown()
 
 
 async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
     """Back the shared funded key off (in-memory + backend DB) so no other
     worker/workflow retries it until it recovers."""
-    global _anthropic_cooldown_skip_until
-    _anthropic_cooldown_skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+    _anthropic_api_key_cooldown.mark()
     cfg = load_config()
     base = (cfg.backend.api_url or "").rstrip("/")
     if not base:
@@ -227,46 +273,19 @@ async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
 
 # The shared GPT_API_KEY uses the same cross-worker DB cooldown as Anthropic,
 # with its own row so one provider cannot suppress the other.
-_gpt_api_key_cooldown_skip_until = 0.0
-_gpt_api_key_cooldown_last_check = 0.0
+_gpt_api_key_cooldown = _FundedKeyCooldown("/api/integrations/compute-code/gpt-key/cooldown")
 
 
 def _reset_gpt_api_key_cooldown_cache() -> None:
-    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
-    _gpt_api_key_cooldown_skip_until = 0.0
-    _gpt_api_key_cooldown_last_check = 0.0
+    _gpt_api_key_cooldown.reset()
 
 
 async def _gpt_api_key_on_cooldown() -> bool:
-    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
-    now = time.monotonic()
-    if now < _gpt_api_key_cooldown_skip_until:
-        return True
-    if now - _gpt_api_key_cooldown_last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
-        return False
-    _gpt_api_key_cooldown_last_check = now
-    cfg = load_config()
-    base = (cfg.backend.api_url or "").rstrip("/")
-    if not base:
-        return False
-    try:
-        client = get_http_client()
-        resp = await client.get(
-            f"{base}/api/integrations/compute-code/gpt-key/cooldown",
-            timeout=5.0,
-            headers={"X-API-Key": cfg.backend.api_key or ""},
-        )
-        if resp.status_code == 200 and resp.json().get("onCooldown") is True:
-            _gpt_api_key_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
-            return True
-    except Exception:
-        return False
-    return False
+    return await _gpt_api_key_cooldown.on_cooldown()
 
 
 async def _mark_gpt_api_key_cooldown(reason: str) -> None:
-    global _gpt_api_key_cooldown_skip_until
-    _gpt_api_key_cooldown_skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+    _gpt_api_key_cooldown.mark()
     cfg = load_config()
     base = (cfg.backend.api_url or "").rstrip("/")
     if not base:
@@ -997,6 +1016,10 @@ class RoseClient:
         _exclude_anthropic_family: bool = False,
         _skip_models: FrozenSet[str] = frozenset(),
         _skip_reasons: Optional[Mapping[str, str]] = None,
+        # Archive-only: receives the provider reasoning blocks (signatures,
+        # redacted thinking, reasoning_details) for callers that archive the
+        # call themselves (dump_context=False). Never part of usage.
+        reasoning_blocks_sink: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -1059,6 +1082,11 @@ class RoseClient:
                 seed=seed,
                 request_id=rid,
             ):
+                if chunk.kind == "usage" and REASONING_BLOCKS_USAGE_KEY in chunk.data:
+                    chunk = StreamChunk(
+                        kind="usage",
+                        data={k: v for k, v in chunk.data.items() if k != REASONING_BLOCKS_USAGE_KEY},
+                    )
                 yield chunk
             return
         dump_path: Optional[str] = None
@@ -1106,13 +1134,28 @@ class RoseClient:
                             ],
                         },
                         "exclude_anthropic_family": _exclude_anthropic_family,
+                        # Declared-only tools legalizing forked history (planner
+                        # get_memories) and the direct-auth projection of a
+                        # response model are sent too; record which is which.
+                        "context_tool_names": [
+                            str(tool.get("name") or (tool.get("function") or {}).get("name") or "")
+                            for tool in context_tools or []
+                            if isinstance(tool, dict)
+                        ],
+                        "direct_auth_tools": (
+                            direct_auth_tools if direct_auth_tools is not waterfall_tools else None
+                        ),
                     },
                     response_format=None if waterfall_tools else openrouter_response_format,
-                    tools=waterfall_tools,
+                    tools=(
+                        [*(waterfall_tools or []), *context_tools] if context_tools else waterfall_tools
+                    ),
                     extra=dump_extra,
                 )
             except Exception:
                 logger.debug("rose.complete.dump_start_failed", call_site=call_site, exc_info=True)
+
+        dump_finalized = False
 
         def _record_dump_chunk(chunk: StreamChunk) -> None:
             if not dump_context:
@@ -1121,25 +1164,50 @@ class RoseClient:
                 _fold(dump_result, chunk)
             except Exception:
                 logger.debug("rose.complete.dump_chunk_failed", call_site=call_site, exc_info=True)
+            if chunk.kind == "done":
+                # The output is complete once `done` is handed to the consumer.
+                # Archive it now: a consumer that stops iterating after `done`
+                # closes this generator before the post-loop finalize runs.
+                _finalize_dump()
+
+        dump_reasoning_blocks: List[Dict[str, Any]] = []
 
         def _with_cache_sequence(chunk: StreamChunk) -> StreamChunk:
-            """Expose the exact provider cache namespace on persisted usage."""
-            if chunk.kind != "usage" or not cache_namespace:
+            """Expose the exact provider cache namespace on persisted usage.
+
+            Provider reasoning blocks (thinking signatures, redacted thinking,
+            OpenRouter reasoning_details) ride the parser's usage chunk only as
+            far as here: they go to the archived output record, never to
+            callers' usage dicts or Temporal payloads.
+            """
+            if chunk.kind != "usage":
                 return chunk
-            return StreamChunk(
-                kind="usage",
-                data={**chunk.data, "cache_sequence_id": cache_namespace},
-            )
+            data = chunk.data
+            blocks: List[Any] = []
+            if REASONING_BLOCKS_USAGE_KEY in data:
+                data = dict(data)
+                blocks = data.pop(REASONING_BLOCKS_USAGE_KEY) or []
+            # Every usage chunk ends one provider response: its blocks replace
+            # any earlier attempt's, so a truncation retry never inherits them.
+            dump_reasoning_blocks[:] = [dict(block) for block in blocks if isinstance(block, dict)]
+            if reasoning_blocks_sink is not None:
+                reasoning_blocks_sink[:] = [dict(block) for block in dump_reasoning_blocks]
+            if cache_namespace:
+                data = {**data, "cache_sequence_id": cache_namespace}
+            return chunk if data is chunk.data else StreamChunk(kind="usage", data=data)
 
         def _finalize_dump(error: Optional[BaseException] = None) -> None:
-            if not dump_context or not dump_path:
+            nonlocal dump_finalized
+            if not dump_context or not dump_path or dump_finalized:
                 return
+            dump_finalized = True
             try:
                 from helpers.observability import update_llm_dump
 
                 output: Dict[str, Any] = {
                     "content": dump_result.content,
                     "reasoning": dump_result.reasoning,
+                    "reasoning_blocks": list(dump_reasoning_blocks),
                     "tool_calls": dump_result.tool_calls,
                     "codex_reasoning_items": dump_result.codex_reasoning_items,
                     "usage": dump_result.usage,
@@ -2333,6 +2401,9 @@ class RoseClient:
         )
         # Bind failed dumps to the same request that the client attempts.
         request_id = request_id or uuid.uuid4().hex[:12]
+        # This method writes the call's archive record itself (dump_context=False
+        # below), so the provider reasoning blocks are delivered here, not via usage.
+        reasoning_blocks: List[Dict[str, Any]] = []
         from helpers.image_count_retry import collect_with_image_count_retry
         try:
             response = await collect_with_image_count_retry(
@@ -2353,6 +2424,10 @@ class RoseClient:
                 dump_context=False,
                 cache_namespace=cache_namespace,
                 browser_use=True,
+                reasoning_blocks_sink=reasoning_blocks,
+                # One collected action: a tool call cut off at the output limit is
+                # retried like any other cut-off reply (providers/rose/truncation.py).
+                result_required=True,
             )
         except Exception as exc:
             try:
@@ -2478,6 +2553,7 @@ class RoseClient:
                     **({"tool_args_validation_error": str(tool_args_validation_error)} if tool_args_validation_error else {}),
                     "content": response.content,
                     "reasoning": response.reasoning,
+                    "reasoning_blocks": list(reasoning_blocks),
                     "tool_calls": response.tool_calls,
                     "usage": response.usage,
                     "timing": response.timing,
@@ -2535,10 +2611,13 @@ class RoseClient:
                 ids = [call_id for item in batch_actions for call_id in item["tool_call_ids"]]
                 if len(set(ids)) != len(ids):
                     raise BrowserModelOutputValidationError("Duplicate browser tool call IDs", response=response)
+            from browser_tools.schemas import phone_call_batchable
             if len(batch_actions) > 1 and any(item["action"]["action"] in {
                 "attempt_completion", "request_user_assistance_for_authentication",
-                "request_payment_card", "recover_from_challenge", "phone",
-            } for item in batch_actions):
+                "request_payment_card", "recover_from_challenge",
+            } or (item["action"]["action"] == "phone"
+                  and not phone_call_batchable(item["action"].get("params") or {}))
+                for item in batch_actions):
                 raise BrowserModelOutputValidationError("This browser action requires a separate turn", response=response)
         return {
             "action": action,
@@ -2579,6 +2658,7 @@ class RoseClient:
         retry_partial_errors: bool = False,
         json_mode: bool = False,
         browser_use: bool = False,
+        reasoning_blocks_sink: Optional[List[Dict[str, Any]]] = None,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks.
@@ -2613,6 +2693,7 @@ class RoseClient:
             **({"prefer_azure": True} if prefer_azure else {}),
             **({"retry_partial_errors": True} if retry_partial_errors else {}),
             **({"json_mode": True} if json_mode else {}),
+            **({"reasoning_blocks_sink": reasoning_blocks_sink} if reasoning_blocks_sink is not None else {}),
         ):
             if chunk.kind == "restart":
                 result = RoseResponse()

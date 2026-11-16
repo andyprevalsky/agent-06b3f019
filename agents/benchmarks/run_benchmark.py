@@ -111,7 +111,7 @@ from benchmarks.phone_callee import (
     resolve_callee_prompt,
 )
 from benchmarks.phone_critical_attention import PHONE_BENCH_TASK_NAMES
-from benchmarks.team_data import TASK_MARKERS as TEAM_DATA_TASKS, apply_team_fixture, verified_fixture_database
+from benchmarks.team_data import TASK_FIXTURES as TEAM_DATA_TASKS, apply_team_fixture, verified_fixture_database
 from benchmarks.phone_daily import (
     TASK_KINDS as PHONE_DAILY_TASKS,
 )
@@ -351,6 +351,9 @@ AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
 # Long-horizon fundraise bench: runs as Tamy's account snapshot under the WMH.
 RAISE_5M_BREX_TASK_NAME = "raise-5m-rose-labs-brex"
 DOORDASH_FOOD_PLAN_TASK_NAME = "browser-doordash-food-plan-grocery-order"
+# Catalog `pinned_facts.manifest_source` value that binds a task to the frozen
+# food-plan manifest fixture (grocery-order and its cart-reauth sibling).
+DOORDASH_FOOD_PLAN_MANIFEST_SOURCE = "doordash-food-plan-grocery-fixture.json"
 _DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 # Tasks the parallel scheduler must finish (serially) before ordinary work:
 # - Destructive shared-DB fixtures: a retained failed agent tree must not mutate
@@ -371,6 +374,8 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     AMAZON_MX_TAMY_TASK_NAME,
     RAISE_5M_BREX_TASK_NAME,
     DOORDASH_FOOD_PLAN_TASK_NAME,
+    # Applies the same food-plan fixture (shared user profile upsert) as the order task.
+    "browser-doordash-food-plan-grocery-cart-reauth",
     BIOMETRICS_WEBDECOY_TASK_NAME,
     "agent-payment-setup-resume",
     "sms-supervisor-fill-form-searches-then-delegates",
@@ -479,7 +484,11 @@ AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
 # and production needs LIVE-mode values where the sandbox fixture needs TEST-mode ones. Must equal
 # BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID in back-end/src/domains/purchases/config.ts; provisioned
 # once by `back-end/scripts/setup-benchmark-payment.ts --live`.
-AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID = "00000000-0000-4000-8000-000000000107"
+# 2026-11-14 (user directive): the live production lifecycle probe runs as the OWNER account. Only
+# the owner's benchmark agents take the charged customer path, against a dedicated live Stripe
+# customer (BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID on the backend), never the owner's own
+# Subscription; the probe's settled purchase records are purged after it passes.
+AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID = USER_ID
 AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES = {
     AGENT_PAYMENT_PRODUCTION_TASK_NAME,
     "agent-payment-production-purchase",
@@ -2419,6 +2428,20 @@ _owned_cleanup_user_id: contextvars.ContextVar[str | None] = contextvars.Context
 
 
 _task_root_custody: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("benchmark_task_root_custody", default=None)
+# Root id pre-assigned before creation (cache warmup archives under it first);
+# task-local so concurrent copies of one task never share it.
+_preassigned_root_agent_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "benchmark_preassigned_root_agent_id", default=None
+)
+
+
+@contextmanager
+def _preassigned_root(root_agent_id: Optional[str]) -> Iterator[None]:
+    token = _preassigned_root_agent_id.set(root_agent_id)
+    try:
+        yield
+    finally:
+        _preassigned_root_agent_id.reset(token)
 
 
 def _register_task_root(task_name: str, root_id: str, role: str) -> Optional[dict]:
@@ -2648,63 +2671,40 @@ async def _preflight_message_person_bridge(base_url: str) -> None:
 # deploy.md Step 13c's identity rules travel with the task's own fail-closed path, so an agent
 # that hits it needs no other document and never asks the user for credentials.
 PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
-    "Provision the non-admin production identity once. Every credential it needs is already in "
-    "back-end/.env; do not ask the user for any of them. Run (DIRECT_URL: the 6543 pooler fails "
-    "with \"Can't reach database server\"):\n"
-    "  cd back-end && set -a && . ./.env && set +a && \\\n"
-    "    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
-    "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID}\n"
-    "Guardrails: require the dedicated benchmark user's normal signed live v2 connection, consent "
-    "and approved KYC first (never Andy's or another actor's identity). A legacy cardholder is not "
-    "a v2 connected user; never create an identity automatically or bypass pending KYC; never enter a card "
-    "number. When the live customer has no saved card the script prints a one-time hosted Stripe "
-    "Checkout link: a human saves the live card there once, then re-run the command."
+    "The live production lifecycle probe runs as the owner account. One-time setup (no user "
+    "credentials beyond the owner's own AgentCard login): (1) the owner completes the normal signed "
+    "live AgentCard v2 connection with consent and approved KYC; (2) provision the dedicated live "
+    "Stripe customer and save a card through its printed hosted Checkout link:\n"
+    "  cd back-end && set -a && . ./.env && set +a && STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
+    "    BENCHMARK_ALLOW_LIVE_STRIPE=true npx tsx scripts/setup-benchmark-payment.ts --owner-billing\n"
+    "  then set BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID=<printed cus_...> on Render (and the "
+    "Rose project env). The owner's own Subscription and billing are never touched; never enter a "
+    "card number from a script."
 )
 
 
-def _production_payment_identity_gap(usage: dict) -> Optional[str]:
-    """Why the production payment identity cannot complete a purchase, or None when it can.
-
-    `resolveAndIssuePurchaseCard` 402s a non-admin with no `Subscription.stripeCustomerId`, and an
-    agent with no credit headroom stops at OUT_OF_CREDITS before it ever reaches checkout. Both are
-    provisioning gaps, not product failures, so name them before the run spends live money.
-    """
-    tier = usage.get("tier")
-    if tier is None or tier == "":
-        return "it has no Subscription row, so no Stripe billing customer — every mint would 402"
-    remaining = usage.get("remaining")
-    if not isinstance(remaining, (int, float)) or isinstance(remaining, bool) or remaining <= 0:
-        return f"it has no credit headroom (remaining={remaining!r}) — the agent stops at OUT_OF_CREDITS"
-    if usage.get("stripeLivemode") is not True:
-        return f"Stripe billing mode must be live (stripeLivemode={usage.get('stripeLivemode')!r})"
-    return None
-
-
 async def _preflight_production_payment_identity(base_url: str) -> None:
-    """Fail fast when the production payment identity was never provisioned.
+    """Fail fast before any live mint when the owner lifecycle probe is not ready.
 
-    Without this the deploy gate mints a LIVE AgentCard, then dies minutes later on an opaque 402.
-    Admission requires an authoritative live billing mode before any allocation or fixture write.
+    Requires the backend's dedicated live billing customer for the probe and the owner's scoped
+    live v2 AgentCard connection with approved KYC and a live company-funded wallet.
     """
     user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get(f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers)
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Could not verify production payment identity {user_id} "
-            f"({response.status_code}): {response.text[:200]}"
+        billing = await client.get(f"{base_url}/api/test-payment/lifecycle/owner-billing", headers=headers)
+        status = await client.get(
+            f"{base_url}/api/agentcard/status",
+            headers={**headers, "x-user-id": user_id},
         )
-    gap = _production_payment_identity_gap(response.json())
-    if gap is None:
-        async with httpx.AsyncClient(timeout=15) as client:
-            status = await client.get(
-                f"{base_url}/api/agentcard/status",
-                headers={**headers, "x-user-id": user_id},
-            )
-        if status.status_code != 200:
-            raise RuntimeError(f"Could not verify live v2 AgentCard readiness ({status.status_code})")
+    gaps = []
+    if billing.status_code != 200:
+        gaps.append(f"owner billing readiness unavailable ({billing.status_code}): {billing.text[:200]}")
+    elif billing.json().get("configured") is not True:
+        gaps.append("BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID is not configured on the backend")
+    if status.status_code != 200:
+        gaps.append(f"could not verify live v2 AgentCard readiness ({status.status_code})")
+    else:
         readiness = status.json()
         if not (
             readiness.get("apiVersion") == 2
@@ -2713,19 +2713,33 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
             and readiness.get("livemode") is True
             and readiness.get("fundsSource") == "company_flow"
         ):
-            raise RuntimeError(
-                "Production payment identity needs a scoped live v2 AgentCard connection, "
-                "approved KYC and a live company-funded wallet before running paid probes. "
-                "Complete the normal signed live connection for the dedicated benchmark user; "
-                "a legacy cardholder or sandbox fixture cannot satisfy this requirement."
+            gaps.append(
+                "the owner needs a scoped live v2 AgentCard connection, approved KYC and a live "
+                "company-funded wallet"
             )
+    if not gaps:
         return
     message = (
-        f"Production payment identity {user_id} is not provisioned: {gap}.\n"
+        f"Production payment lifecycle probe for {user_id} is not ready: {'; '.join(gaps)}.\n"
         f"{PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
     )
     print(f"\n    ⛔ {message}")
     raise RuntimeError(message)
+
+
+async def purge_owner_lifecycle_records(base_url: str, agent_id: str) -> None:
+    """Remove the owner's settled probe purchase records after the probe passed (best effort)."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/purge",
+            headers=headers,
+            json={"agentId": agent_id},
+        )
+    if resp.status_code != 200:
+        print(f"    ⚠ Owner lifecycle probe records NOT purged ({resp.status_code}): {resp.text[:300]}")
+        return
+    print(f"    🧹 Purged {resp.json().get('purged')} settled probe purchase record(s) from the owner account")
 
 
 async def _preflight_close_purchase_reuse_gate(base_url: str) -> None:
@@ -2874,10 +2888,46 @@ def _doordash_food_plan_frozen_fixture() -> dict | None:
 DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER = "do NOT try to login."
 
 
+class DoorDashFoodPlanManifestUnavailable(RuntimeError):
+    """A task pins the food-plan manifest but the frozen fixture has no checkout table."""
+
+
+def _uses_doordash_food_plan_manifest(task: BenchmarkTask) -> bool:
+    """True when the catalog pins the frozen DoorDash food-plan manifest fixture."""
+    pinned = getattr(task, "pinned_facts", None)
+    pinned = pinned if isinstance(pinned, dict) else {}
+    return pinned.get("manifest_source") == DOORDASH_FOOD_PLAN_MANIFEST_SOURCE
+
+
+def _prepare_doordash_food_plan_fixture(task: BenchmarkTask, base_url: str) -> None:
+    """Apply the frozen food-plan manifest fixture before any task that pins it."""
+    if not _uses_doordash_food_plan_manifest(task):
+        return
+    if not _is_local_base_url(base_url):
+        raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+    doordash_manifest = _run_doordash_food_plan_fixture("apply")
+    prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
+    print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
+
+
 def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
-    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+    """Resolve the goal for tasks pinning the food-plan manifest.
+
+    The grocery-order task runs the prod-derived execute prompt. Siblings keep
+    their own catalog contract (e.g. cart-reauth: guest cart, stop at auth) and
+    receive the pinned checkout manifest table those prompts refer to.
+    """
+    if not _uses_doordash_food_plan_manifest(task):
         return None
     frozen = _doordash_food_plan_frozen_fixture()
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        checkout_manifest = (frozen or {}).get("checkout_manifest") or ""
+        if not checkout_manifest:
+            raise DoorDashFoodPlanManifestUnavailable(
+                f"{task.name} pins {DOORDASH_FOOD_PLAN_MANIFEST_SOURCE} but the frozen fixture has no "
+                "checkout_manifest; re-freeze the DoorDash food-plan fixture"
+            )
+        return f"{task.prompt.rstrip()}\n\nWeekly food-plan manifest:\n{checkout_manifest}"
     if not frozen:
         return None
     prompt = frozen["execute_prompt"]
@@ -2887,17 +2937,32 @@ def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
 
 
 def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:
-    override = _doordash_food_plan_prompt_override(task)
+    try:
+        override = _doordash_food_plan_prompt_override(task)
+    except DoorDashFoodPlanManifestUnavailable:
+        # The goal already failed closed at run time; a judge process without the
+        # frozen fixture judges against the catalog prompt.
+        override = None
     return override if override else task.prompt
 
 
 def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
-    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+    if not _uses_doordash_food_plan_manifest(task):
         return ""
     frozen = _doordash_food_plan_frozen_fixture()
     if not frozen:
         return ""
     sections: list[str] = []
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        # Siblings receive only the checkout table (appended to their own prompt),
+        # never the order task's execute prompt.
+        if frozen.get("checkout_manifest"):
+            sections.append(
+                "Authoritative checkout manifest table (prod-derived; the agent received exactly this table "
+                "in its goal; every Safeway and conditional 99 Ranch line must be satisfied or "
+                "manifest-allowed omitted/substituted):\n" + frozen["checkout_manifest"]
+            )
+        return "\n\n".join(sections)
     if frozen.get("checkout_manifest"):
         sections.append(
             "Authoritative checkout manifest table (prod-derived; every Safeway and conditional "
@@ -3166,8 +3231,14 @@ async def _resolve_benchmark_project_id(base_url: str, name: str) -> str:
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
+    *,
+    agent_id: Optional[str] = None,
 ) -> str:
-    """Create a benchmark agent. Returns agent_id."""
+    """Create a benchmark agent. Returns agent_id.
+
+    `agent_id` pre-assigns the root id when harness work (the prompt-cache
+    warmup) already archived records under it before the root exists.
+    """
     # A lost create response can still have allocated a root, so custody must stop
     # proving zero allocation before the POST is issued.
     _mark_task_root_creation_attempted()
@@ -3215,7 +3286,7 @@ async def create_agent(
     # The root's first simulated boundary is often the deferred startup SMS.
     # Establish the benchmark world before creating the agent so that boundary
     # cannot win the session-creation race with its generic runtime seed.
-    expected_agent_id: str | None = None
+    expected_agent_id: str | None = agent_id or _preassigned_root_agent_id.get()
     if task.wmh_initial_state is not None:
         if world_model_mode != "simulate":
             raise ValueError(f"{task.name}: wmh_initial_state requires simulate mode")
@@ -3226,7 +3297,7 @@ async def create_agent(
         if not base or not model_name:
             raise ValueError(f"{task.name}: WMH_BASE_URL and WMH_MODEL_NAME are required to seed the world")
         validate_wmh_initial_state(task.wmh_initial_state, task.name)
-        expected_agent_id = str(uuid.uuid4())
+        expected_agent_id = expected_agent_id or str(uuid.uuid4())
         seed_state = {
             "structured": {
                 **task.wmh_initial_state["structured"],
@@ -3251,6 +3322,8 @@ async def create_agent(
             "engine": os.environ.get("WMH_ENGINE", "legacy"),
         }
         print(f"    🌍 WHM initial state seeded before agent start: {session_id[:12]}...")
+    if expected_agent_id is not None:
+        body["agent_id"] = expected_agent_id
 
     # A task may run its root agent inside one of the user's Projects: its code
     # agents then start in that project's repo checkout (code-agent-rose-repo).
@@ -3289,7 +3362,7 @@ async def create_agent(
         agent_id = data["agent_id"]
         if expected_agent_id is not None and agent_id != expected_agent_id:
             raise RuntimeError(f"{task.name}: backend returned agent_id {agent_id}, expected {expected_agent_id}")
-        if expected_agent_id is not None:
+        if expected_agent_id is not None and task.wmh_initial_state is not None:
             task._wmh_agent_admission = {"root_agent_id": agent_id, "creation_confirmed": True}
         if source_override == "SMS":
             if not _is_local_base_url(base_url):
@@ -3646,6 +3719,43 @@ def _payment_reconciliation_timeout(
     return RuntimeError(message)
 
 
+async def _ledger_bound_release_stall(
+    base_url: str, agent_id: str, task: BenchmarkTask, lifecycle: object, error: str
+) -> Optional[AgentCardReleaseStall]:
+    """After a failed final read, accept the exact stall only while the owned ledger still holds it.
+
+    The last successful lifecycle observation inside the unchanged deadline must already be the
+    exact release stall. AgentCard's org-token 401/429 storms can fail every later provider-backed
+    read, so bind that observation to a DB-only read of the owned stack's ledger (no provider call):
+    the same purchase must still be HELD/RECLAIMING with the same card, transfer, payment intent and
+    total. Runs without an owned-stack ledger, or a ledger that left the stall, stay strict.
+    """
+    if not (_agentcard_release_skip_enabled() and _agentcard_release_skip_lifecycle(task.name, lifecycle)):
+        return None
+    try:
+        snapshot = await asyncio.to_thread(cloud_batch_cleanup.exact_root_sessions, base_url, agent_id)
+        purchase, transfer = lifecycle["purchase"], lifecycle["orgTransfer"]
+        rows = [row for row in snapshot["purchase_cleanup"] if row["purchase_id"] == purchase["id"]]
+    except Exception:
+        return None
+    if not (
+        len(rows) == 1
+        and rows[0].get("status") == "HELD"
+        and rows[0].get("funding_status") == "RECLAIMING"
+        and rows[0].get("card_id") == purchase.get("cardId")
+        and rows[0].get("provider_transfer_id") == transfer.get("id")
+        and rows[0].get("stripe_payment_intent_id") == purchase.get("stripePaymentIntentId")
+        and rows[0].get("total_cents") == purchase.get("totalCents")
+    ):
+        return None
+    return AgentCardReleaseStall(
+        "Payment lifecycle did not reach the expected terminal state before timeout: "
+        f"{error}{_payment_lifecycle_settlement_state(lifecycle)}; the final provider read failed and the "
+        "owned ledger still holds this exact stall",
+        lifecycle=lifecycle,
+    )
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -3695,6 +3805,9 @@ async def _wait_for_expected_payment_lifecycle(
             return lifecycle
         if time.monotonic() >= deadline:
             if last_fetch_error is not None:
+                stall = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error)
+                if stall is not None:
+                    raise stall from last_fetch_error
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
@@ -3760,9 +3873,12 @@ async def _wait_for_expected_payment_lifecycle(
             if isinstance(fetch_error, _PaymentReconciliationDeadline) or (
                 owned_timeout is not None and owned_timeout.expired()
             ):
-                raise _payment_reconciliation_timeout(
+                timeout = _payment_reconciliation_timeout(
                     error, lifecycle, task_name=task.name, allow_release_skip=last_fetch_error is None
-                ) from fetch_error
+                )
+                if last_fetch_error is not None and not isinstance(timeout, AgentCardReleaseStall):
+                    timeout = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error) or timeout
+                raise timeout from fetch_error
             # Lifecycle reads join local DB state with several read-only provider
             # views. A single transient provider timeout must not turn a
             # successfully compensated purchase into a benchmark failure. Keep
@@ -3773,6 +3889,9 @@ async def _wait_for_expected_payment_lifecycle(
             consecutive_fetch_errors += 1
             last_fetch_error = fetch_error
             if time.monotonic() >= deadline:
+                stall = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error)
+                if stall is not None:
+                    raise stall from fetch_error
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {fetch_error}"
@@ -3788,6 +3907,9 @@ PAYMENT_CLEANUP_TIMEOUT_SECONDS = 180
 # Owned-cleanup release-stall observations run inside PAYMENT_CLEANUP_TIMEOUT_SECONDS
 # at the task reconciliation poll cadence; they never extend that deadline.
 PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS = 10
+# Owned cleanup's abandonment start is bounded by PAYMENT_CLEANUP_TIMEOUT_SECONDS alone. Its
+# shortest retry wait is 2 s, so this attempt count can never end the drain before that deadline.
+PAYMENT_CLEANUP_ABANDON_ATTEMPTS = PAYMENT_CLEANUP_TIMEOUT_SECONDS // 2 + 1
 # Matches the existing stale RECLAIMING lease in purchaseCleanup.ts. This is
 # retry eligibility within the unchanged 420-second reconciliation window.
 PAYMENT_RECLAIM_RETRY_AFTER_SECONDS = 120
@@ -3934,14 +4056,27 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
     headers = await _api_headers()
     for attempt, retry_delay in enumerate((*AGENTCARD_SETUP_RETRY_DELAYS_SECONDS, None), start=1):
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
-                headers=headers,
-                # The AgentCard integration must be reset/completed for the user the task actually runs
-                # as. Hardcoding the default benchmark user left the run user's integration untouched,
-                # so the setup fixture silently configured the wrong account.
-                json={"userId": _current_benchmark_user_id(), "action": action},
-            )
+            try:
+                resp = await client.post(
+                    f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
+                    headers=headers,
+                    # The AgentCard integration must be reset/completed for the user the task actually
+                    # runs as. Hardcoding the default benchmark user left the run user's integration
+                    # untouched, so the setup fixture silently configured the wrong account.
+                    json={"userId": _current_benchmark_user_id(), "action": action},
+                )
+            except httpx.TimeoutException as timeout_error:
+                # The backend rides out an org 429/401 storm inside one request, with its own retry
+                # budget, so one request can outlast this unchanged per-request bound. Every action is
+                # idempotent, so a timed-out attempt spends one of the same retries as a 5xx.
+                if retry_delay is None:
+                    raise
+                print(
+                    f"    ⚠ AgentCard setup attempt {attempt} timed out; retrying in {retry_delay}s "
+                    f"({type(timeout_error).__name__})"
+                )
+                await asyncio.sleep(retry_delay)
+                continue
         if resp.status_code == 200:
             return resp.json()
         failure = f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}"
@@ -3983,6 +4118,9 @@ async def ensure_payment_lifecycle_cleanup(
             )
             if lifecycle_error is None:
                 print("    🧹 Reused already-reconciled payment lifecycle")
+                # The owner production probe purges its settled records on every passing path.
+                if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+                    await purge_owner_lifecycle_records(base_url, agent_id)
                 return current_lifecycle
 
         lifecycle = await _start_payment_abandonment_with_recovery(
@@ -4008,6 +4146,8 @@ async def ensure_payment_lifecycle_cleanup(
         if lifecycle_error is not None:
             raise RuntimeError(lifecycle_error)
         print("    🧹 Confirmed payment-card transfer reclaim and Stripe refund")
+        if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+            await purge_owner_lifecycle_records(base_url, agent_id)
         return lifecycle
     except AgentCardReleaseStall:
         raise
@@ -4606,14 +4746,19 @@ def _validate_tool_count_expectations(
     return None
 
 
-async def post_message(base_url: str, agent_id: str, message: str) -> bool:
+async def post_message(
+    base_url: str, agent_id: str, message: str, metadata: Optional[dict[str, Any]] = None
+) -> bool:
     """POST /api/agents/:id/messages — send a user message (unblocks send_message_to_user waits)."""
     headers = await _api_headers()
+    body: dict[str, Any] = {"message": message, "role": "USER"}
+    if metadata:
+        body["metadata"] = metadata
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{base_url}/api/agents/{agent_id}/messages",
             headers=headers,
-            json={"message": message, "role": "USER"},
+            json=body,
         )
         return resp.status_code in (200, 201)
 
@@ -5164,7 +5309,7 @@ async def _poll_agent(
     prev_root_message_count = 0
     approvals_triggered = 0
     approvals_resolved = 0
-    replied_waiting_msgs: set = set()  # track isWaitingForUser messages we've already replied to
+    replied_waiting_msgs: set = set()  # questions (toolCallId, else row id) already auto-replied to
     last_tree_poll = 0.0  # timestamp of last tree-level poll
     last_progress_print = 0.0  # timestamp of last progress log
     last_tree_stats: dict = {}  # cached tree stats
@@ -5715,6 +5860,10 @@ async def _poll_agent(
         # Auto-reply to send_message_to_user questions (isWaitingForUser)
         # These block the workflow until a user message is posted back.
         # The flag can be at metadata.isWaitingForUser OR metadata.sendMessageToUser.isWaitingForUser
+        # One reply per question: key on the question's toolCallId (its waiting
+        # state may be persisted on more than one row) and stamp the reply with
+        # the question it answers, so replies to distinct questions are distinct
+        # rows while a double-persisted reply still trips no_duplicate_messages.
         for m in messages:
             meta = m.get("metadata", {})
             if not isinstance(meta, dict):
@@ -5723,8 +5872,9 @@ async def _poll_agent(
             is_waiting = meta.get("isWaitingForUser") or (
                 isinstance(meta.get("sendMessageToUser"), dict) and meta["sendMessageToUser"].get("isWaitingForUser")
             )
-            if is_waiting and msg_id and msg_id not in replied_waiting_msgs:
-                replied_waiting_msgs.add(msg_id)
+            question_key = meta.get("toolCallId") or msg_id
+            if is_waiting and question_key and question_key not in replied_waiting_msgs:
+                replied_waiting_msgs.add(question_key)
                 question = (m.get("text") or m.get("message") or "")[:200]
                 print(f"    💬 Agent asked a question: {question}")
                 print("    → Auto-replying to unblock workflow")
@@ -5735,6 +5885,7 @@ async def _poll_agent(
                         "Please do not ask me anymore questions. I trust your judgment, intuition, "
                         "and ability to make reasonable assumptions. Please proceed with the task. "
                         "All files have been uploaded as attachments and should be available in your context.",
+                        metadata={"benchmarkAutoReply": {"toolCallId": question_key, "questionMessageId": msg_id}},
                     )
                 except Exception as e:
                     print(f"    ⚠ Auto-reply failed: {e}")
@@ -7171,10 +7322,14 @@ async def _finalize_owned_root_payments(
                 # may be best effort, so only the next durable ledger read can
                 # complete this contract, including for non-abandonment tasks.
                 try:
+                    # A throttled org can refuse the abandon for minutes; the cleanup deadline is
+                    # the one authoritative bound, never a separate shorter attempt count.
                     await _start_payment_abandonment_with_recovery(
                         base_url,
                         agent_id,
+                        max_attempts=PAYMENT_CLEANUP_ABANDON_ATTEMPTS,
                         abandon_payment=abandon_test_payment,
+                        fetch_lifecycle=get_test_payment_lifecycle,
                     )
                 except Exception as error:
                     errors.append(f"{agent_id}: {str(error) or type(error).__name__}")
@@ -12489,6 +12644,13 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
     """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
     compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps", "judge_audits"}}
+    if isinstance(raw.get("display_artifacts"), list):
+        # Their bounded text is already a displayed_to_user evidence row.
+        compact["display_artifacts"] = [
+            {key: value for key, value in artifact.items() if key != "text"}
+            for artifact in raw["display_artifacts"]
+            if isinstance(artifact, dict)
+        ]
     tree = _judge_source_tree(data)
     compact_tree: dict[str, dict] = {}
     if tree:
@@ -12709,14 +12871,17 @@ async def _hydrate_display_artifacts(data: dict, base_url: str) -> None:
 
     async def transcribe_image(raw: bytes, mime: str) -> str:
         from helpers.llm import call_llm
+        from helpers.tracing import archive_scope
 
-        result = await call_llm(
-            messages=display_check.transcription_messages(raw, mime),
-            model=DISPLAY_TRANSCRIBE_MODEL,
-            temperature=0.0,
-            max_tokens=1200,
-            call_site="benchmark_display_transcribe",
-        )
+        # The transcription is part of grading this run: archive it in its root bundle.
+        with archive_scope(root_id or None):
+            result = await call_llm(
+                messages=display_check.transcription_messages(raw, mime),
+                model=DISPLAY_TRANSCRIBE_MODEL,
+                temperature=0.0,
+                max_tokens=1200,
+                call_site="benchmark_display_transcribe",
+            )
         content = result.get("content") if isinstance(result, dict) else None
         return content if isinstance(content, str) else str(content or "")
 
@@ -13087,9 +13252,7 @@ async def _call_declared_llm_judge(
 
     criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
     task_requirement = (
-        _doordash_food_plan_task_requirement_for_judge(task)
-        if task.name == DOORDASH_FOOD_PLAN_TASK_NAME
-        else task.prompt
+        _doordash_food_plan_task_requirement_for_judge(task) if _uses_doordash_food_plan_manifest(task) else task.prompt
     )
     manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
     manifest_block = (
@@ -13115,7 +13278,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     if evidence is None:
         evidence = _declared_evaluator_evidence(data)
-    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+    if _uses_doordash_food_plan_manifest(task):
         cart_evidence = _doordash_food_plan_supplemental_cart_evidence(data)
         if cart_evidence:
             evidence.append(
@@ -15223,9 +15386,13 @@ async def _run_declared_evaluators(
     if needs_tree_evidence and base_url:
         await _hydrate_semantic_evaluator_tree(data, base_url)
 
-    if base_url and any(
-        _task_declares_static_check(task, check_type)
-        for check_type in ("display_media_shown", "display_artifact_figures")
+    # Displayed items are part of the answer the user saw, so semantic judges get them too.
+    if base_url and (
+        needs_tree_evidence
+        or any(
+            _task_declares_static_check(task, check_type)
+            for check_type in ("display_media_shown", "display_artifact_figures")
+        )
     ):
         await _hydrate_display_artifacts(data, base_url)
 
@@ -15462,7 +15629,12 @@ def _run_user_id_override_for_task(task: BenchmarkTask, base_url: str) -> Option
     return run_user_id_override
 
 
-async def _warm_cache_gated_root(base_url: str, task: BenchmarkTask) -> Optional[dict]:
+def _cache_warmup_root_id(task: BenchmarkTask) -> Optional[str]:
+    """Pre-assigned root id for a cache-gated task, so its warmup call is archived in that root's bundle."""
+    return str(uuid.uuid4()) if PER_TASK_CACHE_HIT_RATCHET.get(task.name, 0) > 0 else None
+
+
+async def _warm_cache_gated_root(base_url: str, task: BenchmarkTask, root_agent_id: Optional[str] = None) -> Optional[dict]:
     """Prime the root's static prompt prefix for a cache-gated task (benchmarks.cache_warmup).
 
     Recorded on the result only; the measured prompt-cache share never includes it.
@@ -15470,18 +15642,20 @@ async def _warm_cache_gated_root(base_url: str, task: BenchmarkTask) -> Optional
     if PER_TASK_CACHE_HIT_RATCHET.get(task.name, 0) <= 0:
         return None
     from benchmarks.cache_warmup import warm_root_static_prefix
+    from helpers.tracing import archive_scope
 
     user_id = _current_benchmark_user_id()
     model_override = (os.environ.get("BENCHMARK_MODEL") or "").strip()
     model = model_override if model_override and task.demo_cache != "on" else task.model
-    warmup = await warm_root_static_prefix(
-        base_url=base_url,
-        headers={"X-API-Key": API_KEY or "", "X-User-Id": user_id},
-        user_id=user_id,
-        goal=_benchmark_goal_for_task(task, base_url),
-        start_phase=task.start_phase,
-        model=model or None,
-    )
+    with archive_scope(root_agent_id):
+        warmup = await warm_root_static_prefix(
+            base_url=base_url,
+            headers={"X-API-Key": API_KEY or "", "X-User-Id": user_id},
+            user_id=user_id,
+            goal=_benchmark_goal_for_task(task, base_url),
+            start_phase=task.start_phase,
+            model=model or None,
+        )
     print(f"    🔥 prompt-cache warmup for {task.name}: {json.dumps(warmup, sort_keys=True)[:400]}")
     return warmup
 
@@ -15611,12 +15785,7 @@ async def _run_single_task_as_run_user(
             f"{google_workspace_manifest.get('event_count', '?')} events, "
             f"{google_workspace_manifest.get('file_count', '?')} files"
         )
-    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
-        if not _is_local_base_url(base_url):
-            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
-        doordash_manifest = _run_doordash_food_plan_fixture("apply")
-        prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
-        print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
+    _prepare_doordash_food_plan_fixture(task, base_url)
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
@@ -15842,8 +16011,11 @@ async def _run_single_task_as_run_user(
         if custody is not None:
             custody["graded_creation"] = "unknown"
         _mark_task_root_creation_attempted()
-        prompt_cache_warmup = await _warm_cache_gated_root(base_url, task)
-        agent_id = await create_agent(base_url, task)
+        warmup_root_id = _cache_warmup_root_id(task)
+        prompt_cache_warmup = await _warm_cache_gated_root(base_url, task, warmup_root_id)
+        # Cache-gated tasks create the root id their warmup archived under.
+        with _preassigned_root(warmup_root_id):
+            agent_id = await create_agent(base_url, task)
         _register_task_root(task.name, agent_id, "graded")
         execution_started_at = asyncio.get_running_loop().time()
         kill_fixture = None
@@ -15926,7 +16098,7 @@ async def _run_single_task_as_run_user(
                 start_fixture_ref, result = await asyncio.gather(archive, observation)
             finally:
                 for pending in (archive, observation):
-                    if not pending.done():
+                    if not pending.done() and not pending.cancelling():
                         pending.cancel()
                 await asyncio.gather(archive, observation, return_exceptions=True)
             if start_fixture_ref:

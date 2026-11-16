@@ -12,6 +12,15 @@ export const PHONE_CRITICAL_REASONS = [
   'manual_verification',
 ] as const;
 export type PhoneCriticalReason = (typeof PHONE_CRITICAL_REASONS)[number];
+/** Typed one-tap owner actions; completion carries the intent, never user text. */
+export const NATIVE_PHONE_RESEND_CODE_RESPONSE = '__AUTH_ASSISTANCE_RESEND_CODE__';
+export const NATIVE_PHONE_COMPLETED_RESPONSE = '__AUTH_ASSISTANCE_COMPLETED__';
+export type NativePhoneUserAction = 'resend_code';
+export function nativePhoneResponse(action: NativePhoneUserAction | undefined) {
+  return action === 'resend_code'
+    ? NATIVE_PHONE_RESEND_CODE_RESPONSE
+    : NATIVE_PHONE_COMPLETED_RESPONSE;
+}
 export interface NativePhoneInput {
   agentId: string;
   authRealm: 'iphone';

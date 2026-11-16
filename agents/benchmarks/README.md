@@ -321,6 +321,45 @@ destroyed or running resources and existing captures. A failure leaves
 rerun with `--restore-original-config` and the same capture directory. Archive
 building and recovery still apply their own exact checks.
 
+**Default since 2026-11-14: unsealed guests are archived to R2, then destroyed.**
+When a disposable fleet's only teardown problem is unsealed runtime evidence (the
+guest acknowledged cleanup and owned joins succeeded), `cleanup()` no longer keeps
+the stopped Machine and its ~40 GB volume. `scripts/cloudbench-evidence-archive.py
+capture-destroy --capture-only` boots each primary inert (same functions as the
+helper above), tars the `original_files` contract plus every other log on the
+volume, and writes `evidence.tar.gz`, `inventory.json` (per-file sha256),
+`machine-config.redacted.json` and `manifest.json` to the private trace-archive
+bucket (`R2_BUCKET_TRACE_ARCHIVE`) under `smoke-evidence/<machine>/<utc-ts>/`.
+It never overwrites or deletes R2 objects and reads every object back before it
+restores the stopped original config. Only then does the controller clear
+`runtime-evidence-unconfirmed` and let `reap_registry_clones` destroy the guest.
+Local receipts are in `<run>/_batch/evidence-archive/<machine>/<ts>/`. If any
+capture fails, the whole owner is retained as before and the controller prints
+`❌❌ evidence archive FAILED: unsealed guests stay RETAINED`. Capture is bounded by
+`--capture-seconds` (fleet: 900), so the restore keeps its own budget. The exact
+original config is saved first as `original-config.private.json` in the receipt
+directory. If a guest is ever left in the inert config (for example after SIGKILL),
+`scripts/cloudbench-evidence-archive.py restore --app <app> --machine-id <id>
+--original-config <that file> --env-file agents/.env` stops it and restores the
+original. Worker clones and
+the warm donors (683e47df5094d8, any `*warm*` name, `WARM_ID`/`SHARED_WARM_ID`)
+are never archived or destroyed by this path.
+
+For an already-stale stopped guest that an owner confirms dead, the same helper
+without `--capture-only` archives and then destroys the Machine and its volume
+itself, one Machine per call (exit 0 archived+destroyed, 2 capture failed and
+retained, 3 refused untouched, 4 archived but destroy unproven):
+
+```bash
+cd agents && source venv/bin/activate && cd ..
+python3 scripts/cloudbench-evidence-archive.py capture-destroy --app navi-whisper-lux-bench \
+  --machine-id <machine> --receipt-dir <private-dir> --env-file agents/.env
+```
+
+Then the owner finishes `scripts/run-bench --recover-stale-owner <token>
+--accept-lost-runtime-evidence`. Its lost-evidence receipt records that the sealed
+runtime bundle never existed; the original files are in the R2 archive.
+
 For generic failed-owner recovery, `_forensic/archive-verified.json` preserves
 complete originals with `native_release_verified=false` and zero proof credit.
 Continue `scripts/run-bench --recover-stale-owner <exact-owner-token>` through
@@ -507,7 +546,12 @@ cap is `floor(limit × 0.8 / per-bench peak)`, minimum across enforced providers
 (`python3 scripts/cloudbench-provider-capacity.py cap`, `cap --json` for the
 table). `run-original600-controller.py` (including `--check`), campaigns (whole
 sharded group), fleets and `--local` refuse a wider global simultaneous width
-with exit 78 before any credential or provider call. Do not retry, split or
+with exit 78 before any credential or provider call. A `demand_profiles` entry
+records a lighter measured peak for one catalog task group; campaigns and
+fleets pass their tasks (`--task`), and the profile applies only when every
+task is in that group (polar-bench: Parallel 3.25 requests/min per bench, so a
+Polar-only selection caps at 135, where Kernel binds). Mixed, unknown or
+uncatalogued selections keep the global peaks (70). Do not retry, split or
 work around a refusal: ask the user to raise the provider limits (then record
 them in the registry in a reviewed change) or rerun at or below the cap.
 Task-free `--infra-probe` fleets and validated `--demo-cache` replays are exempt.

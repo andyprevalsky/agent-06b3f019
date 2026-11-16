@@ -552,6 +552,29 @@ export async function markGptUserTokenRateLimited(
  * with the token a sandbox held when Codex reported it unusable
  * (codeLoginRejection.ts). A malformed `exp` reads as expired, as when serving.
  */
+/**
+ * The live access token (and ChatGPT account id) of one CONNECTED gpt_code row,
+ * for a read-only usage lookup (computeUsageRefresh). No side effects: it does
+ * not stamp lastUsedAt, lease, or touch the row's state; an undecryptable,
+ * malformed or expired token is null.
+ */
+export async function readCodexUsageCredential(
+  integrationId: string
+): Promise<{ accessToken: string; accountId?: string } | null> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return null;
+  const integration = await prisma.integration.findFirst({
+    where: { id: integrationId, name: 'gpt_code', status: 'CONNECTED' },
+    select: { id: true, config: true },
+  });
+  const decrypted = integration ? decryptIntegrationCredentials(integration, decryptionKey) : null;
+  const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
+  if (!parsed) return null;
+  const expiresAt = codexAccessTokenExpiry(parsed.accessToken);
+  if (expiresAt === 'malformed' || (expiresAt !== null && expiresAt <= Date.now())) return null;
+  return { accessToken: parsed.accessToken, accountId: parsed.accountId };
+}
+
 export async function storedCodexLogin(
   integrationId: string
 ): Promise<StoredLogin | null | undefined> {

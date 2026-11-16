@@ -1,0 +1,709 @@
+{
+ "app": "navi-whisper-lux-bench",
+ "authority": "Andy 2026-11-14: 'can we just save the logs somehow and then destroy as the default so we stop getting stale machiens'",
+ "date": "2026-11-14",
+ "helper": "scripts/cloudbench-evidence-archive.py capture-destroy",
+ "machines": [
+  {
+   "destroyed_at": "2026-11-14T18:22:26.881433+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "f675bf41da9b4aeb80191570d5d26bc9",
+   "kind": "archived-then-destroyed",
+   "machine_id": "84ee73da204298",
+   "objects": {
+    "evidence.tar.gz": "fd11302e3a10e634e933122a6fcf797e93a0a639e15ba12ac7cd712d9a6344af",
+    "inventory.json": "326ab8d7f569773e588041b371ec7ad4993fb114239727fb6e84f07824fae44b",
+    "machine-config.redacted.json": "777451688d7c12bf72fe612f6e1b23933b06cd4979b20dd74d4de2d192d42863",
+    "manifest.json": "ed82dfe3253d3d3279a11f289beb106bc3ed1f67c7dabb0cfa71ba48a99be024"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/84ee73da204298/20261114T182122Z",
+   "requester": "#2016",
+   "run_token": "f675bf41da9b4aeb80191570d5d26bc9-0",
+   "volume_id": "vol_4ql20xxg1j7m1gwr",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:23:34.759197+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "283db4d3848a4d8591aa1fa95460d1a5",
+   "kind": "archived-then-destroyed",
+   "machine_id": "891e165c315418",
+   "objects": {
+    "evidence.tar.gz": "adfe94b36e11992cbc28059ca2ce1780ca5e04cdc80fd25257e3bd93a280b2e1",
+    "inventory.json": "7c652f5aa34eafb7db2e018f539af02dcd0c04bafabcec96238557993525a453",
+    "machine-config.redacted.json": "1f6cbf8afe4760bbbe4e51ec2d0e5b87ba5b2d75e93bb21829d001c1f6ca874f",
+    "manifest.json": "8f77a664bc1e545676aee2b7fd31c437c90181253e73acc82dae120b60de77b4"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/891e165c315418/20261114T182230Z",
+   "requester": "#2016",
+   "run_token": "283db4d3848a4d8591aa1fa95460d1a5-0",
+   "volume_id": "vol_v8eg6337g7pd8k7v",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:24:43.571732+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "6dd566e4bae4424c99bd97984aa73ac3",
+   "kind": "archived-then-destroyed",
+   "machine_id": "811d3e6ad32768",
+   "objects": {
+    "evidence.tar.gz": "0a2014a64d6441bc2edd11090d1c0e8fb6ec26a4a6d2b4321b62c81927bd187e",
+    "inventory.json": "9d3f5d5a69a29565c0b4efe61325d6084d958eb577b5fa09dc2a5152e58efe0b",
+    "machine-config.redacted.json": "ea85f642f37fbe101477e931e7b4e33f1ee210c5e79d2bdb6e969cf77419ea3c",
+    "manifest.json": "d2867ab97dab3788177f7a76ba8b15f6d910bf87b310501d64b499a22bca4d06"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/811d3e6ad32768/20261114T182338Z",
+   "requester": "#2016",
+   "run_token": "6dd566e4bae4424c99bd97984aa73ac3-0",
+   "volume_id": "vol_vz86wnn5o32znxxv",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:26:13.501907+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "8d9d79a038c541db873e37ec619ad922",
+   "kind": "archived-then-destroyed",
+   "machine_id": "8469e7b2d52d28",
+   "objects": {
+    "evidence.tar.gz": "1576e16ff284ad00dc7ed4822be95ceb78a8a24f633b535657a04df3bc912163",
+    "inventory.json": "2ff9054364397ed57fcdafb10dc374fc07d73942186722864d341494551ead27",
+    "machine-config.redacted.json": "252030f2a4f3d4f505b195cf8dabaf0386bdc20c7ccb2a6b31f9e6919e3b37c3",
+    "manifest.json": "2bb39f7a2e34ef72deb36575b4acfdfa9b1043af733df02024c3d05f371da609"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8469e7b2d52d28/20261114T182447Z",
+   "requester": "#2016",
+   "run_token": "8d9d79a038c541db873e37ec619ad922-0",
+   "volume_id": "vol_v3g3jqql3mkkqjx4",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:27:19.338821+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "7bbcc37881154ada947986dec8c0b48e",
+   "kind": "archived-then-destroyed",
+   "machine_id": "8e4033f743e008",
+   "objects": {
+    "evidence.tar.gz": "68f622ab330a9e7d119f89bfecbed7fd2661a2c6a414c794a3fd34d7931dd333",
+    "inventory.json": "7d5897263b9327fb654bb9f00afa65544f25dce490cf42980b1c75c092c6e291",
+    "machine-config.redacted.json": "072fb4cef7d9c1b3dfab6d9261c3c7c2157a14170b1dc518061c656d1944ef5c",
+    "manifest.json": "bb2467a5e0e73311d58a8a9102a216d2d452e6767a9ece7f25d28b6328602860"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8e4033f743e008/20261114T182617Z",
+   "requester": "#2016",
+   "run_token": "7bbcc37881154ada947986dec8c0b48e-0",
+   "volume_id": "vol_vp20ykkg05e9o3k4",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:28:25.841902+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "cfe13a0e477a4e41b8a366701cf5ec3d",
+   "kind": "archived-then-destroyed",
+   "machine_id": "83d1373b499d18",
+   "objects": {
+    "evidence.tar.gz": "532b574f0515d63510ed75a38d60731c09080a19d72d5c24b7aec4740f528efc",
+    "inventory.json": "ea4ba32501a44d848b6f6999a541967fa177a2e0e9b79b974dc8890c7444e927",
+    "machine-config.redacted.json": "ec2f96e95f93ba464130a3ba25521c419e0642c592bcd68d0ca40ca33461bb70",
+    "manifest.json": "104b81e4e7beca6ea059c9ff11c338d1c4203af58ff88bee3733c42380db6cbc"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/83d1373b499d18/20261114T182723Z",
+   "requester": "#2005",
+   "run_token": "cfe13a0e477a4e41b8a366701cf5ec3d-0",
+   "volume_id": "vol_vgnw8k820xqm19p4",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:29:48.636357+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "957e0cf536414d8083847a4c18beba98",
+   "kind": "archived-then-destroyed",
+   "machine_id": "82d1e0dfd644d8",
+   "objects": {
+    "evidence.tar.gz": "f56f40afd81f9d799f77f49452d29b36427f99224310f8b8fa86cadc009e532b",
+    "inventory.json": "75ec750ce1955941653b28bc92ad460ead684cbebae772c2591a352ace08dc33",
+    "machine-config.redacted.json": "1e131d9e8594f41dc58a1d341e83de4778ca3bf6abadf109b56073aed93b2fef",
+    "manifest.json": "347599b0ac80f131caf5a4159154ed3ef230060824b788c2b9472fd076fa94d1"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/82d1e0dfd644d8/20261114T182829Z",
+   "requester": "#2005",
+   "run_token": "957e0cf536414d8083847a4c18beba98-0",
+   "volume_id": "vol_vwn5gzg8l2yk7ymv",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:31:00.453796+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "112dcd04003943b1a6e0cff6402dda05",
+   "kind": "archived-then-destroyed",
+   "machine_id": "8655652c6907e8",
+   "objects": {
+    "evidence.tar.gz": "64421e4ad9e5de29028037eb0d0caf0271b862e792cc5efb767c669faabda5cf",
+    "inventory.json": "def5dc6f0c8babf9fcdcdc84bdc1996dad9008982c521b8ee65019a6cbf7b013",
+    "machine-config.redacted.json": "8cf0fbe5bb4da891f1be0a784ed5951116f3478dad85443cd126b46b9745f503",
+    "manifest.json": "9121fc6fe3178edab5bbc583148b502e5f0ab7a4fc2d2f5dc3de9598cf457050"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8655652c6907e8/20261114T182952Z",
+   "requester": "#2005",
+   "run_token": "112dcd04003943b1a6e0cff6402dda05-0",
+   "volume_id": "vol_vgnw8k82918718j4",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:32:04.829288+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "5cd32a3557244a7c8343eed5c116c684",
+   "kind": "archived-then-destroyed",
+   "machine_id": "879631a0203358",
+   "objects": {
+    "evidence.tar.gz": "ae795ffb96aa51355f05ad465ece14bb1b9add342c65ef83f946d7ce14e278ab",
+    "inventory.json": "cdc3d2d2918a08dc9c73495666b70630b7afd8a8e984c727491e4bddd0bb1169",
+    "machine-config.redacted.json": "0b8086206ba627d08b27a377e70213bd33ae8c66f036aaf8638e486a2e75a4fa",
+    "manifest.json": "5e94bbf7995651140222ec2e3f32d39fff0a265ad76311dfb9e945e5e0aa781c"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/879631a0203358/20261114T183104Z",
+   "requester": "#2005",
+   "run_token": "5cd32a3557244a7c8343eed5c116c684-0",
+   "volume_id": "vol_r68xmqm02enekmd4",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:33:12.176348+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "bf8168fe94ca4535a90966880c808d74",
+   "kind": "archived-then-destroyed",
+   "machine_id": "83dd551f741508",
+   "objects": {
+    "evidence.tar.gz": "5c1b913fc3e9696d8887e37433a980070d2e20ff76ee9f83aaa83929f77a278d",
+    "inventory.json": "15cb2c8f675c178b025af78084db3c81c8dc7a93518939492214ccbd3fdce7a0",
+    "machine-config.redacted.json": "9ccbe93175459e02ff0b989f34eccc51de38f04314e9bdfcc44791b9ba594505",
+    "manifest.json": "be6ae7c0770883148b2ff72a8d42672896c1016105e7d1aa9d95d36e66a7d7b6"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/83dd551f741508/20261114T183208Z",
+   "requester": "#2005",
+   "run_token": "bf8168fe94ca4535a90966880c808d74-0",
+   "volume_id": "vol_re160w03g5y5po54",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:34:32.391940+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "d4b4288095664b88b55c1b0cacf01c10",
+   "kind": "archived-then-destroyed",
+   "machine_id": "8744150b3d5668",
+   "objects": {
+    "evidence.tar.gz": "29ea449e7e822d0bbc01aa8ee48c1ca772ac838229d44ae79e6c52cba8c781c8",
+    "inventory.json": "1a474b27b78fc71883b6fe5edafba7159aaa002ee2e396639da290f41b3bde3a",
+    "machine-config.redacted.json": "68cfc02c1dc1e23837fa8d0626d566dd3c7a82c0a362b9178f66b4b17babaacb",
+    "manifest.json": "5769a7c8b4e7cc24575fbe13286a89a273e70ff02db673b41874533ebf90b2ed"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8744150b3d5668/20261114T183315Z",
+   "requester": "#2005",
+   "run_token": "d4b4288095664b88b55c1b0cacf01c10-0",
+   "volume_id": "vol_rnzqkgk7ng969ekr",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:35:43.387442+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "21f02f4dac9b4eaeb80799825a1583b6",
+   "kind": "archived-then-destroyed",
+   "machine_id": "8d99dd9a137408",
+   "objects": {
+    "evidence.tar.gz": "e761eebc8d7af3254a8d0331e428af2f16ee33b9d39d159d33efc274529ad451",
+    "inventory.json": "a3cc920ccb839e7a30ccb129f9740f4fbbb6a4e129f174721f805465c1613980",
+    "machine-config.redacted.json": "eec57d972aea01ad1586fb80788609457bb549599a0e5e3fd368b7c25cbfff2d",
+    "manifest.json": "7ec4db1fc295cd8b8b8e16a6ccc2b239578304edf9d7fc7ec28cb790d6c729cb"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8d99dd9a137408/20261114T183436Z",
+   "requester": "#2005",
+   "run_token": "21f02f4dac9b4eaeb80799825a1583b6-0",
+   "volume_id": "vol_vde12n25x75q2834",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:36:48.965476+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "773651040050469ebfe30ee8f9cce74b",
+   "kind": "archived-then-destroyed",
+   "machine_id": "84ede7da994268",
+   "objects": {
+    "evidence.tar.gz": "2c32364672a62a7dca57fe855b23750f53abb8555e93e132161299fe07491e72",
+    "inventory.json": "80c29eb349f52859b4372c9a3cdcb6e905abde52b64575727c3a3f3156f7ad1f",
+    "machine-config.redacted.json": "8eb6e5b1970b9aba3da905a70bff8eb8f12b0961f61ea41e1e7d4b3addda2367",
+    "manifest.json": "3d4c732041d67540fcbdcbcf1e2d99905990d3ecf028db72edddb5c436e536cc"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/84ede7da994268/20261114T183546Z",
+   "requester": "#2005",
+   "run_token": "773651040050469ebfe30ee8f9cce74b-0",
+   "volume_id": "vol_458dmnn8egdken84",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:38:09.240149+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "19a0bac15ca24e9a983a1766b15aa136",
+   "kind": "archived-then-destroyed",
+   "machine_id": "8911334f6e3698",
+   "objects": {
+    "evidence.tar.gz": "a7746128e717b90c4aa230e74925232f5a6e2ad74696ed1da8012501d7782e19",
+    "inventory.json": "2b9e2cfcab59d031f07e64c8608140cc4c63e8a53a3ed42758ca0107efb1ec67",
+    "machine-config.redacted.json": "6808e7725cccc3d4a38586235c7795f1aa3e9a97a03f45e547999c89f694c35b",
+    "manifest.json": "677eed637aff6873b6c60540540b0a3980aff69b1d0d5c69a58ae25f1e3f4832"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8911334f6e3698/20261114T183652Z",
+   "requester": "PR1981",
+   "run_token": "19a0bac15ca24e9a983a1766b15aa136-0",
+   "volume_id": "vol_r68xm1dnodmq33n4",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:39:13.869441+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "2e3091d23bbd4132a68b03ea289c69b6",
+   "kind": "archived-then-destroyed",
+   "machine_id": "287e540f724678",
+   "objects": {
+    "evidence.tar.gz": "4c6965c69a4f5257d4263047eb7f55fafaf60c47e53381c5317e230eee8584d0",
+    "inventory.json": "c2c9886ab3aee6c95087ca921b8fd9f6ac85c0464020f9b00d783f15089131ba",
+    "machine-config.redacted.json": "b68d880f6951788872deff8aac5cc4051a46ac7cc99333ff7138be17c2b87d0c",
+    "manifest.json": "c9b294713fcc72156ec00f6d67126686925439289c4bb66472d21edd44d31e8d"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/287e540f724678/20261114T183813Z",
+   "requester": "PR1981",
+   "run_token": "2e3091d23bbd4132a68b03ea289c69b6-0",
+   "volume_id": "vol_r1j0m85yqm02xkwr",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:40:22.201800+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "2e6cc485f0a64123aecb177d14331aac",
+   "kind": "archived-then-destroyed",
+   "machine_id": "845d23f26242e8",
+   "objects": {
+    "evidence.tar.gz": "3a10d60f87127e80ac0fff41496f5edde890eb0da4fe19cfad53ad9f90b46fab",
+    "inventory.json": "9a017d10824abca86023834e0e64dedb539253a9deba529e2243aa2ed76e9f79",
+    "machine-config.redacted.json": "f3178e51797e1f5e143a5c2e04aef4ebddccad6ceeabfc4d70d00b162b2b1826",
+    "manifest.json": "40b2e925d7a34fd98c94e807e8aede3efd8cb20d4d317d1247c07a19cbe7ba42"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/845d23f26242e8/20261114T183917Z",
+   "requester": "PR1981",
+   "run_token": "2e6cc485f0a64123aecb177d14331aac-0",
+   "volume_id": "vol_491e6wdqz9k30p6r",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:41:28.711409+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "541e69f82e4e4f6e8ac62381ac330ade",
+   "kind": "archived-then-destroyed",
+   "machine_id": "840759c2d3d208",
+   "objects": {
+    "evidence.tar.gz": "ccc8022ba53a3a98b7ab121a765515d7f640741d8a286dc48bc458e0fef4f5e2",
+    "inventory.json": "209eeae23f39a6f42257941d6509b8dace94a23a2b574546d829dbe3d6b25e7a",
+    "machine-config.redacted.json": "0af975f3ce4e7c9b443033be89450727b3428907389ebe040fc9f10bc5e3a8a4",
+    "manifest.json": "bd305e73566f50858f8ab6403eac93ddfb0e5a6b9ab2a6b09fc4400a6ed0b8ed"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/840759c2d3d208/20261114T184025Z",
+   "requester": "PR1981",
+   "run_token": "541e69f82e4e4f6e8ac62381ac330ade-0",
+   "volume_id": "vol_4y81o0xw6z0d2k9r",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:42:40.060721+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "5878deba3fba487192eb3563a636b077",
+   "kind": "archived-then-destroyed",
+   "machine_id": "85770e2c4d6d38",
+   "objects": {
+    "evidence.tar.gz": "77a08ad057352f98bccc1a9dd201ffccf5d2c8b532d6d2c230399ff427028087",
+    "inventory.json": "3838fa27fff8a2cbed87f5057d3c1fb0268ed8cf2eb384fa941735a5b5fda52d",
+    "machine-config.redacted.json": "54a313df65ebd3f6b1c9ea93da7ec208ff57d7588d59ca772a448dd59d9f24f3",
+    "manifest.json": "b723cdc775d30eae8e1892c81546217d907afaa2719c447b0fd4afd7f1251b6b"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/85770e2c4d6d38/20261114T184132Z",
+   "requester": "PR1981",
+   "run_token": "5878deba3fba487192eb3563a636b077-0",
+   "volume_id": "vol_4y81o0x9mp521k3r",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:43:46.223973+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "8a7e0e47aa30456dada56ba499ea7b39",
+   "kind": "archived-then-destroyed",
+   "machine_id": "8655995ae4e098",
+   "objects": {
+    "evidence.tar.gz": "1106caa90e15e445e3bf0ee009af2345e036a1331063ca11db4f0f3f2b13a484",
+    "inventory.json": "1c6417865df40746ee5e1e2df44f53f0f2f7bfcd8b6a5a2de40325ec529d84ba",
+    "machine-config.redacted.json": "967d8b4cd0ad697e4fc904b5f1232b86e27980e8e5f50730ba1b486e6c2ba7b2",
+    "manifest.json": "c1d8a48837adceb2712b2f58c05b64c0e0c100e98e8e403b9a81312fa1745824"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8655995ae4e098/20261114T184243Z",
+   "requester": "PR1981",
+   "run_token": "8a7e0e47aa30456dada56ba499ea7b39-0",
+   "volume_id": "vol_4y81o0xw6kqqz9pr",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:44:49.781122+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "9762d47ff98e4be78dcb0c8c5c43b63c",
+   "kind": "archived-then-destroyed",
+   "machine_id": "83dd700a722098",
+   "objects": {
+    "evidence.tar.gz": "bac70360089369523cf9ddd55666a1d236595308af46213144b34cd6d9f4c319",
+    "inventory.json": "d2653b279cef3c745e97e4ebc8fe403ac1e9d6db9ca4e63c2c035e38bb472fea",
+    "machine-config.redacted.json": "effb382614763a2b2f9f11eb319d1c909705030e6252abec339e2f8d587b88d4",
+    "manifest.json": "8265d7e0a93ff11212755af70f03d68e7b7245011550ef587d4020999fcf57ac"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/83dd700a722098/20261114T184350Z",
+   "requester": "PR1981",
+   "run_token": "9762d47ff98e4be78dcb0c8c5c43b63c-0",
+   "volume_id": "vol_42k2m780q976n084",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:45:53.326347+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "cd18b060830e401f8b9c2c8801044813",
+   "kind": "archived-then-destroyed",
+   "machine_id": "d8d0796b773538",
+   "objects": {
+    "evidence.tar.gz": "f165262658def292040a22d1c85d0c1c7a9e8b87a7cfdc1ef3379655de365ac1",
+    "inventory.json": "8e77300af211bfaf2bd70e114fd6d58bd816a70f29ffbdd18792de1d6526d7cb",
+    "machine-config.redacted.json": "3c412a4f3be489cfe13cb2b4a23467af0a288dc35c1d324311840504d7d10c36",
+    "manifest.json": "0ce1247f33bb4d67f45d40e60faecf6fcd7ee3cc5bcbfef4e86b736031df9c7c"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/d8d0796b773538/20261114T184453Z",
+   "requester": "PR1981",
+   "run_token": "cd18b060830e401f8b9c2c8801044813-0",
+   "volume_id": "vol_rnzqk9lm028nn9pr",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:47:00.607283+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "fb1a7fbee5784472ae33a5b6fd172e4f",
+   "kind": "archived-then-destroyed",
+   "machine_id": "84ed417b543e58",
+   "objects": {
+    "evidence.tar.gz": "4edb8394e9ba5818a2054c5439a4c61a97e7e5411bc0a15909264b847310df7a",
+    "inventory.json": "9ab6acd59f96241f759e7fe27f4edf21ac5758e436c699b2e427ad2feb4ec83b",
+    "machine-config.redacted.json": "5be0fab02db69aba8de8f3206f0bcd9094608662540ca6e1de4888d76f2a9189",
+    "manifest.json": "87660cd607c1afe5a3dd04b95c825a2e91fcff18617d529714a3a59ea13e8252"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/84ed417b543e58/20261114T184557Z",
+   "requester": "PR1981",
+   "run_token": "fb1a7fbee5784472ae33a5b6fd172e4f-0",
+   "volume_id": "vol_r68xm1do7157j6p4",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:48:22.079347+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "c05bd7c44f52433faf73f25810da01d9",
+   "kind": "archived-then-destroyed",
+   "machine_id": "873973c00e9068",
+   "objects": {
+    "evidence.tar.gz": "07b670b69c740f2fa4856775e5496c1fe8e29ae9a6778cc31008e7966525f2ec",
+    "inventory.json": "6ede93428daa251409960c475b44857f640797baf837a9c095db9cf37fe392eb",
+    "machine-config.redacted.json": "00020f3ed64028b05dfa4654d113e46e401ab29d8a9bd65058dfbfa5a6ea98d7",
+    "manifest.json": "335739f68c13b42972004c022c8d0c7c2df91669fa4411b42667aaabfc6c7e56"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/873973c00e9068/20261114T184704Z",
+   "requester": "PR2023",
+   "run_token": "c05bd7c44f52433faf73f25810da01d9-0",
+   "volume_id": "vol_458d9l5lm8j6kk84",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": null,
+   "final": {
+    "temp_machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "attached_machine_id": null,
+     "state": "created"
+    }
+   },
+   "fleet_owner_token": "82b729a645174c0c9b890a59de3cd161",
+   "kind": "archived-detached-volume-left-for-owner",
+   "machine_id": "8744d64f6214e8",
+   "objects": {
+    "evidence.tar.gz": "17100cbe4175551a37a24acb11f5dd9be09d418243153de8aad547d90aef3819",
+    "inventory.json": "c7b438d4c3bfcae60f835809401b39767d1813ddc707d34a5247e30436beb3ef",
+    "machine-config.redacted.json": "500bba6eb420b56c3e810ba401f0d9e20037e11e7513bff069d86e1df4b78c8a",
+    "manifest.json": "b077c73f3b0e858574f7471571dca515a2b2694e88e3f9da9fceda357e397482"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8744d64f6214e8/20261114T185304Z",
+   "requester": "PR1635",
+   "run_token": "82b729a645174c0c9b890a59de3cd161-0",
+   "volume_id": "vol_re160xn7mzjk8d34",
+   "volume_size_gb": 40
+  },
+  {
+   "destroyed_at": "2026-11-14T18:20:42.444458+00:00",
+   "final": {
+    "machine": {
+     "http_status": 200,
+     "state": "destroyed"
+    },
+    "volume": {
+     "http_status": 200,
+     "state": "pending_destroy"
+    }
+   },
+   "fleet_owner_token": "5b75960d6c404166bd24b56c051abcb3",
+   "kind": "archived-then-destroyed",
+   "machine_id": "8576794b025ed8",
+   "objects": {
+    "evidence.tar.gz": "f0125d37ae3f703fce395e2a8af0682d72ad6500dcb63c52c870eb66ad4c8f48",
+    "inventory.json": "9d87a67891c1595cd3f24a9fea20a9f3579e59f24859dcdfca81f6e9228fb44e",
+    "machine-config.redacted.json": "541ad918e447b89a157f037827e363c3219ba46416cd782c29e908d405854314",
+    "manifest.json": "00a268d4b59ab6def1bb90ea62d402a73c74d8cb4128e53370451101fd669c40"
+   },
+   "r2_bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "r2_prefix": "smoke-evidence/8576794b025ed8/20261114T181939Z",
+   "requester": "#2009",
+   "run_token": "5b75960d6c404166bd24b56c051abcb3-0",
+   "volume_id": "vol_rkgpwxexlgx32gw4",
+   "volume_size_gb": 40
+  }
+ ],
+ "schema": "smoke-evidence-archive-receipts-v1"
+}

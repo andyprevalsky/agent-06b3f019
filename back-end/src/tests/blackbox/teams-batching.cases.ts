@@ -134,8 +134,13 @@ test('shareable account listing batches provider and grant reads independent of 
   const before = await captureReads(t, () => service.listShareableIntegrations(owner.userId));
   assert.equal(before.value.integrations.length, 3);
   assert.equal(before.counts['Integration.findMany'], 1);
-  assert.equal(before.counts['Integration.count'], 1, 'iMessage ambiguity checked once per user');
-  assert.equal(before.counts['Integration.groupBy'], 1, 'grant owners checked in one batch');
+  assert.equal(before.counts['Integration.count'] ?? 0, 0, 'no per-provider ambiguity counts');
+  assert.equal(
+    before.counts['Integration.groupBy'],
+    2,
+    'single-account ambiguity checked in one batch for the lister and one for grant owners'
+  );
+  assert.equal(before.counts['PlaidItem.findMany'] ?? 0, 0, 'no bank reads without a bank');
   assert.equal(before.counts['TeamIntegrationShare.findMany'], 1);
   assert.equal(
     before.counts['EmailIntegrationCredential.findMany'] ?? 0,

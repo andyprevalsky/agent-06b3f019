@@ -1189,7 +1189,9 @@ async def test_async_archive_burst_is_bounded_without_blocking_event_loop():
 
             if elapsed >= 0.25:
                 warnings.warn(f"archive admission blocked the event loop for {elapsed:.3f}s", RuntimeWarning, stacklevel=2)
-            assert 0 < accepted <= 64, f"expected bounded admission, accepted={accepted}"
+            # In-flight jobs stay bounded by the slot limit; overflow is spilled
+            # durably instead of dropped, so every write is accepted.
+            assert accepted == count, f"overflow must spill, not drop: accepted={accepted}"
 
             bundle = Path(tmp) / "agent-burst" / "llm"
             for _ in range(200):
@@ -1342,7 +1344,7 @@ async def test_successful_archive_write_drains_only_its_root():
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(str(Path(tmp) / "archive"))
         old_env = {key: os.environ.get(key) for key in (
-            "TRACE_ARCHIVE_ASYNC_WRITES", "BACKEND_API_URL", "BACKEND_API_KEY",
+            "TRACE_ARCHIVE_ASYNC_WRITES", "BACKEND_API_URL", "BACKEND_API_KEY", "TRACE_ARCHIVE_ALLOW_NONPROD_R2",
         )}
         old_client, old_executor = archive.httpx.Client, archive._ARCHIVE_EXECUTOR
         executor = ThreadPoolExecutor(max_workers=1)
@@ -1365,7 +1367,9 @@ async def test_successful_archive_write_drains_only_its_root():
                 return Response()
 
         try:
+            # A non-production fixture publishing to its fake R2 backend opts in explicitly.
             os.environ.update(TRACE_ARCHIVE_BACKEND="r2", TRACE_ARCHIVE_ASYNC_WRITES="0",
+                              TRACE_ARCHIVE_ALLOW_NONPROD_R2="1",
                               BACKEND_API_URL="https://archive.example.test", BACKEND_API_KEY="fixture-key")
             archive.httpx.Client = Client
             archive._BACKEND_CLIENTS.client = None
@@ -1604,8 +1608,9 @@ async def test_browser_http_cache_ops_do_not_archive():
 
 
 def test_oversized_artifact_is_dropped_with_warning():
-    """A single oversized body (e.g. browser session video) must never reach the
-    backend — giant base64-in-JSON uploads freeze the Node event loop on parse/GC."""
+    """A single oversized encrypted body (e.g. browser session video) must never
+    reach the backend — giant base64-in-JSON uploads freeze the Node event loop.
+    The limit applies after compression, so compressible traces stay archived."""
     from helpers.trace_archive import archive_bytes
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -1616,11 +1621,18 @@ def test_oversized_artifact_is_dropped_with_warning():
             result = archive_bytes(
                 root_agent_id="agent-big",
                 path="media/browser/huge.bin",
-                body=b"x" * 2048,
+                body=os.urandom(2048),
                 content_type="application/octet-stream",
             )
             assert result is None
             assert not (Path(tmp) / "agent-big").exists()
+            compressible = archive_bytes(
+                root_agent_id="agent-big",
+                path="media/browser/compressible.bin",
+                body=b"x" * 2048,
+                content_type="application/octet-stream",
+            )
+            assert compressible is not None
             ok = archive_bytes(
                 root_agent_id="agent-big",
                 path="media/browser/small.bin",

@@ -118,6 +118,7 @@ from helpers import (
     check_user_usage,
     compress_context,
     fetch_agent_config,
+    fetch_message_texts,
     fetch_agent_queue_pointer,
     fetch_agent_tools,
     fetch_child_terminal_result_activity,
@@ -136,8 +137,8 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
-from helpers.activity_dispatch import ActivityDispatchLagInterceptor
 from helpers.agent_graph import send_agent_graph_message_activity
+from helpers.archive_identity import production_worker_interceptors
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 
 # Helper activities (workflow orchestration, not exposed to LLM)
@@ -159,7 +160,7 @@ from helpers.llm import (
     set_response_schema_activity,
 )
 from helpers.messages import update_agent_tree_state
-from helpers.process_exit import run_then_exit
+from helpers.process_exit import drain_native_python_callbacks, run_then_exit
 from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
 from helpers.save_tool_usage import save_tool_usage
 from helpers.sms_activities import (
@@ -258,7 +259,6 @@ logger = structlog.get_logger()
 import ipaddress
 import math
 import socket
-import threading
 import time
 from dataclasses import dataclass
 
@@ -1351,6 +1351,90 @@ async def _decide_and_actuate(
     _prev_desired = _desired_machines
 
 
+def _own_cgroup_cpu_stat_path(
+    proc_cgroup: str = "/proc/self/cgroup", cgroup_root: str = "/sys/fs/cgroup"
+) -> str | None:
+    """This process's cgroup v2 throttling stat; None on cgroup v1 or when unreadable.
+
+    ``cpu.stat.local`` (newer kernels) counts this cgroup's throttling whether its own or an
+    ancestor's ``cpu.max`` imposed it; ``cpu.stat`` reports only this cgroup's own quota, so a
+    parent's quota would read as zero there. Prefer the local file; fall back to ``cpu.stat`` only
+    when no ancestor sets a ``cpu.max`` limit, otherwise the throttling is unknown (None).
+    """
+    try:
+        with open(proc_cgroup, encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("0::"):
+                    parts = [part for part in line[3:].strip().split("/") if part]
+                    base = os.path.join(cgroup_root, *parts)
+                    local = os.path.join(base, "cpu.stat.local")
+                    if os.path.exists(local):
+                        return local
+                    stat = os.path.join(base, "cpu.stat")
+                    if not os.path.exists(stat):
+                        return None
+                    # Without cpu.stat.local, cpu.stat counts only this cgroup's own quota, so a
+                    # limited ancestor would read as zero throttling: report unknown instead.
+                    for depth in range(len(parts)):
+                        try:
+                            with open(os.path.join(cgroup_root, *parts[:depth], "cpu.max"), encoding="ascii") as limit:
+                                if limit.read().split()[0] != "max":
+                                    return None
+                        except (OSError, IndexError):
+                            continue
+                    return stat
+    except OSError:
+        return None
+    return None
+
+
+def _cgroup_throttled_usec(path: str | None) -> int | None:
+    """Cumulative CPU-quota throttling (``throttled_usec``), or None when unknown.
+
+    The field exists only when the cgroup has a CPU bandwidth limit (cpu.max).
+    """
+    if path is None:
+        return None
+    try:
+        with open(path, encoding="ascii") as fh:
+            for line in fh:
+                key, _, value = line.partition(" ")
+                if key == "throttled_usec":
+                    return int(value)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _cpu_window_sample(proc: psutil.Process, cgroup_stat: str | None) -> tuple[float, float, float, float, int | None]:
+    """(monotonic, process CPU s, guest steal s, guest total CPU s, cgroup throttled us)."""
+    own = proc.cpu_times()
+    guest = psutil.cpu_times()
+    # psutil folds guest/guest_nice into user/nice; do not count them twice.
+    total = sum(guest) - getattr(guest, "guest", 0.0) - getattr(guest, "guest_nice", 0.0)
+    return (
+        time.monotonic(),
+        own.user + own.system,
+        float(getattr(guest, "steal", 0.0)),
+        float(total),
+        _cgroup_throttled_usec(cgroup_stat),
+    )
+
+
+def _cpu_window_fields(
+    start: tuple[float, float, float, float, int | None],
+    end: tuple[float, float, float, float, int | None],
+) -> dict[str, float | None]:
+    total = end[3] - start[3]
+    throttled = None if start[4] is None or end[4] is None else round((end[4] - start[4]) / 1_000_000, 3)
+    return {
+        "window_s": round(end[0] - start[0], 3),
+        "process_cpu_s": round(end[1] - start[1], 3),
+        "steal_pct": round(100.0 * (end[2] - start[2]) / total, 1) if total > 0 else None,
+        "cgroup_throttled_s": throttled,
+    }
+
+
 async def monitor_event_loop_lag(
     interval_s: float = 0.25,
     warn_threshold_s: float = 0.25,
@@ -1367,11 +1451,21 @@ async def monitor_event_loop_lag(
     Emits a sample every ~5s (so we always have a baseline) and a warning the
     instant lag exceeds ``warn_threshold_s``, tagged with process CPU% and the
     live asyncio task count so we can correlate the spike with load.
+
+    Each warning also attributes the stalled tick window: ``process_cpu_s`` is
+    this process's own CPU time in it, ``steal_pct`` the share of guest vCPU
+    time the hypervisor gave other tenants (a throttled Fly shared-CPU guest),
+    and ``cgroup_throttled_s`` the time a container CPU quota withheld. A lag
+    near ``process_cpu_s`` is our own synchronous work; a lag far above it with
+    high steal or throttling is a starved guest; neither points at a blocking
+    call on the loop.
     """
     loop = asyncio.get_running_loop()
     proc = psutil.Process()
     proc.cpu_percent(None)  # prime the CPU% sampler
     worker_index = int(os.getenv("WORKER_INDEX", "0"))
+    cgroup_stat = _own_cgroup_cpu_stat_path()
+    window_start = _cpu_window_sample(proc, cgroup_stat)
     max_lag = 0.0
     samples = 0
     since_emit = 0.0
@@ -1379,6 +1473,8 @@ async def monitor_event_loop_lag(
         t0 = loop.time()
         await asyncio.sleep(interval_s)
         lag = loop.time() - t0 - interval_s
+        window_end = _cpu_window_sample(proc, cgroup_stat)
+        window, window_start = (window_start, window_end), window_end
         max_lag = max(max_lag, lag)
         samples += 1
         since_emit += interval_s + max(lag, 0.0)
@@ -1395,6 +1491,7 @@ async def monitor_event_loop_lag(
                 cpu_pct=round(proc.cpu_percent(None), 1),
                 num_cpus=psutil.cpu_count(),
                 asyncio_tasks=task_count,
+                **_cpu_window_fields(*window),
             )
         # Heartbeat baseline roughly every 5s regardless of threshold.
         if since_emit >= 5.0:
@@ -1440,33 +1537,6 @@ def _start_sdk_runtime(port: int) -> tuple[Runtime, int]:
             continue
         return runtime, selected_port
     raise AssertionError("runtime port allocation exhausted without a result")
-
-
-NATIVE_CALLBACK_DRAIN_SECONDS = 2.0
-
-
-def _foreign_threads_running_python() -> bool:
-    python_started = {
-        thread.ident for thread in threading.enumerate() if not isinstance(thread, threading._DummyThread)
-    }
-    return any(ident not in python_started for ident in sys._current_frames())
-
-
-async def _drain_native_python_callbacks(timeout: float = NATIVE_CALLBACK_DRAIN_SECONDS) -> bool:
-    """Wait until no SDK-owned native thread is executing Python code.
-
-    An SDK RPC completion resolves its asyncio future from a Tokio thread via
-    call_soon_threadsafe, whose self-pipe write releases the GIL before the
-    callback returns. If the entry point returns first, that thread re-takes
-    the GIL during interpreter finalization and the process aborts (SIGABRT
-    "PyGILState_Release ... finalizing" or SIGSEGV) after a clean shutdown.
-    """
-    deadline = time.monotonic() + timeout
-    while _foreign_threads_running_python():
-        if time.monotonic() >= deadline:
-            return False
-        await asyncio.sleep(0.005)
-    return True
 
 
 async def main():
@@ -1662,6 +1732,7 @@ async def main():
         mark_finished,
         materialize_oai_demo_report_files_activity,
         fetch_agent_config,
+        fetch_message_texts,
         fetch_code_agent_resume_context,
         fetch_agent_queue_pointer,
         fetch_child_terminal_result_activity,
@@ -1704,6 +1775,7 @@ async def main():
             workflows=[AgentWorkflow, *COMPANION_WORKFLOWS],
             activities=registered_activities,
             workflow_runner=production_workflow_runner(),
+            interceptors=production_worker_interceptors(),
         )
         set_worker_status(True, phase="standby", build_id=build_id)
         logger.info(
@@ -1777,8 +1849,9 @@ async def main():
         workflow_runner=production_workflow_runner(),
         # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.
         graceful_shutdown_timeout=timedelta(seconds=shutdown_grace_seconds),
-        # Attribute a timed-out attempt whose body never ran to the worker.
-        interceptors=[ActivityDispatchLagInterceptor()],
+        # Bind each activity to its workflow's agent/root for archive records,
+        # and attribute a timed-out attempt whose body never ran to the worker.
+        interceptors=production_worker_interceptors(),
     )
 
     logger.info(
@@ -1940,7 +2013,7 @@ async def main():
             out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"
             _profiler.dump_stats(out)
             logger.warning("cProfile stats dumped", path=out)
-        if not await _drain_native_python_callbacks():
+        if not await drain_native_python_callbacks():
             logger.warning("Native SDK callback still executing Python at worker exit")
         logger.info("Worker stopped")
         if metrics_error is not None and primary_error is None:

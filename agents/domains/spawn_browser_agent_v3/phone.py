@@ -16,8 +16,13 @@ PHONE_GUIDANCE = """Cloud iPhone skill (Phone Harness 0.3.2, Rose adaptation):
 Use phone for authorized tasks where the account's dedicated cloud iPhone helps,
 including authentication, OTPs, messages, and apps. Use mode=status to inspect
 ownership/last receipt without allocating, mode=operation to ensure/reuse the
-phone, and mode=release when finished. Observe with screen.text, act once, then
-verify. iPhone coordinates are screen points; focus a field before input.text.
+phone, and mode=release when finished. Observe with screen.text, act, then verify. After a tap, launch, press, drag,
+scroll, key, Home or input.text action, put screen.text as the next call in the
+same response instead of waiting for another turn; calls run in order, stop at
+the first failure, and only reads run after a navigating action. A credentials.*,
+messages.*, setup or release call must be the only tool call in its response;
+observe its result on the next turn.
+iPhone coordinates are screen points; focus a field before input.text.
 Use only supported cloud operations; no CLI, local bridge, Android, or shell.
 In mode=operation, set operation to the wire name and args to its arguments:
 - screen.text: {"min_confidence": 0.3} returns visible text and tap centers.
@@ -79,14 +84,23 @@ Never reveal, extract, copy, or transcribe a saved password into observations,
 model messages, tool arguments, or logs. A blank password field alone does not
 prove that no saved credential exists. If no matching usable native suggestion
 is available, use credentials.fill_saved once with empty args and the actual
-observed setup context BEFORE requesting password assistance. Native AutoFill
+observed setup context BEFORE requesting password assistance. A matching
+suggestion that requires the owner's biometric or trusted-device approval is
+not unavailable: request that user-presence step (criticalReason=manual_verification)
+and never use credentials.fill_saved to route around it. Native AutoFill
 and the backend saved-password catalog are separate: an empty native suggestion
 list does not mean the backend has no saved credential. Do not skip this secure
 backend attempt merely because the current screen asks for a password. A filled receipt is only a
 private acknowledgment, not sign-in proof; observe and verify. A
 phone_credential_unavailable receipt means request the protected user step if an
 actual critical password screen blocks progress. Binding/stale errors mean
-observe again, never supply a secret or blindly retry. UNKNOWN means inspect
+observe again, never supply a secret or blindly retry. Submit an email or username
+step with input.keys enter so the password page opens with its field focused. If account
+suggestions or another overlay cover the password field (its own label or placeholder is
+not observed), never tap the suggestion rows; try input.keys escape, then a downward
+input.drag starting above the overlay rows, then input.scroll dy -300, one at a time with screen.text after each,
+and call credentials.fill_saved only once the field's own label is observed with the
+overlay gone. If all three fail, report that blocker without retrying. UNKNOWN means inspect
 status/receipts, never replay. A saved-password rejection ends autonomous password attempts for that current
 sign-in. Request the protected user step only if the current observation confirms
 that a critical password step still blocks progress. Do not try another saved-password
@@ -147,7 +161,11 @@ iCloud Contacts sync and verify explicit enabled control state; populated
 contact names or counts do not prove the iCloud Contacts setting is on.
 For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
-receiving, not merely listed. For portrait_lock, open native Settings with
+receiving, not merely listed. The verifier sees only screen.text OCR, never app
+identity or switch position, so observe screens whose text states the fact:
+iCloud targets under Settings > your name > iCloud, imessage and receive_address
+on Settings > Apps > Messages > Send & Receive with its Apple Account line, and
+gmail on the account Settings screen inside the Gmail app. For portrait_lock, open native Settings with
 apps.launch name Settings. Only the route since the latest Settings launch
 counts, and its first screen.text must show the Settings root with Search; if
 Settings resumed a subpage or hid Search, return to the root with Search

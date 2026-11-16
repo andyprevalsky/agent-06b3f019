@@ -57,8 +57,13 @@ class Fake:
     """Injected IO: records every command, gh call, HTTP request and output line."""
 
     def __init__(self, root: Path, changed: list[str], *, handler=None, http=None, gh=None, gh_exists=True,
-                 descendants=(), unknown=(), fetch_learns=False, fetch_code=0, fetch_err=''):
+                 descendants=(), unknown=(), fetch_learns=False, fetch_code=0, fetch_err='', gh_env=None, pool=None):
         self.root, self.changed, self.handler, self.http, self.gh = root, changed, handler, http, gh
+        # gh_env(args, env) sees the call's GH_TOKEN; pool(argv) answers `github_token_pool.py pick`
+        # (default: no member, so reads keep GH_TOKEN).
+        self.gh_env, self.pool = gh_env, pool
+        self.pool_calls: list[list[str]] = []
+        self.gh_tokens: list[tuple[str, str | None]] = []
         self.gh_exists = gh_exists
         # `git merge-base --is-ancestor SHA <x>`: 0 for x in descendants, 128 for x in unknown (until a fetch of
         # origin main learns it when fetch_learns), else 1.
@@ -126,7 +131,15 @@ class Fake:
             with self.lock:
                 self.factory.append((argv[3], argv[4]))
             return 0, 'FACTORY_EVENT {}', ''
+        if len(argv) > 1 and argv[1].endswith('github_token_pool.py'):
+            with self.lock:
+                self.pool_calls.append(list(argv))
+            return self.pool(argv) if self.pool else (1, '', 'github_token_pool: no member configured')
         if argv[0].endswith('gh'):
+            with self.lock:
+                self.gh_tokens.append((' '.join(argv[1:3]), env.get('GH_TOKEN')))
+            if self.gh_env:
+                return self.gh_env(argv[1:], env)
             if self.gh:
                 return self.gh(argv[1:])
             if argv[1:3] == ['pr', 'view']:
@@ -213,7 +226,7 @@ class ApplicabilityTest(unittest.TestCase):
                          {'render', 'backend-probes', 'agentcard', 'semantic'})
         self.assertEqual(applicable(['agents/tools/request_payment_card.py']),
                          {'fly', 'workflow-migration', 'agentcard', 'semantic'})
-        self.assertEqual(applicable(['scripts/run.sh']), {'agentcard', 'semantic'})
+        self.assertEqual(applicable(['scripts/run.sh']), {'semantic'})  # AgentCard runs only on AgentCard infra
         plan = dp.plan_lanes(['back-end/src/domains/purchases/x.ts', 'front-end/src/features/test-payment/a.tsx'], [],
                              NO_MAC)
         self.assertEqual(plan['agentcard'].deps, ('render', 'vercel'))
@@ -226,7 +239,7 @@ class ApplicabilityTest(unittest.TestCase):
         serving = dp.plan_lanes(['agents/benchmarks/serve_world_model.py'], [], NO_MAC)
         self.assertTrue(serving['wmh'].applicable)
         self.assertFalse(serving['wmh'].build_wmh)
-        self.assertEqual(applicable(['agents/benchmarks/wmh_build_cache.py']), {'wmh', 'agentcard', 'semantic'})
+        self.assertEqual(applicable(['agents/benchmarks/wmh_build_cache.py']), {'wmh', 'semantic'})
         for path in ('agents/requirements-world-model.txt', 'agents/vendor/world-model/x.whl',
                      'agents/benchmarks/build_experiential_world_model.py', 'scripts/setup-world-model.sh'):
             plan = dp.plan_lanes([path], classify([path]), NO_MAC)
@@ -830,6 +843,10 @@ class FlyTest(Base):
         self.assertNotIn(('stage-finish', 'cooperative-cutover'), fake.factory)
 
     def test_resume_fly_resumes_same_job_then_migration_uses_token(self) -> None:
+        # 2026-10-26 and 2026-11-15 (job b17fd597): the resumed cutover died on KeyError: 'FLY_API_TOKEN',
+        # which lives only in agents/.env.
+        (self.root / 'agents').mkdir()
+        (self.root / 'agents' / '.env').write_text('FLY_API_TOKEN="fo1_SEKRIT_fly_0005"\n')
         fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED', 'SUCCEEDED']))
         self.assertEqual(self.main(fake, '--lanes', 'fly,workflow-migration', '--resume-fly'), 1)  # semantic not selected
         lanes = self.report()['lanes']
@@ -839,6 +856,8 @@ class FlyTest(Base):
         resume_argv, resume_cwd, resume_env = fake.runs[1]
         self.assertEqual((resume_argv, resume_cwd), (dp.resume_argv(self.JOB), self.root / 'back-end'))
         self.assertEqual(resume_env['DATABASE_URL'], SECRETS['DATABASE_URL'])  # `source back-end/.env`
+        self.assertEqual(resume_env['FLY_API_TOKEN'], 'fo1_SEKRIT_fly_0005')
+        self.assertNotIn('fo1_SEKRIT_fly_0005', json.dumps(self.report()))
         _argv, cwd, env = fake.runs[3]
         self.assertEqual(cwd, self.root / 'back-end')
         self.assertEqual({k: env[k] for k in dp.migration_env(SHA, '')}, {
@@ -846,6 +865,23 @@ class FlyTest(Base):
             'TEMPORAL_WORKER_BUILD_ID': SHA, 'TEMPORAL_WORKER_DEPLOYMENT_TOKEN': '123-2'})
         self.assertIn(('stage-finish', 'cooperative-cutover'), fake.factory)
         self.assertEqual(lanes['semantic']['status'], dp.NOT_SELECTED)
+
+    def test_resume_fly_exported_fly_token_beats_agents_env(self) -> None:
+        (self.root / 'agents').mkdir()
+        (self.root / 'agents' / '.env').write_text('FLY_API_TOKEN="fo1_SEKRIT_stale_0006"\n')
+        fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED', 'SUCCEEDED']))
+        self.main(fake, '--lanes', 'fly', '--resume-fly', environ={'FLY_API_TOKEN': 'fo1_SEKRIT_exported_0007'})
+        self.assertEqual(fake.kinds()[:2], ['production', 'worker-deployment-queue.ts'])
+        self.assertEqual(fake.runs[1][2]['FLY_API_TOKEN'], 'fo1_SEKRIT_exported_0007')
+
+    def test_resume_fly_without_fly_token_fails_actionably_before_resuming(self) -> None:
+        fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED']))
+        self.assertEqual(self.main(fake, '--lanes', 'fly', '--resume-fly'), 1)
+        lanes = self.report()['lanes']
+        self.assertEqual(lanes['fly']['status'], dp.FAIL)
+        self.assertIn('FLY_API_TOKEN', lanes['fly']['reason'])
+        self.assertIn('agents/.env', lanes['fly']['reason'])
+        self.assertEqual(fake.kinds(), ['production'])
 
     def test_existing_process_mode_is_refused(self) -> None:
         fake = Fake(self.root, ['agents/tools/c.py'])
@@ -1266,6 +1302,24 @@ class OtherLanesTest(Base):
         fake = Fake(self.root, [])
         self.assertEqual(dp.lane_semantic(self.ctx(fake)), (True, 'chat-lifecycle-ratchet run 55 success', 0))
         self.assertEqual(fake.kinds(), ['production-semantic'])
+        exact = dp.lane_semantic(self.ctx(Fake(self.root, [])))[1]
+        self.assertNotIsInstance(exact, dp.Descendant)  # the exact binding stays an exact-SHA PASS
+        # Spec/live skew (run 43681354141): the live frontend served a strict descendant, whose specs ran.
+        live = 'd' * 40
+        self.write_production(status='passed', semantic={'run_id': '56', 'source_sha': live, 'binding': {
+            'kind': 'verified-by-descendant', 'live_frontend_commit': live, 'build_id': f'{live[:12]}-mw'}})
+        passed, reason, code = dp.lane_semantic(self.ctx(Fake(self.root, [])))
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertEqual(reason, f'verified by descendant {live}: chat-lifecycle-ratchet run 56 success with the specs '
+                                 f'of live frontend {live[:12]} (a descendant of {SHA[:12]})')
+        self.write_production(status='passed', semantic={'run_id': '57', 'source_sha': SHA, 'binding': {
+            'kind': 'verified-by-descendant', 'live_frontend_commit': live}})
+        self.assertEqual(dp.lane_semantic(self.ctx(Fake(self.root, []))), (False, (
+            f'production-semantic recorded a descendant binding to {live[:12]} but run 57 tested {SHA[:12]}; the '
+            'binding is unverified'), 1))
+        failed = Fake(self.root, [], handler=lambda argv, cwd, env, on_line: 1)
+        self.assertEqual(dp.lane_semantic(self.ctx(failed)), (False, 'production-semantic exited 1 (run 57)', 1))
 
     def test_agentcard_and_wmh_use_agents_venv(self) -> None:
         fake = Fake(self.root, [])
@@ -1284,6 +1338,25 @@ class OtherLanesTest(Base):
         ctx.plan = dp.plan_lanes(['agents/requirements-world-model.txt'], [], NO_MAC)
         self.assertFalse(dp.lane_wmh(ctx)[0])
         self.assertEqual(fake.kinds(), ['--build-wmh'])
+
+    def test_wmh_detached_failing_sim_cannot_pass(self) -> None:
+        # Model scripts/run-bench-fleet: without --wait the launcher detaches and exits 0 at launch while the
+        # controller later writes its real status (1 = the SIM's CHILDFAIL); --wait returns that status.
+        controller_status = 1
+
+        def run_bench(argv, cwd, env, on_line):
+            if 'raise-5m-rose-labs-brex' not in argv:
+                return 0
+            on_line('🛰️  fleet controller detached (own session; survives launcher exit)')
+            return controller_status if '--wait' in argv else 0
+        fake = Fake(self.root, [], handler=run_bench)
+        ctx = self.ctx(fake)
+        ctx.plan = dp.plan_lanes(['agents/benchmarks/world_model_harness.py'], [], NO_MAC)
+        self.assertFalse(ctx.plan['wmh'].build_wmh)
+        self.assertEqual(dp.lane_wmh(ctx), (False, 'run-bench raise-5m-rose-labs-brex --sim-on exited 1', 1))
+        controller_status = 0
+        self.assertEqual(dp.lane_wmh(ctx), (True, 'raise-5m-rose-labs-brex SIM passed', 0))
+        self.assertIn('--wait', dp.planned_commands('wmh', ctx)[-1])
 
     def test_mac_release_binds_exact_sha_after_merge(self) -> None:
         polls = [[{'databaseId': 1, 'headSha': SHA, 'createdAt': '2026-11-05T17:59:59Z'},
@@ -1390,6 +1463,125 @@ class OtherLanesTest(Base):
         self.assertEqual(plain.decisions, ['false'])
         self.assertRegex('\n'.join(plain.lines), r'mac-release\s+SKIPPED-not-applicable\s+mac-app-release-decision '
                                                   r'ship=false reason=no-shipped-change')
+
+    RATE_LIMITED = 'HTTP 403: API rate limit exceeded for user ID 25310436.'
+    POOL_TOKEN = 'ghs_SEKRIT_pool_app_0005'
+
+    def test_label_read_uses_token_pool_when_gh_token_is_rate_limited(self) -> None:
+        # 2026-11-09: GITHUB_TOKEN's core quota hit 0 mid-deploy; every read-only gh call with it failed
+        # (403) while the GitHub App member had full quota. Reads take the pool's pick; the result is unchanged.
+        def gh(args, env):
+            if env.get('GH_TOKEN') == SECRETS['GITHUB_TOKEN']:
+                return 1, '', self.RATE_LIMITED
+            return 0, json.dumps({'labels': []}), ''
+        fake = Fake(self.root, ['docs/a.mdx'], gh_env=gh, pool=lambda argv: (0, self.POOL_TOKEN + '\n', ''))
+        self.assertEqual(self.main(fake, '--dry-run'), 0)
+        self.assertEqual(fake.decisions, ['false'])
+        lines = '\n'.join(fake.lines)
+        self.assertRegex(lines, r'mac-release\s+SKIPPED-not-applicable\s+mac-app-release-decision ship=false')
+        self.assertNotIn('rate limit', lines)
+        self.assertEqual(fake.gh_tokens, [('pr view', self.POOL_TOKEN)])
+        self.assertEqual([argv[1:] for argv in fake.pool_calls],
+                         [[str(ROOT / 'scripts' / 'github_token_pool.py'), 'pick', '--resource', 'core',
+                           '--repo-root', str(self.root)]])
+
+    def test_pool_member_failure_retries_once_with_gh_token(self) -> None:
+        def gh(args, env):
+            if env.get('GH_TOKEN') == self.POOL_TOKEN:
+                return 1, '', 'HTTP 404: Not Found'
+            return 0, '[]', ''
+        fake = Fake(self.root, [], gh_env=gh, pool=lambda argv: (0, self.POOL_TOKEN, ''))
+        ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        self.assertEqual(ctx.gh_json(['api', 'repos/{owner}/{repo}/deployments']), [])
+        self.assertEqual([token for _call, token in fake.gh_tokens], [self.POOL_TOKEN, SECRETS['GITHUB_TOKEN']])
+        both = Fake(self.root, [], gh_env=lambda args, env: (1, '', f'HTTP 404: Not Found {env.get("GH_TOKEN")}'),
+                    pool=lambda argv: (0, self.POOL_TOKEN, ''))
+        ctx = self.ctx(both, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        ctx.add_secrets({'GITHUB_TOKEN': SECRETS['GITHUB_TOKEN']})
+        with self.assertRaises(dp.LaneError) as caught:
+            ctx.gh_json(['api', 'repos/{owner}/{repo}/deployments'])
+        self.assertEqual(str(caught.exception), "gh api repos/{owner}/{repo}/deployments failed with the token pool's "
+                                                "member (HTTP 404: Not Found ***) and with GH_TOKEN: HTTP 404: Not Found ***")
+
+    def graphql_node(self, ident: int, sha: str, created: str, state: str | None) -> dict:
+        return {'databaseId': ident, 'environment': 'Production', 'createdAt': created, 'commitOid': sha,
+                'creator': {'__typename': 'Bot', 'login': 'vercel'},
+                'latestStatus': {'state': state} if state else None}
+
+    def test_vercel_reads_deployments_through_graphql_when_rest_is_rate_limited(self) -> None:
+        # 2026-11-14 PR2094 observer: GITHUB_TOKEN core 0 and the App member cannot read Deployments (403
+        # integration), so every REST poll failed for 90x10s while the merge was live (GraphQL SUCCESS 21:49Z).
+        calls = []
+
+        def gh(args, env):
+            calls.append((args[1], env.get('GH_TOKEN')))
+            if args[1] == 'graphql':
+                self.assertIn(f'sha={SHA}', args)
+                self.assertEqual(env.get('GH_TOKEN'), self.POOL_TOKEN)
+                return 0, json.dumps({'data': {'repository': {'object': {'deployments': {'nodes': [
+                    self.graphql_node(7794378974, SHA, '2026-11-14T21:49:13Z', 'SUCCESS')]}}}}}), ''
+            if env.get('GH_TOKEN') == self.POOL_TOKEN:
+                return 1, '', 'gh: Resource not accessible by integration (HTTP 403)'
+            return 1, '', self.RATE_LIMITED
+        fake = Fake(self.root, [], gh_env=gh, pool=lambda argv: (0, self.POOL_TOKEN, ''))
+        ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        self.assertEqual(dp.lane_vercel(ctx, attempts=1), (True, 'Vercel deployment 7794378974 success', 0))
+        self.assertEqual([path for path, _token in calls],
+                         [f'repos/{{owner}}/{{repo}}/deployments?sha={SHA}'] * 2 + ['graphql'])
+        self.assertTrue(any('reading them through GraphQL' in line for line in fake.lines), fake.lines)
+        self.assertFalse(any(self.POOL_TOKEN in line for line in fake.lines))
+
+    def test_vercel_graphql_superseded_check_keeps_the_descendant_rule(self) -> None:
+        newer, other = 'c' * 40, 'e' * 40
+
+        def gh(args, env):
+            if args[1] != 'graphql':
+                return 1, '', self.RATE_LIMITED
+            if f'sha={SHA}' in args:
+                return 0, json.dumps({'data': {'repository': {'object': {'deployments': {'nodes': [
+                    self.graphql_node(9, SHA, '2026-11-05T18:00:00Z', 'INACTIVE')]}}}}}), ''
+            self.assertIn('env=Production', args)
+            return 0, json.dumps({'data': {'repository': {'deployments': {'nodes': [
+                self.graphql_node(12, other, '2026-11-05T18:09:00Z', 'IN_PROGRESS'),
+                self.graphql_node(11, newer, '2026-11-05T18:05:00Z', 'SUCCESS'),
+                self.graphql_node(9, SHA, '2026-11-05T18:00:00Z', 'INACTIVE')]}}}}), ''
+        fake = Fake(self.root, [], gh_env=gh, descendants={newer, other})
+        passed, reason, code = dp.lane_vercel(self.ctx(fake, gh='gh'), attempts=1)
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertIn(f'deployment 11 for {newer[:12]}', reason)
+        unrelated = Fake(self.root, [], gh_env=gh, descendants=set())
+        passed, reason, code = dp.lane_vercel(self.ctx(unrelated, gh='gh'), attempts=1)
+        self.assertEqual((passed, code), (False, 1), reason)
+
+    def test_vercel_non_rate_limit_errors_stay_missed_polls(self) -> None:
+        def gh(args, env):
+            self.assertNotEqual(args[1], 'graphql', 'only a rate limit switches the read to GraphQL')
+            return 1, '', 'HTTP 502: Bad Gateway'
+        fake = Fake(self.root, [], gh_env=gh)
+        passed, reason, code = dp.lane_vercel(self.ctx(fake, gh='gh'), attempts=2)
+        self.assertEqual((passed, code), (False, 1))
+        self.assertEqual(reason, f'Vercel did not bring {SHA[:12]} live within 2x10s')
+
+    def test_mac_watch_streams_with_the_pool_token_never_displayed(self) -> None:
+        seen = []
+        fake = Fake(self.root, [], pool=lambda argv: (0, self.POOL_TOKEN, ''),
+                    handler=lambda argv, cwd, env, on_line: seen.append(env.get('GH_TOKEN')) or 0)
+        ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        self.assertEqual(dp.mac_watch(ctx, 'mac-release', '42'), (0, 'success'))
+        self.assertEqual(seen, [self.POOL_TOKEN])
+        self.assertNotIn(self.POOL_TOKEN, json.dumps(ctx.records))
+        self.assertFalse(any(self.POOL_TOKEN in line for line in fake.lines))
+
+    def test_no_pool_member_reads_with_gh_token(self) -> None:
+        fake = Fake(self.root, [], gh_env=lambda args, env: (0, '[]', ''))
+        ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        self.assertEqual(ctx.gh_json(['api', 'x']), [])
+        self.assertEqual(ctx.gh_json(['api', 'y']), [])
+        self.assertEqual([token for _call, token in fake.gh_tokens], [SECRETS['GITHUB_TOKEN']] * 2)
+        self.assertEqual([line for line in fake.lines if 'token pool' in line],
+                         ['[gh] token pool picked no member (github_token_pool: no member configured); '
+                          'reading with GH_TOKEN'])
 
     def test_gh_setup(self) -> None:
         gh, env, values = dp.gh_setup(self.root, {}, lambda path: path == dp.DEVBOX_GH)

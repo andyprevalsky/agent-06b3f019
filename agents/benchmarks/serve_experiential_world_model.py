@@ -282,7 +282,7 @@ def native_provider_http_client(provider_url, provider_token):
 
 
 async def native_provider_complete(
-    client, root, effective_identity, capture_enabled, session_id, prediction_id, request
+    client, root, effective_identity, capture_enabled, session_id, prediction_id, request, archive_root_agent_id=None
 ):
     from exp.common.core.artifacts import sha256_json
 
@@ -303,7 +303,14 @@ async def native_provider_complete(
         )
     try:
         return await _native_provider_post(
-            client, effective_identity, capture_enabled, session_id, prediction_id, request, request_sha256
+            client,
+            effective_identity,
+            capture_enabled,
+            session_id,
+            prediction_id,
+            request,
+            request_sha256,
+            archive_root_agent_id,
         )
     finally:
         if capture_enabled:
@@ -311,7 +318,14 @@ async def native_provider_complete(
 
 
 async def _native_provider_post(
-    client, effective_identity, capture_enabled, session_id, prediction_id, request, request_sha256
+    client,
+    effective_identity,
+    capture_enabled,
+    session_id,
+    prediction_id,
+    request,
+    request_sha256,
+    archive_root_agent_id=None,
 ):
     response = await client.post(
         "/complete",
@@ -322,6 +336,8 @@ async def _native_provider_post(
             "prediction_id": prediction_id,
             "execution_identity": effective_identity,
             **({"request_sha256": request_sha256} if capture_enabled else {}),
+            # The world's root scope owns these calls in the trace archive.
+            **({"archive_root_agent_id": archive_root_agent_id} if archive_root_agent_id else {}),
         },
     )
     if response.status_code == 422:
@@ -363,8 +379,16 @@ def main():
     capture_enabled = bool((effective_identity.get("runtime_config") or {}).get("validation_recovery"))
 
     async def complete_scoped(session_id, prediction_id, request):
+        session = model.sessions.get(session_id)
         return await native_provider_complete(
-            client, args.root, effective_identity, capture_enabled, session_id, prediction_id, request
+            client,
+            args.root,
+            effective_identity,
+            capture_enabled,
+            session_id,
+            prediction_id,
+            request,
+            archive_root_agent_id=getattr(session, "scope", None),
         )
 
     async def retire_provider(session_id):

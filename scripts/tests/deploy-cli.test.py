@@ -494,6 +494,61 @@ class ReviewApprovalLedger(Repo):
         self.assertIn('review=no-reviewable-paths', out)
         event.assert_not_called()
 
+    def _finish_fixture(self, run_branch, status='completed', current=False):
+        context = d.CONTEXT
+        context.mkdir(parents=True, exist_ok=True)
+        (context / 'deploy-pr.json').write_text(json.dumps({'pr': 7, 'branch': 'feature', 'head': 'a' * 40}))
+        (context / 'deploy-merged.json').write_text(json.dumps({'pr': 7, 'merged_sha': 'b' * 40}))
+        run = context / 'deploy-runs' / '20261115-000000-1'
+        run.mkdir(parents=True)
+        (run / 'metadata.json').write_text(json.dumps({'status': status, 'branch': run_branch,
+                                                       'started_at': '2026-11-15T00:00:00Z',
+                                                       'finished_at': '2026-11-15T01:00:00Z'}))
+        if current:
+            (context / 'deploy-runs' / 'current').write_text(run.name + '\n')
+
+    def _runner(self, calls):
+        """Like the real tools: run-deploy-stage --finish exits 2 without an active timing pointer."""
+        def run(argv, **_):
+            calls.append(argv)
+            if argv[:2] == ['bash', 'scripts/run-deploy-stage']:
+                return 0 if (d.CONTEXT / 'deploy-runs' / 'current').is_file() else 2
+            return 0
+        return run
+
+    def test_finish_retry_after_this_deploys_timing_run_already_closed_passes(self):
+        # A first finish closed the timing run, then its ledger publish failed transiently.
+        # The retry must not demand an active run it can never have again.
+        self._finish_fixture('feature')
+        calls = []
+        with patch.object(d, 'factory') as event, \
+             patch.object(d, 'run', side_effect=self._runner(calls)):
+            code, out, _ = self.call(d.cmd_finish, outcome='completed')
+        self.assertEqual(code, 0, out)
+        self.assertIn('DEPLOY_FINISH PASS outcome=completed', out)
+        self.assertIn('timing run 20261115-000000-1 already completed', out)
+        self.assertNotIn(['bash', 'scripts/run-deploy-stage', '--finish'], calls)
+        self.assertTrue(any('factory_ledger.py' in ' '.join(argv) for argv in calls))
+        event.assert_called_once_with('outcome', 'completed')
+
+    def test_finish_never_trusts_a_completed_run_from_another_deploy(self):
+        self._finish_fixture('someone-else')
+        calls = []
+        with patch.object(d, 'factory'), \
+             patch.object(d, 'run', side_effect=self._runner(calls)):
+            code, out, _ = self.call(d.cmd_finish, outcome='completed')
+        self.assertEqual(code, 1)
+        self.assertIn(['bash', 'scripts/run-deploy-stage', '--finish'], calls)
+        self.assertIn('DEPLOY_FINISH FAIL', out)
+
+    def test_finish_with_an_active_timing_run_still_closes_it(self):
+        self._finish_fixture('feature', status='active', current=True)
+        calls = []
+        with patch.object(d, 'factory'), patch.object(d, 'run', side_effect=self._runner(calls)):
+            code, out, _ = self.call(d.cmd_finish, outcome='completed')
+        self.assertEqual(code, 0, out)
+        self.assertIn(['bash', 'scripts/run-deploy-stage', '--finish'], calls)
+
     def test_review_finish_on_a_no_reviewable_paths_head_is_already_closed(self):
         latest = {'head': 'b' * 40, 'kind': 'no-reviewable-paths', 'status': 'completed'}
         with patch.object(d, 'review_state', return_value={'cycles': [latest]}), \
@@ -1026,6 +1081,76 @@ class PostFindingsCLIProposalTest(unittest.TestCase):
         self.assertEqual(calls[1], ['git', 'push', 'origin', 'HEAD'])
         self.assertEqual(calls[2], ['gh', 'pr', 'comment', '1708', '--body', '@coderabbitai review'])
 
+
+
+class Scorecard(unittest.TestCase):
+    """`scripts/deploy scorecard` renders the fixed deploy-summary-v2 template from recorded facts."""
+
+    def spec(self, **over):
+        spec = {
+            'title': 'PR #9 <fix>', 'shipped': True,
+            'start': '2026-11-15T04:00:00Z', 'end': '2026-11-15T06:00:00Z',
+            'deployed': ['Merged `abc123`; see [run 42](https://github.com/o/r/actions/runs/42).', 'x < y & "z"'],
+            'note': 'Review skipped (usage cap).',
+            'delegated': [{'text': 'FLAKY `t`', 'url': 'https://boxes.dev/thread/thr_1'}],
+            'providers': [], 'followups': ['Unreviewed cycle'],
+            'segments': [
+                {'row': 'Gates', 'kind': 'automation', 'start': '2026-11-15T04:00:00Z', 'end': '2026-11-15T05:00:00Z', 'label': 'gates'},
+                {'row': 'Waiting', 'kind': 'wait', 'start': '2026-11-15T04:30:00Z', 'end': '2026-11-15T05:30:00Z', 'label': 'quota', 'reason': 'credits'},
+                {'row': 'Waiting', 'kind': 'unrecorded', 'start': '2026-11-15T05:30:00Z', 'end': '2026-11-15T06:30:00Z', 'label': 'asleep'},
+            ],
+        }
+        spec.update(over)
+        return spec
+
+    def test_renders_the_fixed_template_with_every_placeholder_replaced(self):
+        import deploy_scorecard as sc
+        html = sc.render(self.spec())
+        self.assertNotIn('{{', html)
+        self.assertIn('deploy-summary-v2', html)
+        self.assertIn('<h1 class="green">✅ SHIPPED — PR #9 &lt;fix&gt;</h1>', html)
+        self.assertIn('<code>abc123</code>', html)
+        self.assertIn('<a href="https://github.com/o/r/actions/runs/42">run 42</a>', html)
+        self.assertIn('x &lt; y &amp; &quot;z&quot;', html)
+        self.assertIn('repair thread', html)
+        self.assertIn('class="box followup"', html)
+        self.assertIn('<p>None.</p>', html)
+        self.assertIn('Elapsed 2h0m', html)
+
+    def test_totals_union_overlapping_intervals_and_clamp_to_the_deploy_clock(self):
+        import deploy_scorecard as sc
+        html = sc.render(self.spec())
+        self.assertIn('Work + automation 1h0m', html)
+        self.assertIn('Waiting 1h0m', html)
+        self.assertIn('Wait — reason unrecorded 30m', html)
+        self.assertIn('class="fill unrecorded"', html)
+
+    def test_not_shipped_is_red_and_untrusted_links_are_not_rendered(self):
+        import deploy_scorecard as sc
+        html = sc.render(self.spec(shipped=False, deployed=['[x](javascript:alert(1))']))
+        self.assertIn('NOT SHIPPED', html)
+        self.assertNotIn('href="javascript', html)
+
+    def test_refuses_invalid_specs(self):
+        import deploy_scorecard as sc
+        bad = [
+            self.spec(end='2026-11-15T03:00:00Z'),
+            self.spec(segments=[{'row': 'G', 'kind': 'automation', 'start': '2026-11-15T05:00:00Z',
+                                 'end': '2026-11-15T04:00:00Z', 'label': 'x'}]),
+            self.spec(segments=[{'row': 'G', 'kind': 'fixes', 'start': '2026-11-15T04:00:00Z',
+                                 'end': '2026-11-15T05:00:00Z', 'label': 'x'}]),
+            {k: v for k, v in self.spec().items() if k != 'deployed'},
+        ]
+        for spec in bad:
+            with self.assertRaises(ValueError):
+                sc.render(spec)
+
+    def test_cli_writes_the_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec, out = Path(tmp) / 'spec.json', Path(tmp) / 'card.html'
+            spec.write_text(json.dumps(self.spec()))
+            self.assertEqual(d.main(['scorecard', '--spec', str(spec), '--output', str(out)]), 0)
+            self.assertIn('TIME PER STAGE', out.read_text())
 
 if __name__ == '__main__':
     unittest.main()

@@ -5,6 +5,7 @@ import { retryWithBackoff } from '../../providers/retry';
 import { registerBrowserNavigationRoutes } from '../../domains/browser-session/routes.navigation';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
+import { Prisma } from '@prisma/client';
 import {
   BrowserNavigationError,
   claimBrowserNavigation,
@@ -80,19 +81,100 @@ async function run() {
       BrowserNavigationError
     );
     // A replacement session cannot receive the old command or its completion.
+    const replacementSessionId = randomUUID();
     await prisma.browserSession.update({
       where: { id: taskId },
-      data: { sessionId: randomUUID(), navigationCommand: { ...claimed, state: 'pending' } },
+      data: {
+        sessionId: replacementSessionId,
+        navigationCommand: { ...claimed, state: 'pending' },
+      },
     });
     assert.equal(await claimBrowserNavigation(taskId, sessionId), null);
     await assert.rejects(
       completeBrowserNavigation(taskId, sessionId, claimed.id, { url: 'stale' }),
       BrowserNavigationError
     );
+    // Mailbox path (agent is not the root browser, no detached worker): the
+    // replacement session's worker never answers, so the deadline ends the wait.
+    const settledWithin = (pending: Promise<unknown>, ms: number) =>
+      Promise.race([
+        pending.then(
+          () => 'settled',
+          () => 'settled'
+        ),
+        new Promise<string>((resolve) => setTimeout(() => resolve('pending'), ms)),
+      ]);
+    const storedCommand = async () =>
+      (
+        await prisma.browserSession.findUniqueOrThrow({
+          where: { id: taskId },
+          select: { navigationCommand: true },
+        })
+      ).navigationCommand;
+    const commandWritten = () =>
+      retryWithBackoff(storedCommand, {
+        maxRetries: 200,
+        fixedDelays: Array(200).fill(10) as number[],
+        shouldRetryResult: (stored) => stored === null,
+      });
+    await prisma.browserSession.update({
+      where: { id: taskId },
+      data: { navigationCommand: Prisma.DbNull },
+    });
+    const timedOut = navigateBrowser(taskId, 'reload', userId);
+    await commandWritten();
+    assert.equal(await settledWithin(timedOut, 300), 'pending', 'waits for the worker receipt');
+    const realNow = Date.now;
+    Date.now = () => realNow() + 15_001;
+    try {
+      assert.equal(
+        await settledWithin(timedOut, 2_000),
+        'settled',
+        'the navigation deadline must end the wait promptly'
+      );
+      await assert.rejects(
+        timedOut,
+        (error: unknown) =>
+          error instanceof BrowserNavigationError &&
+          error.status === 504 &&
+          error.message === 'Browser worker did not complete navigation before the deadline'
+      );
+      const expired = (await storedCommand()) as { state: string } | null;
+      assert.equal(expired?.state, 'pending', 'a timed-out wait leaves the command unanswered');
+      assert.equal(await claimBrowserNavigation(taskId, replacementSessionId), null);
+    } finally {
+      Date.now = realNow;
+    }
+    // A worker that reports failure surfaces as a 502 with the worker's message.
+    await prisma.browserSession.update({
+      where: { id: taskId },
+      data: { navigationCommand: Prisma.DbNull },
+    });
+    const failed = navigateBrowser(taskId, 'back', userId);
+    const failedClaim = await retryWithBackoff(
+      () => claimBrowserNavigation(taskId, replacementSessionId),
+      {
+        maxRetries: 200,
+        fixedDelays: Array(200).fill(10) as number[],
+        shouldRetryResult: (result) => result === null,
+      }
+    );
+    assert.ok(failedClaim);
+    await completeBrowserNavigation(taskId, replacementSessionId, failedClaim.id, {
+      url: null,
+      error: 'x',
+    });
+    await assert.rejects(
+      failed,
+      (error: unknown) =>
+        error instanceof BrowserNavigationError &&
+        error.status === 502 &&
+        error.message === 'Browser worker navigation failed'
+    );
     await prisma.browserSession.update({ where: { id: taskId }, data: { controlState: 'AGENT' } });
     await assert.rejects(navigateBrowser(taskId, 'back', userId), /Take control/);
     process.stdout.write(
-      'PASS browser navigation: owner, same session, single claim, busy, receipt, stale, control'
+      'PASS browser navigation: owner, same session, single claim, busy, receipt, stale, deadline 504, worker error 502, control'
     );
   } finally {
     if (oldKey === undefined) delete process.env.BACKEND_API_KEY;

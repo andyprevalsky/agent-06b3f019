@@ -31,9 +31,10 @@ CHROMIUM_UNIX_EPOCH_OFFSET_SECONDS = 11644473600
 UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY = 10000000000000
 PAYMENT_CARD_SECRET_REFS = ("card_number", "card_name", "card_expiry", "card_cvv")
 PAYMENT_CARD_ENTRY_RULE = (
-    "Use request_payment_card only if checkout requires you to enter new card details. "
-    "If a valid saved payment method is already selected and no card entry is required, "
-    "do not call request_payment_card; continue with that saved method."
+    "Use request_payment_card when checkout requires you to enter new card details, or when the user "
+    "asked for a one-time card or told you not to use a saved payment method. Otherwise, if a valid "
+    "saved payment method is already selected and no card entry is required, do not call "
+    "request_payment_card; continue with that saved method."
 )
 
 

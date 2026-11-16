@@ -10,17 +10,20 @@ first_bad_boundary: worker.main returned without joining its metrics poller and 
 symptoms:
   - "Worker stopped logged while the worker process remains alive"
   - "metrics became unreadable for 6 consecutive polls"
-  - "driver did not exit within the bounded terminal log catch-up window"
   - "tokio-rt-worker parked in pyo3_ffi HangThread"
+  - "Fatal Python error: PyGILState_Release: thread state must be current when releasing"
+  - "Python runtime state: finalizing"
 tags:
   - worker-shutdown
   - temporal
   - native-runtime
   - cloudbench
+  - blackbox-runner
 sources:
   - PR #1299
   - fleet run 20260911-004427-83338
   - agent bef644f8-fbc5-402a-b663-359bbc787574
+  - PR #2086 new-test-stability gate 2026-11-15T02:11Z (001-agents-blackbox-workflow-run3.log)
 repro: agents/tests/unit/test_worker_observability_shutdown.py
 status: open
 ---
@@ -182,6 +185,70 @@ the wait is bounded. Under the same CPU burn, 60 runs of the process test
 the fix, roughly 1 in 60 exits crashed. The cost is one thread-table scan per
 worker exit, independent of agent count.
 
+## November 15 recurrence: the blackbox runner had no native-callback join
+
+PR #2086's `new-test-stability` deploy gate failed `agents-blackbox:workflow`.
+It ran five times under 8 busy-loop workers on an 8-vCPU Blacksmith VM, and
+run 3 printed `Results: 1 passed, 0 failed` and then exited -6. The stderr
+showed the same `PyGILState_Release ... must be current when releasing` and
+`Python runtime state: finalizing` abort, from a thread with
+`<no Python frame>`. A gate rerun then exited -11 after passing. The defect is
+on main (gate attribution NOT_INTRODUCED): the October fix joined native
+callbacks only in `worker.main`. `scripts/run_blackbox_tests.py` also drives
+the SDK, through `WorkflowEnvironment` and `Worker` shutdown, and it returned
+from `asyncio.run` into `sys.exit` with no join (first bad boundary: its
+`main()`).
+
+Archive searches were `PyGILState_Release finalizing SIGABRT blackbox runner`
+and `native callback interpreter shutdown tokio exit -6`. Both found this case,
+which makes this a recurrence: the guardrail covered one entry point, not the
+class.
+
+Repro: a driver called the runner module's real `main()`, with the domain suite
+replaced by the SDK alone (a time-skipping environment, one Worker, one
+workflow). On unmodified main, 4 of 300 runs crashed under CPU load: one with
+this exact SIGABRT, three with SIGSEGV. A second baseline batch of 300 ran
+with `PYTHONFAULTHANDLER=1` and crashed once (SIGSEGV after the results line).
+faulthandler printed no stack, which is consistent with a fault after Python's
+fault handling was torn down, but it does not attribute the SIGSEGVs. In total,
+5 of 600 baseline runs crashed. The original command
+(`BLACKBOX_CASE_FUNCTIONS=test_workflow_check_cost_limit_skips_non_root python scripts/run_blackbox_tests.py workflow`;
+the gate's own case exists only on PR #2086) ran in batches before and after
+the fix under the same load. Those counts are in the fix PR, and each batch is
+too small to show a 1-in-18 rate on its own.
+
+The drain moved unchanged from `worker.py` to `helpers/process_exit.py`.
+`worker.main` and the runner's `run_tests_then_join_native_callbacks` now both
+await it, the runner from a `finally` before `asyncio.run` returns. With the
+fix, 0 of 600 runs of the same driver crashed (300 of them with faulthandler),
+and none hit the drain timeout (one-sided Fisher p ≈ 0.03 against 5 of 600).
+The runner regression,
+`test_runner_exit_waits_for_native_sdk_callback_still_in_python`
+(`agents-pytest` lane), runs the real `main()` while a native pthread is still
+in Python. It failed without the runner change and passed five consecutive
+times with it at load average 22.
+
+The runner does not use the worker's `os._exit` (`run_then_exit`): the agents
+coverage gate runs `coverage run --parallel-mode scripts/run_blackbox_tests.py`,
+and coverage saves its data from atexit. An independent verifier reached the
+same first bad boundary. It noted one residual window. A task that is still
+awaiting a bridge future when `asyncio.run` cancels leftovers could call back
+after the drain. There is no evidence of such a task in the runner, so no
+handler was added for it. Other SDK entry points that use plain `asyncio.run`
+have not been checked: `benchmarks/run_benchmark.py`,
+`benchmarks/sms_runner_test.py`, `scripts/regen_mass_agent_verifier_rows.py`,
+and the `__main__` blocks of individual blackbox files. They are outside this
+repair's scope and are not deploy gates.
+
+Shipped in PR #2133, merged as 5156d47533 on 2026-11-15. Its gates all passed
+(17 of 17), including `agents-coverage-blackbox` and `new-test-stability`,
+where the new regression passed 5 of 5 runs under 8 busy-loop workers. The
+Fly cutover and workflow-migration production lanes passed. On the merged
+checkout, the original command,
+`BLACKBOX_CASE_FUNCTIONS=test_workflow_check_cost_limit_skips_non_root python scripts/run_blackbox_tests.py workflow`,
+then passed 8 consecutive runs under 8 busy-loop workers on an 8-vCPU devbox.
+Every run exited 0 with `Results: 1 passed, 0 failed`.
+
 ## Human feedback
 
 Keep the normal 120-minute backstop and use five minutes temporarily for this
@@ -193,5 +260,6 @@ results as a clean slice or retry an unexplained failure.
 ## Reusable lesson
 
 An awaited Python cancellation or completion is not proof that a native callback has joined.
-Own observability tasks through shutdown and let bounded native operations finish
+Every process entry point that drives the Temporal SDK, test runners included,
+must join native callbacks before it leaves `asyncio.run`. Own observability tasks through shutdown and let bounded native operations finish
 while the interpreter is still available.

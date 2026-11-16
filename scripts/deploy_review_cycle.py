@@ -1250,7 +1250,7 @@ def _completed_findings_cycle(state, head, evidence, original_bytes):
         started, finished = (_publication_time(entry.get(key)) for key in ("started_at", "finished_at"))
         if (type(entry.get("number")) is not int or entry["number"] < 1
                 or entry.get("result") not in RESULTS
-                or entry.get("status") != "completed" or entry.get("kind") not in KINDS | {SYNC_KIND}
+                or entry.get("status") != "completed" or entry.get("kind") not in KINDS | {SYNC_KIND, NO_REVIEW_KIND}
                 or not isinstance(entry.get("head"), str)
                 or not re.fullmatch(r"[0-9a-f]{40}", entry["head"])
                 or started is None or finished is None or started > finished):

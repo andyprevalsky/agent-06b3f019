@@ -7,6 +7,7 @@ import {
   symlinkSync,
   chmodSync,
   createWriteStream,
+  realpathSync,
   renameSync,
   openSync,
   writeSync,
@@ -2056,6 +2057,193 @@ test(
       );
     }
     assert.equal(summary.status, "failed");
+  },
+);
+
+// I-29: a plain (--retry-infra 0) campaign recorded only the exit verdict, so
+// verified fleet teardowns rendered "Guests released · 0/16 terminal jobs".
+// Each exited attempt now records the same release seal a retry reads; a
+// teardown that never verified (no provider epoch) stays unverified.
+const RELEASE_SEAL_CHILD = `import json, os, sys, time
+from pathlib import Path
+root = Path(sys.argv[1]).resolve()
+job, task = os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"], os.environ["RUN_BENCH_CAMPAIGN_TASK"]
+fleet = root / ".context/fleet/runs" / job
+owner = job.replace("-", "") + "0" * 22
+audit = root / ".git/cloudbench-fleet-audits" / owner
+meta = ("version=1\\nfleet_owner_token=%s\\nrun_id=%s\\napp=navi-whisper-lux-bench\\nworkspace_root=%s\\n"
+        "status=provider-teardown-verified\\n" % (owner, job, root))
+for directory in (audit, fleet / "teardown-ownership"):
+    directory.mkdir(parents=True)
+    (directory / "meta").write_text(meta)
+    if job != os.environ.get("UNVERIFIED_JOB"):
+        (directory / "provider-teardown-verified.epoch").write_text("1794087712")
+(fleet / "teardown-ownership.path").write_text(str(audit) + "\\n")
+if job == os.environ.get("LOOP_JOB"):
+    # The recorded audit path is a symlink loop: Path.resolve() raises RuntimeError.
+    (fleet / "loop").symlink_to(fleet / "loop")
+    (fleet / "teardown-ownership.path").write_text(str(fleet / "loop") + "\\n")
+if job == os.environ.get("SLOW_JOB"):
+    time.sleep(4)
+(fleet / "_batch").mkdir(parents=True)
+(fleet / "_batch/lifecycle.json").write_text(json.dumps({
+    "version": 1, "run_id": job, "status": "verified", "workspace_root": str(root),
+    "fleet_owner_token": owner, "controller_exit_code": 0, "hub_publication_failed": False}))
+(fleet / "_batch/run.json").write_text(json.dumps({"run_id": job, "tasks": [{
+    "name": task, "status": "COMPLETED", "benchmark_status": "PASSED", "passed": True,
+    "lifecycle_stage": "released"}]}))
+print("    %s monitor %s" % (root / "scripts/run-bench", fleet), flush=True)
+`;
+
+test(
+  "a plain campaign records each exited attempt's verified fleet release seal",
+  { timeout: 120_000 },
+  async () => {
+    const fixture = fixtureRoot("release-seal");
+    const child = path.join(fixture.root, "release-child.py");
+    writeFileSync(child, RELEASE_SEAL_CHILD);
+    writeFileSync(
+      fixture.fleet,
+      `#!/usr/bin/env bash\nexec '${project}/agents/venv/bin/python' '${child}' '${fixture.root}'\n`,
+    );
+    const campaigns = path.join(fixture.root, "campaigns");
+    const run = spawn(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+        "--root",
+        fixture.root,
+        "--runs",
+        "1",
+        "--concurrency",
+        "2",
+        "--task",
+        "demo-fleet-alpha",
+        "--task",
+        "demo-fleet-beta",
+      ],
+      {
+        cwd: fixture.root,
+        env: {
+          ...process.env,
+          BENCHMARK_HUB_PARENT_RUN_ID: "release-seal-parent",
+          RUN_BENCH_CAMPAIGN_ID: "release-seal",
+          RUN_BENCH_CAMPAIGN_ROOT: campaigns,
+          RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
+          CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
+          UNVERIFIED_JOB: "r001-j0002",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    run.stdout!.on("data", (chunk) => (output += chunk.toString()));
+    run.stderr!.on("data", (chunk) => (output += chunk.toString()));
+    await once(run, "close");
+    assert.equal(run.exitCode, 0, output);
+    const summary = JSON.parse(
+      readFileSync(path.join(campaigns, "release-seal/summary.json"), "utf8"),
+    );
+    assert.equal(summary.retry_infra, 0);
+    const root = realpathSync(fixture.root);
+    const jobs = Object.fromEntries(
+      summary.jobs.map((job: any) => [job.job_id, job]),
+    );
+    const verified = jobs["r001-j0001"];
+    assert.deepEqual(
+      [
+        verified.resources_released,
+        verified.lifecycle_verified,
+        verified.fleet_dir,
+        verified.run_id,
+        verified.released_at_epoch,
+        verified.task_status,
+      ],
+      [
+        true,
+        true,
+        path.join(root, ".context/fleet/runs/r001-j0001"),
+        "r001-j0001",
+        1794087712,
+        "PASSED",
+      ],
+    );
+    const unverified = jobs["r001-j0002"];
+    assert.equal(unverified.resources_released, false);
+    assert.notEqual(unverified.lifecycle_verified, true);
+    assert.equal(
+      unverified.task_status,
+      "PASSED",
+      "the verdict survives an unverified release",
+    );
+  },
+);
+
+test(
+  "a looping release receipt is unverified and never stops a healthy peer",
+  { timeout: 120_000 },
+  async () => {
+    const fixture = fixtureRoot("release-loop");
+    const child = path.join(fixture.root, "release-child.py");
+    writeFileSync(child, RELEASE_SEAL_CHILD);
+    writeFileSync(
+      fixture.fleet,
+      `#!/usr/bin/env bash\nexec '${project}/agents/venv/bin/python' '${child}' '${fixture.root}'\n`,
+    );
+    const campaigns = path.join(fixture.root, "campaigns");
+    const run = spawn(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+        "--root",
+        fixture.root,
+        "--runs",
+        "1",
+        "--concurrency",
+        "2",
+        "--task",
+        "demo-fleet-alpha",
+        "--task",
+        "demo-fleet-beta",
+      ],
+      {
+        cwd: fixture.root,
+        env: {
+          ...process.env,
+          BENCHMARK_HUB_PARENT_RUN_ID: "release-loop-parent",
+          RUN_BENCH_CAMPAIGN_ID: "release-loop",
+          RUN_BENCH_CAMPAIGN_ROOT: campaigns,
+          RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
+          CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
+          LOOP_JOB: "r001-j0001",
+          SLOW_JOB: "r001-j0002",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    run.stdout!.on("data", (chunk) => (output += chunk.toString()));
+    run.stderr!.on("data", (chunk) => (output += chunk.toString()));
+    await once(run, "close");
+    assert.equal(run.exitCode, 0, output);
+    const summary = JSON.parse(
+      readFileSync(path.join(campaigns, "release-loop/summary.json"), "utf8"),
+    );
+    assert.equal(summary.status, "passed");
+    const jobs = Object.fromEntries(
+      summary.jobs.map((job: any) => [job.job_id, job]),
+    );
+    const looping = jobs["r001-j0001"];
+    assert.deepEqual(
+      [looping.status, looping.task_status, looping.resources_released],
+      ["passed", "PASSED", false],
+    );
+    assert.match(looping.retry_blocked, /RuntimeError/);
+    const peer = jobs["r001-j0002"];
+    assert.deepEqual(
+      [peer.status, peer.resources_released, peer.lifecycle_verified],
+      ["passed", true, true],
+    );
   },
 );
 

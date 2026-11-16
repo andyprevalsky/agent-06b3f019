@@ -4058,7 +4058,7 @@ def test_build_codex_responses_body_contract():
         effort="max",
         request_id="max-effort",
     )
-    assert max_effort_body["reasoning"]["effort"] == "xhigh"
+    assert max_effort_body["reasoning"]["effort"] == "medium"
 
     # Exercise the actual root-system producer, including its final boundary.
     from utils.prompts import build_system_prompt, MAIN_SYSTEM_PROMPT
@@ -5055,7 +5055,7 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         max_tokens=128,
         effort="max",
     )
-    assert anthropic_max["output_config"]["effort"] == "xhigh"
+    assert anthropic_max["output_config"]["effort"] == "high"
 
     anthropic_med = build_anthropic_body(
         pool_spec=pool,
@@ -5092,7 +5092,7 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         effort="max",
         request_id="effort-max",
     )
-    assert codex_max["reasoning"]["effort"] == "xhigh"
+    assert codex_max["reasoning"]["effort"] == "medium"
 
     openrouter = build_openrouter_body(
         model="openai/gpt-5.6-sol",
@@ -5131,6 +5131,25 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         effort="minimal",
     )
     assert openrouter_minimal["reasoning"]["effort"] == "low"
+
+    # The planner is the only "max" caller and its rose.complete deadline is a
+    # fixed 220s. At xhigh, gpt-6.1-sol streamed only reasoning and Opus 5.5
+    # nothing at all until that deadline on the raise-5m planner request
+    # (agents c93b6bf2 / fab58637: set_plan RoseDeadlineError, CHILDFAIL), so
+    # the sentinel resolves to a deadline-fit tier on every ultra route.
+    for model in get_pool("rose-1-ultra").waterfall:
+        ultra_max = build_openrouter_body(
+            model=model,
+            messages=msgs,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            temperature=None,
+            max_tokens=None,
+            seed=None,
+            effort="max",
+        )
+        assert ultra_max["reasoning"]["effort"] == "medium", f"bad max effort on {model}"
 
     # Every model in the browser-use pool must produce a well-formed body when
     # the waterfall walks it — effort present on each step.
@@ -5826,6 +5845,58 @@ async def test_anthropic_api_key_cooldown_mark_then_on_cooldown():
     await rc._mark_anthropic_api_key_cooldown("RosePaymentRequiredError")
     assert await rc._anthropic_api_key_on_cooldown() is True  # in-memory fast path
     rc._reset_anthropic_api_key_cooldown_cache()
+
+
+async def test_funded_api_key_cooldown_read_is_single_flight():
+    """Concurrent callers share one in-flight cooldown read instead of skipping it.
+
+    Regression (descend I-12): the first caller started the backend read and
+    every other caller answered "not on cooldown" while it was pending, so a
+    burst of concurrent LLM calls reached an out-of-credits funded key.
+    """
+    import providers.rose.client as rc
+
+    keys = (
+        ("/anthropic-key/cooldown", rc._anthropic_api_key_on_cooldown, rc._reset_anthropic_api_key_cooldown_cache),
+        ("/gpt-key/cooldown", rc._gpt_api_key_on_cooldown, rc._reset_gpt_api_key_cooldown_cache),
+    )
+    for path, on_cooldown, reset in keys:
+        for backend_answer in ("cooldown", "error"):
+            reset()
+            release = asyncio.Event()
+            reads = {"count": 0}
+
+            async def handler(req, path=path, release=release, reads=reads, backend_answer=backend_answer):
+                if req.url.path.endswith(path):
+                    reads["count"] += 1
+                    await release.wait()
+                    if backend_answer == "error":
+                        raise httpx.ConnectError("backend unreachable", request=req)
+                    return httpx.Response(200, json={"onCooldown": True})
+                return httpx.Response(404)
+
+            set_mock_handler(handler)
+            try:
+                callers = [asyncio.create_task(on_cooldown()) for _ in range(8)]
+                for _ in range(50):
+                    await asyncio.sleep(0)
+                answered_early = [t.result() for t in callers if t.done()]
+                # The caller that started the read is cancelled; the others
+                # must still receive the shared answer.
+                callers[0].cancel()
+                release.set()
+                results = await asyncio.wait_for(asyncio.gather(*callers[1:]), timeout=5)
+                after = await on_cooldown()
+            finally:
+                release.set()
+                reset()
+            label = f"{path} backend={backend_answer}"
+            assert answered_early == [], f"{label}: {len(answered_early)} callers answered while the read was pending"
+            assert reads["count"] == 1, f"{label}: expected one shared backend read, got {reads['count']}"
+            # A failed read stays fail-open (try the key); a cooled answer is shared.
+            expected = backend_answer == "cooldown"
+            assert results == [expected] * 7, f"{label}: {results}"
+            assert after is expected, f"{label}: cached answer {after}"
 
 
 async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry():
@@ -9805,7 +9876,7 @@ async def _run_subscription_order(first, limited: set[str], fetch_fresh_leases: 
 
 
 async def test_flash_root_explore_compute_only_and_speed():
-    from providers.rose.speed import bind_agent_speed, current_agent_speed
+    from providers.rose.speed import bind_agent_speed
     from providers.rose.errors import RoseServerError
 
     calls = []
@@ -9838,8 +9909,7 @@ async def test_flash_root_explore_compute_only_and_speed():
     ):
         for site in ("plan_loop", "execute_loop", "explore_agent"):
             for speed in ("standard", "fast", "ultrafast"):
-                previous_speed = current_agent_speed()
-                bind_agent_speed(speed)
+                speed_token = bind_agent_speed(speed)
                 try:
                     calls.clear()
                     await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
@@ -9847,7 +9917,8 @@ async def test_flash_root_explore_compute_only_and_speed():
                         gpt_auth=_pool_lease("gpt", "fixture")))
                     assert calls == [("gpt", "gpt-6.1-terra", "medium", speed)], calls
                 finally:
-                    bind_agent_speed(previous_speed)
+                    # Restore the exact prior value; re-binding None would leave "standard" bound.
+                    speed_token.var.reset(speed_token)
             failing = True
             calls.clear()
             await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
@@ -14186,6 +14257,9 @@ async def run_all_tests():
     )
     await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
     await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
+    await r.record_async(
+        "funded_apikey_cooldown_read_single_flight", test_funded_api_key_cooldown_read_is_single_flight
+    )
     await r.record_async(
         "gpt_apikey_credit_cooldown_to_foundry",
         test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry,

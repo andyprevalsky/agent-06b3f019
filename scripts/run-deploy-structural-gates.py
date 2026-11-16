@@ -486,6 +486,7 @@ GATES = (
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh"), expected_seconds=118),
     Gate("descend-handoff", ("python3", "scripts/tests/descend-handoff.test.py"), expected_seconds=5),
+    Gate("check-stale-versions", ("python3", "scripts/tests/check-stale-versions.test.py"), expected_seconds=4),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py"), expected_seconds=700, shards=6),
     Gate("jev-progress-core", ("python3", "scripts/tests/jev-progress-core.test.py")),
     Gate("select-affected-tests", ("python3", "scripts/tests/select-affected-tests.test.py")),
@@ -500,6 +501,14 @@ GATES = (
     Gate(
         "concurrent-pr-shared-paths",
         ("python3", "scripts/tests/concurrent-pr-shared-paths.test.py"),
+    ),
+    Gate(
+        "cloudbench-disposable-recovery",
+        ("python3", "scripts/tests/cloudbench-disposable-recovery.test.py"),
+    ),
+    Gate(
+        "replicate-llm-dump-panel",
+        ("python3", "scripts/tests/replicate-llm-dump-panel.test.py"),
     ),
     Gate(
         "cloudbench-full-selection",
@@ -530,6 +539,7 @@ GATES = (
     Gate("worker-pool-cutover", ("python3", "scripts/tests/worker-pool-cutover.test.py")),
     Gate("retained-agent-machine", ("python3", "scripts/tests/retained-agent-machine.test.py")),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
+    Gate("run-bench-durable-service", ("python3", "scripts/tests/run-bench-durable-service.test.py")),
     Gate(
         "claude-md-replay-cli",
         ("python3", "-m", "pytest", "-q", "agents/benchmarks/claude_md_replay/replay_cli_test.py"),
@@ -567,6 +577,8 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"), expected_seconds=83
     ),
     Gate("cloudbench-lost-evidence-release", ("python3", "scripts/tests/cloudbench-lost-evidence-release.test.py")),
+    Gate("cloudbench-evidence-archive", ("python3", "scripts/tests/cloudbench-evidence-archive.test.py")),
+    Gate("cloudbench-disposable-lifecycle", ("python3", "scripts/tests/cloudbench-disposable-lifecycle.test.py")),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("test-sleep-ratchet", ("python3", "scripts/tests/condition-waits.test.py")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
@@ -633,6 +645,10 @@ GATES = (
     ),
     Gate("cloudbench-cohort-reconcile", ("python3", "scripts/tests/cloudbench-cohort-reconcile.test.py")),
     Gate(
+        "cloudbench-recovery-guard-inheritance",
+        ("python3", "scripts/tests/cloudbench-recovery-guard-inheritance.test.py"),
+    ),
+    Gate(
         "cloudbench-fixed-native-worker",
         ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
     ),
@@ -664,6 +680,12 @@ GATES = (
         "cloudbench-controller-orphan-drain",
         ("python3", "scripts/tests/cloudbench-controller-orphan-drain.test.py"),
     ),
+    # Relay retirement ships the drain's guest core; a drain guest change must
+    # also prove the relay exec body still fits its bound (2026-11-06, I-08).
+    Gate(
+        "cloudbench-controller-relay-retire",
+        ("python3", "scripts/tests/cloudbench-controller-relay-retire.test.py"),
+    ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
     Gate("local-stack-retention", ("python3", "scripts/tests/local-stack-retention.test.py")),
     Gate(
@@ -677,6 +699,14 @@ GATES = (
     Gate(
         "cloudbench-controller-gate-flyctl-bounds",
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
+    ),
+    Gate(
+        "cloudbench-disposable-volume",
+        ("python3", "scripts/tests/cloudbench-disposable-volume.test.py"),
+    ),
+    Gate(
+        "cloudbench-disposable-volume-cli",
+        ("python3", "scripts/tests/cloudbench-disposable-volume-cli.test.py"),
     ),
     Gate(
         "cloudbench-recovery-fd",

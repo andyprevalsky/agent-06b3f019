@@ -458,6 +458,65 @@ test('POST /:id/messages — workflow-posted environmentContext row is idempoten
   }
 });
 
+test("POST /:id/messages — a browser task's native OTP row is never routed to the owner's workflow as user input", async () => {
+  // RCA 2026-11-07-browser-otp-row-routed-as-owner-user-input. A running browser
+  // task polls the user's inboxes and writes each OTP it ingests onto its owner
+  // as a USER row scoped to that task (metadata.subAgentId + credential_ref).
+  // The owner's model never sees subAgentId rows (context scope), yet the route
+  // signalled them as receive_user_response: the root's wait_for woke "by a new
+  // user message" and the code text became response-schema feedback. Concurrent
+  // copies sharing one inbox made it happen for codes another copy requested.
+  const session = await createAnonymousSession('browser-otp-row-routing');
+  const agentId = await createWorkflowAgent(session.user.id, 'Book a hotel room in San Francisco');
+  try {
+    const taskId = randomUUID();
+    const otpText = [
+      'Recently received email OTP code:',
+      '- Code: 652339',
+      '- From: Instacart',
+      '- Received: 11s ago',
+      '- Expires in approximately: 4m',
+      '',
+      'Use this code only if the current site requested an email OTP. Prefer email OTP over SMS.',
+    ].join('\n');
+    const otpMetadata = {
+      subAgentId: taskId,
+      credential_ref: { kind: 'email_otp', id: randomUUID() },
+    };
+    // The browser activity stamps its generation; an unattributed write must
+    // not be treated as the user's either.
+    const stamped = await postWorkflowUserRow(agentId, otpText, otpMetadata);
+    assertStatus(stamped.status, 201, stamped.data);
+    const unattributed = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ message: `${otpText}\n`, role: 'USER', metadata: otpMetadata }),
+    });
+    assertStatus(unattributed.status, 201, unattributed.data);
+
+    // The browser task's transcript row is kept exactly as written.
+    const rows = await prisma.message.findMany({
+      where: { agentId, role: 'USER', metadata: { path: ['subAgentId'], equals: taskId } },
+    });
+    assert(rows.length === 2, `both browser OTP rows must be persisted, got ${rows.length}`);
+
+    // Control: an ordinary workflow-authored USER row on the same agent still
+    // signals, so the absence above is the task scope, not a dead fake.
+    const control = await postWorkflowUserRow(agentId, 'Use the saved card instead.', {});
+    assertStatus(control.status, 201, control.data);
+    const userResponses = (await signalsFor(agentId)).filter(
+      (s) => s.name === 'receive_user_response'
+    );
+    assert(
+      userResponses.length === 1 &&
+        JSON.stringify(userResponses[0].args) === JSON.stringify(['Use the saved card instead.']),
+      `a browser task's OTP row must not signal the owner as user input, got ${JSON.stringify(userResponses)}`
+    );
+  } finally {
+    await deleteTestAgent(agentId, session.user.id);
+  }
+});
+
 test('POST /:id/messages — workflow-posted agentMessage row is not echoed as receive_user_response', async () => {
   const session = await createAnonymousSession('a2a-message-echo');
   const agentId = await createWorkflowAgent(session.user.id, 'Coordinate venue outreach');

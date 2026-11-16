@@ -39,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers import (
         check_user_usage,
         fetch_agent_config,
+        fetch_message_texts,
         fetch_agent_queue_pointer,
         finalize_workflow_replacement_bootstrap,
         generate_completion_summary,
@@ -81,7 +82,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.model_pricing import get_anthropic_pricing, get_default_pricing
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
-    from helpers.sms_activities import get_agent_source, notify_sms_event_activity
+    from helpers.sms_activities import MESSAGING_AGENT_SOURCES, get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import (
         GENERATION_HANDOFF_SIGNAL,
         note_generation_handoff,
@@ -193,6 +194,9 @@ _ORPHAN_TRANSIENT_FAILURE_LIMIT = 30
 # ACTIVE when the 900s harness cap hit. Coalesce to one emit/query per
 # interval so cost stays O(1) per agent per window, not O(messages).
 _TREE_STATE_EMIT_MIN_INTERVAL = timedelta(seconds=3)
+# Bounded wait for a discarded speculative completion summary to report its
+# usage before the workflow run ends (completion, failure, continue-as-new).
+SPECULATIVE_SUMMARY_SETTLE_SECONDS = 30
 _PARENT_STATE_QUERY_MIN_INTERVAL = timedelta(seconds=15)
 _QUERY_PARENT_STATE_TIMEOUT = timedelta(seconds=60)
 
@@ -222,7 +226,7 @@ WORLD_CLOCK_UNAVAILABLE_MESSAGE = (
 )
 # Reserved responses emitted by auth completion and gate-resolution providers.
 ATTENTION_CONTROL_RESPONSES = frozenset(
-    {REJECTION_SENTINEL, "__AUTH_ASSISTANCE_COMPLETED__", "RESOLVED", "SOURCE_CONNECTED", "SUBSCRIPTION_ACTIVE"}
+    {REJECTION_SENTINEL, "__AUTH_ASSISTANCE_COMPLETED__", "__AUTH_ASSISTANCE_RESEND_CODE__", "RESOLVED", "SOURCE_CONNECTED", "SUBSCRIPTION_ACTIVE"}
 )
 
 
@@ -830,6 +834,50 @@ OVERFLOW_DEFER_MAX_HISTORY_BYTES = 30 * 1024 * 1024
 # failed workflow task forever, so a continuation that big can never hand off. Warn well
 # before the limit so a growing context is visible instead of wedging a cutover.
 CONTINUATION_PAYLOAD_WARN_BYTES = 1_500_000
+# Serialized form of an id-less ("legacy", timestamp, text) requirement key whose text
+# is already response_schema_feedback[index]: the text crosses continue_as_new once.
+_FEEDBACK_TEXT_KEY = "legacy_feedback_text"
+
+
+def _feedback_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _message_pointer_suffix(message_id: str) -> str:
+    # helpers.context_pointers.annotate_with_pointer appends this to USER rows.
+    return f"\n\nReference: @ref:message:{message_id}"
+
+
+def _without_message_pointer(text: str, message_id: str) -> str:
+    return text.removesuffix(_message_pointer_suffix(message_id))
+
+
+def _claim_checked_feedback(value: Any) -> Optional[Tuple[str, str]]:
+    """A serialized {"message_id", "sha256"} feedback entry, carried instead of its text."""
+    if not isinstance(value, dict):
+        return None
+    message_id, digest = value.get("message_id"), value.get("sha256")
+    if isinstance(message_id, str) and message_id and isinstance(digest, str) and len(digest) == 64:
+        return message_id, digest
+    return None
+
+
+def _serialized_requirement_key(key: Tuple[str, ...], feedback_index: Dict[str, int]) -> List[Any]:
+    if len(key) == 3 and key[0] == "legacy" and key[2] in feedback_index:
+        return [_FEEDBACK_TEXT_KEY, key[1], feedback_index[key[2]]]
+    return list(key)
+
+
+def _restored_requirement_key(value: Any, feedback: List[Any]) -> Optional[Tuple[str, ...]]:
+    if not isinstance(value, list) or not value:
+        return None
+    if value[0] == _FEEDBACK_TEXT_KEY:
+        if len(value) != 3 or not isinstance(value[1], str) or type(value[2]) is not int:
+            return None
+        index = value[2]
+        text = feedback[index] if 0 <= index < len(feedback) else None
+        return ("legacy", value[1], text) if isinstance(text, str) else None
+    return tuple(value) if all(isinstance(part, str) for part in value) else None
 
 
 class CompletionSupersededError(RuntimeError):
@@ -917,6 +965,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_feedback: List[str] = []
         self._response_schema_feedback_sources: List[Optional[Tuple[str, ...]]] = []
         self._response_schema_feedback_rows: Set[Tuple[str, ...]] = set()
+        # Feedback index -> its durable USER message id (proven binding only). The
+        # continuation carries id + digest and the next run reads the text back from
+        # the DB (claim check), so feedback no longer grows continue_as_new args.
+        self._response_schema_feedback_message_ids: Dict[int, str] = {}
+        # Claim-checked entries restored but not yet read back: index -> sha256.
+        self._response_schema_feedback_pending: Dict[int, str] = {}
         self._response_schema_task_base: Optional[str] = None
         self._response_schema_task_baseline_rows: Set[Tuple[str, ...]] = set()
         self._response_schema_attention_events: Dict[str, str] = {}
@@ -1004,6 +1058,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._last_parent_state_query_at: Optional[datetime] = None
         self._last_parent_state: Dict = {}
         self._pending_message_handles: List[Any] = []
+        # Root completion summary started while the attempt_completion verifier
+        # judges; adopted by _mark_complete only after that verdict passes.
+        self._speculative_summary_handle: Optional[Any] = None
+        self._speculative_summary_verified = False
+        self._discarded_summary_accounting: List[asyncio.Task[Any]] = []
         self._cached_local_data_summary: Optional[str] = None
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
@@ -1184,20 +1243,26 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if isinstance(runtime.get("signal_responses"), dict):
             self._signal_responses = dict(runtime["signal_responses"])
         self._pending_approval_resume = _canonical_pending_approval_resume(runtime.get("pending_approval_resume"))
-        if isinstance(runtime.get("response_schema_feedback"), list):
+        feedback_rows = runtime.get("response_schema_feedback")
+        serialized_feedback = feedback_rows if isinstance(feedback_rows, list) else []
+        if isinstance(feedback_rows, list):
             source_rows = runtime.get("response_schema_feedback_sources")
             self._response_schema_feedback = []
             self._response_schema_feedback_sources = []
-            for index, value in enumerate(runtime["response_schema_feedback"]):
+            self._response_schema_feedback_message_ids = {}
+            self._response_schema_feedback_pending = {}
+            for index, value in enumerate(feedback_rows):
+                claim = _claim_checked_feedback(value)
+                if claim is not None:
+                    restored_index = len(self._response_schema_feedback)
+                    self._response_schema_feedback_message_ids[restored_index] = claim[0]
+                    self._response_schema_feedback_pending[restored_index] = claim[1]
+                    value = ""  # read back by _hydrate_claim_checked_feedback before any use
                 if not isinstance(value, str):
                     continue
                 source = source_rows[index] if isinstance(source_rows, list) and index < len(source_rows) else None
                 self._response_schema_feedback.append(value)
-                self._response_schema_feedback_sources.append(
-                    tuple(source)
-                    if isinstance(source, list) and source and all(isinstance(part, str) for part in source)
-                    else None
-                )
+                self._response_schema_feedback_sources.append(_restored_requirement_key(source, feedback_rows))
         self._response_schema_revision = int(runtime.get("response_schema_revision", 0))
         self._response_schema_applied_revision = int(runtime.get("response_schema_applied_revision", 0))
         self._response_schema_initialized = runtime.get("response_schema_initialized") is True
@@ -1229,19 +1294,19 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             failure_reason if isinstance(failure_reason, str) else self._response_schema_refresh_error
         )
         if isinstance(runtime.get("response_schema_feedback_rows"), list):
-            self._response_schema_feedback_rows = {
-                tuple(value)
+            restored_rows = (
+                _restored_requirement_key(value, serialized_feedback)
                 for value in runtime["response_schema_feedback_rows"]
-                if isinstance(value, list) and all(isinstance(part, str) for part in value)
-            }
+            )
+            self._response_schema_feedback_rows = {key for key in restored_rows if key is not None}
         if isinstance(runtime.get("response_schema_task_base"), str):
             self._response_schema_task_base = runtime["response_schema_task_base"]
         if isinstance(runtime.get("response_schema_task_baseline_rows"), list):
-            self._response_schema_task_baseline_rows = {
-                tuple(value)
+            baseline_rows = (
+                _restored_requirement_key(value, serialized_feedback)
                 for value in runtime["response_schema_task_baseline_rows"]
-                if isinstance(value, list) and all(isinstance(part, str) for part in value)
-            }
+            )
+            self._response_schema_task_baseline_rows = {key for key in baseline_rows if key is not None}
         if isinstance(runtime.get("response_schema_attention_events"), dict):
             self._response_schema_attention_events = {
                 key: value
@@ -1460,6 +1525,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             prior_status = "PAUSED"
         else:
             prior_status = "ACTIVE"
+        feedback_index: Dict[str, int] = {}
+        for index, text in enumerate(self._response_schema_feedback):
+            if index not in self._response_schema_feedback_message_ids:
+                feedback_index.setdefault(text, index)
 
         return {
             "version": 1,
@@ -1501,18 +1570,25 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "last_signal_response": self._last_signal_response,
                 "signal_responses": dict(self._signal_responses),
                 "pending_approval_resume": _canonical_pending_approval_resume(self._pending_approval_resume),
-                "response_schema_feedback": list(self._response_schema_feedback),
+                "response_schema_feedback": [
+                    self._serialized_feedback_entry(index, text)
+                    for index, text in enumerate(self._response_schema_feedback)
+                ],
                 "response_schema_feedback_sources": [
-                    list(self._response_schema_feedback_sources[index])
+                    _serialized_requirement_key(self._response_schema_feedback_sources[index], feedback_index)
                     if index < len(self._response_schema_feedback_sources)
                     and self._response_schema_feedback_sources[index] is not None
                     else None
                     for index in range(len(self._response_schema_feedback))
                 ],
-                "response_schema_feedback_rows": [list(key) for key in sorted(self._response_schema_feedback_rows)],
+                "response_schema_feedback_rows": [
+                    _serialized_requirement_key(key, feedback_index)
+                    for key in sorted(self._response_schema_feedback_rows)
+                ],
                 "response_schema_task_base": self._response_schema_task_base,
                 "response_schema_task_baseline_rows": [
-                    list(key) for key in sorted(self._response_schema_task_baseline_rows)
+                    _serialized_requirement_key(key, feedback_index)
+                    for key in sorted(self._response_schema_task_baseline_rows)
                 ],
                 "response_schema_attention_events": dict(self._response_schema_attention_events),
                 "response_schema_pending_signals": dict(self._response_schema_pending_signals),
@@ -1806,6 +1882,86 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._has_new_messages = True
         self._start_response_schema_refresh()
 
+    def _claim_check_signal_feedback(self, row_text: str, message_id: str) -> None:
+        """Bind the oldest unbound signal-delivered feedback entry to the USER row it arrived as."""
+        candidates = {row_text.strip(), _without_message_pointer(row_text, message_id).strip()}
+        for index, value in enumerate(self._response_schema_feedback):
+            source = (
+                self._response_schema_feedback_sources[index]
+                if index < len(self._response_schema_feedback_sources)
+                else None
+            )
+            if source is None and index not in self._response_schema_feedback_message_ids and value.strip() in candidates:
+                self._response_schema_feedback_message_ids[index] = message_id
+                return
+
+    def _serialized_feedback_entry(self, index: int, text: str) -> Any:
+        message_id = self._response_schema_feedback_message_ids.get(index)
+        if message_id is None:
+            return text
+        digest = self._response_schema_feedback_pending.get(index) or _feedback_digest(text)
+        return {"message_id": message_id, "sha256": digest}
+
+    async def _hydrate_claim_checked_feedback(self) -> None:
+        """Read claim-checked feedback text back from the DB before anything reads it."""
+        pending = dict(self._response_schema_feedback_pending)
+        if not pending:
+            return
+        ids = sorted({self._response_schema_feedback_message_ids[index] for index in pending})
+        texts = await workflow.execute_activity(
+            fetch_message_texts,
+            args=[self.user_id, ids],
+            start_to_close_timeout=timedelta(seconds=120),
+            heartbeat_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(initial_interval=timedelta(seconds=2), maximum_interval=timedelta(seconds=60)),
+        )
+        for index, digest in pending.items():
+            message_id = self._response_schema_feedback_message_ids[index]
+            stored = texts.get(message_id)
+            if not isinstance(stored, str):
+                # The user's message row is gone, so it is no longer a requirement.
+                workflow.logger.error(
+                    f"[ContinuationClaimCheck] agent={self.agent_id} feedback message {message_id} not found; "
+                    "dropping its feedback entry"
+                )
+                self._response_schema_feedback_message_ids.pop(index)
+                continue
+            text = next(
+                (
+                    candidate
+                    for candidate in (stored, f"{stored}{_message_pointer_suffix(message_id)}")
+                    if _feedback_digest(candidate) == digest
+                ),
+                None,
+            )
+            if text is None:
+                workflow.logger.error(
+                    f"[ContinuationClaimCheck] agent={self.agent_id} feedback message {message_id} text digest "
+                    "mismatch; using the stored message text"
+                )
+                text = stored
+            self._response_schema_feedback[index] = text
+        missing = {index for index in pending if index not in self._response_schema_feedback_message_ids}
+        if missing:
+            self._drop_response_schema_feedback(missing)
+        self._response_schema_feedback_pending = {}
+        workflow.logger.info(
+            f"[ContinuationClaimCheck] agent={self.agent_id} read back {len(pending) - len(missing)} "
+            f"feedback text(s) from {len(ids)} message id(s)"
+        )
+        self._start_response_schema_refresh()
+
+    def _drop_response_schema_feedback(self, indices: Set[int]) -> None:
+        kept = [index for index in range(len(self._response_schema_feedback)) if index not in indices]
+        sources = self._response_schema_feedback_sources
+        self._response_schema_feedback = [self._response_schema_feedback[index] for index in kept]
+        self._response_schema_feedback_sources = [sources[index] if index < len(sources) else None for index in kept]
+        self._response_schema_feedback_message_ids = {
+            new: self._response_schema_feedback_message_ids[old]
+            for new, old in enumerate(kept)
+            if old in self._response_schema_feedback_message_ids
+        }
+
     def _append_response_schema_feedback(self, response: str, source: Optional[Tuple[str, ...]] = None) -> None:
         """Keep authored text paired with proven source identity; legacy text stays unknown."""
         count = len(self._response_schema_feedback)
@@ -1860,6 +2016,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             if key in self._response_schema_feedback_rows or not self._response_schema_pending_signals.get(text, 0):
                 continue
             self._response_schema_feedback_rows.add(key)
+            if key[0] == "id":
+                self._claim_check_signal_feedback(message["text"], key[1])
             self._response_schema_pending_signals[text] -= 1
             if self._response_schema_pending_signals[text] == 0:
                 del self._response_schema_pending_signals[text]
@@ -1883,7 +2041,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if event_id in self._response_schema_attention_events:
                     continue
                 self._response_schema_attention_events[event_id] = text
-            self._append_response_schema_feedback(text, next(iter(keys)))
+            source_key = next(iter(keys))
+            self._append_response_schema_feedback(text, source_key)
+            if source_key[0] == "id":
+                self._response_schema_feedback_message_ids[len(self._response_schema_feedback) - 1] = source_key[1]
             self._response_schema_revision += 1
             self._response_schema_refresh_error = None
             self._has_new_messages = True
@@ -2266,6 +2427,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             _demo_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
         self._restore_deployment_state(resume_state)
+        await self._hydrate_claim_checked_feedback()
         # continue_as_new / deployment resume may restore demo_cache_goal from
         # runtime_state. Recompute the DEMO cache gate from the restored goals
         # so a non-demo input goal cannot leave cache replay disabled when the
@@ -2327,6 +2489,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 handoff_queue = await self._wait_for_unpause_or_handoff()
                 await self._prepare_response_schema_continuation()
                 await self._flush_pending_messages()
+                await self._retire_speculative_summaries()
                 if handoff_queue:
                     workflow.continue_as_new(
                         args=self._continuation_args(context),
@@ -2810,6 +2973,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             ):
                 await self._prepare_response_schema_continuation()
                 await self._flush_pending_messages()
+                await self._retire_speculative_summaries()
                 workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="plan"))
                 return plan_result
 
@@ -3035,6 +3199,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
             goal_text=self.demo_cache_goal,
+            on_verification_started=self._start_speculative_completion_summary,
+            on_verification_settled=self._settle_speculative_completion_summary,
             **self._iteration_resume_kwargs(),
         )
 
@@ -3056,6 +3222,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 requirement_revision=self._response_schema_revision,
             ):
                 await self._flush_pending_messages()
+                await self._retire_speculative_summaries()
                 workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="execute_continued"))
                 return execute_result
             return await self._finish_verified_completion(
@@ -3405,7 +3572,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
 
     def _start_response_schema_refresh(self) -> None:
         """Start one coalescing background schema worker without blocking reasoning."""
-        if not self._response_schema_initialized:
+        if not self._response_schema_initialized or self._response_schema_feedback_pending:
             return
         if self._response_schema_applied_revision >= self._response_schema_revision:
             return
@@ -3741,6 +3908,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # credentials, and signal state so compaction cannot reset billing/limits.
         await self._drain_fast_mode_explores()
         await self._flush_pending_messages()
+        await self._retire_speculative_summaries()
         workflow.continue_as_new(args=self._continuation_args(compressed_context))
 
     def _in_flight_background_ids(self) -> List[str]:
@@ -3934,6 +4102,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         """
         self._tool_parking_enabled = True
         try:
+            # Carried background records run again before parked foreground calls
+            # re-enter: a parked wait_for on one of them would otherwise wait forever.
+            # New background spawns stay disabled so a re-entered foreground spawn
+            # keeps running in the foreground.
+            self._relaunch_background_tasks()
             handoff_queue = await self._resume_pending_tools()
             if handoff_queue:
                 return {
@@ -3953,7 +4126,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             run_agent_kwargs["verifier_interrupts"] = self._dag_hooks()
             run_agent_kwargs["sync_environment_context"] = self._sync_environment_context
             run_agent_kwargs["get_environment_tail"] = self._environment_tail_seed
-            self._relaunch_background_tasks()
             self._background_spawns_enabled = True
             return await run_agent(**run_agent_kwargs)
         finally:
@@ -5615,15 +5787,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             except Exception as e:
                 workflow.logger.error(f"Failed to update status to COST_LIMIT_REACHED: {e}")
 
-            # Send SMS notification for cost_limit (root + SMS-source only)
-            if self.agent_source == "SMS":
+            # Send SMS notification for cost_limit (root + SMS/WhatsApp-source only)
+            if self.agent_source in MESSAGING_AGENT_SOURCES:
                 try:
                     notification_args = [
                         self.user_id,
                         "cost_limit",
                         self.agent_id,
                         {
-                            "tree_cost_cents": int(self.subtree_cost_cents),
+                            # The cost that tripped the limit, persisted resume spend included.
+                            "tree_cost_cents": int(effective_cost),
                             "price_limit_cents": self.price_limit_cents,
                         },
                     ]
@@ -5837,6 +6010,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
+            await self._retire_speculative_summaries()
             if handoff_queue:
                 workflow.continue_as_new(
                     args=self._continuation_args(result.get("context")),
@@ -5864,6 +6038,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             )
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
+            await self._retire_speculative_summaries()
             workflow.logger.info(f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)")
             workflow.continue_as_new(
                 args=self._continuation_args(
@@ -6134,6 +6309,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         4. Signal parent with failure context for learning (if sub-agent)
         """
         workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
+        await self._retire_speculative_summaries()
         # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST — see _mark_complete for the regression
@@ -6325,6 +6501,151 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             )
         return outputs
 
+    def _completion_summary_args(self, context: List[Dict], structured_response: Optional[Dict]) -> List[Any]:
+        return [
+            context,
+            # Persisted-row goal: the summary prompt labels this "ORIGINAL
+            # GOAL" and it doubles as the DEMO cache namespace.
+            self.demo_cache_goal,
+            self.model,
+            structured_response,
+            self.output_schema,
+            self.child_tool_counts,
+            self._active_claude_token(),
+            self._active_claude_source(),
+            self._active_claude_pool_id(),
+            self.user_id,
+            self._active_gpt_token(),
+            self._active_gpt_account_id(),
+            self._active_gpt_source(),
+            self._active_gpt_pool_id(),
+            self.user_id,
+            self.agent_id,
+            self.compute_token_lineage_key,
+            self.compute_token_demo_cache_affinity_key,
+            self.fast_mode_cache_enabled,
+            0,  # Fast Mode step — one completion summary per agent
+        ]
+
+    async def _track_completion_summary_usage(self, summary_result: Dict[str, Any]) -> None:
+        usage = summary_result.get("usage", {}) or {}
+        await self._track_llm_cost(
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
+            call_site="completion_summary",
+            actual_model=usage.get("actual_model"),
+            cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+            from_fast_cache=usage.get("from_fast_cache", False),
+        )
+        self.token_count += usage.get("total_tokens", 0)
+
+    # -------------------------------------------------------------------------
+    # Speculative completion summary
+    #
+    #   attempt_completion ─► verifier (LLM) ────────────────┐ pass
+    #                     └─► completion summary (LLM) ──────┴─► _mark_complete:
+    #                                                            final summary row
+    #                                                            ─► COMPLETED
+    #   reject / interrupt / error ─► summary discarded (usage still accounted)
+    #
+    # The summary is the same activity, model and prompt, started with the
+    # context the verifier judges. Only the root runs it: its summary sat
+    # serially after the verifier on every user-facing completion (12–16 s of
+    # a 180 s smoke budget, docs/rca/cases/
+    # 2026-11-10-background-message-completion-exceeded-deadline.md). The
+    # final summary is still observable before COMPLETED.
+    # -------------------------------------------------------------------------
+
+    async def _start_speculative_completion_summary(self, context: List[Dict]) -> None:
+        if self.parent_workflow_id or self._is_finished:
+            return
+        presentation = (self.output_schema or {}).get("presentation")
+        if isinstance(presentation, dict) and presentation.get("mode", "report") != "report":
+            # A typed final answer replaces the summary call in _mark_complete.
+            return
+        self._discard_speculative_completion_summary()
+        self._speculative_summary_handle = workflow.start_activity(
+            generate_completion_summary,
+            # The verifier's structured output does not exist yet; the summary
+            # prompt only uses it as awareness and must not list its values.
+            args=self._completion_summary_args(list(context), None),
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        self._speculative_summary_verified = False
+
+    async def _settle_speculative_completion_summary(self, passed: bool) -> None:
+        if passed:
+            self._speculative_summary_verified = self._speculative_summary_handle is not None
+        else:
+            self._discard_speculative_completion_summary()
+
+    def _discard_speculative_completion_summary(self) -> None:
+        handle = self._speculative_summary_handle
+        self._speculative_summary_handle = None
+        self._speculative_summary_verified = False
+        if handle is not None:
+            self._discarded_summary_accounting.append(asyncio.create_task(self._account_discarded_summary(handle)))
+
+    async def _account_discarded_summary(self, handle: Any) -> None:
+        try:
+            result = await handle
+        except Exception as exc:
+            workflow.logger.warning(f"discarded completion_summary failed: {exc}")
+            return
+        if isinstance(result, dict):
+            try:
+                await self._track_completion_summary_usage(result)
+            except Exception as exc:
+                workflow.logger.warning(f"discarded completion_summary usage not recorded: {exc}")
+
+    def _take_verified_speculative_summary(self) -> Optional[Any]:
+        handle = self._speculative_summary_handle if self._speculative_summary_verified else None
+        if handle is not None:
+            self._speculative_summary_handle = None
+            self._speculative_summary_verified = False
+        else:
+            self._discard_speculative_completion_summary()
+        return handle
+
+    async def _settle_discarded_summary_accounting(self, wait: bool) -> bool:
+        """Drop accounted discarded summaries; with ``wait``, give in-flight ones a bounded window.
+
+        Returns True when every discarded summary has been accounted.
+        """
+        tasks = self._discarded_summary_accounting
+        if wait and any(not task.done() for task in tasks):
+            try:
+                # cutover-class: bounded — SPECULATIVE_SUMMARY_SETTLE_SECONDS cap, then proceed regardless
+                await workflow.wait_condition(
+                    lambda: all(task.done() for task in tasks),
+                    timeout=timedelta(seconds=SPECULATIVE_SUMMARY_SETTLE_SECONDS),
+                )
+            except asyncio.TimeoutError:
+                workflow.logger.warning("discarded completion_summary still running; its cost is not yet accounted")
+        self._discarded_summary_accounting = [task for task in tasks if not task.done()]
+        return not self._discarded_summary_accounting
+
+    async def _retire_speculative_summaries(self) -> None:
+        """Before this run ends (failure or continue-as-new): stop adopting, account what finished."""
+        self._discard_speculative_completion_summary()
+        await self._settle_discarded_summary_accounting(wait=True)
+
+    async def _await_speculative_summary(self, handle: Optional[Any]) -> Optional[Dict[str, Any]]:
+        if handle is None:
+            return None
+        try:
+            result = await handle
+        except Exception as exc:
+            workflow.logger.warning(f"speculative completion_summary failed, regenerating: {exc}")
+            return None
+        if isinstance(result, dict) and not result.get("generation_failed") and str(result.get("summary") or "").strip():
+            return result
+        if isinstance(result, dict):
+            # Produced no usable text: still account its spend, then regenerate.
+            await self._track_completion_summary_usage(result)
+        return None
     async def _finish_verified_completion(self, context: List[Dict], structured_response: Optional[Dict]) -> Dict:
         """Route only completion validation failures through existing lifecycle owners."""
         try:
@@ -6422,6 +6743,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._world_clock_event("finish")
         require_current_final_presentation()
         await self._flush_pending_messages()
+        # Summaries of rejected attempts still cost money: account the finished
+        # ones before the terminal cost persist below. In-flight ones never hold
+        # COMPLETED; they are settled after it.
+        speculative_summary = self._take_verified_speculative_summary()
+        await self._settle_discarded_summary_accounting(wait=False)
         require_current_final_presentation()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
@@ -6466,35 +6792,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # docs/rca/cases/2026-07-11-completion-gated-behind-final-summary-message-post.md
             if final_answer is None:
                 try:
-                    summary_result = await workflow.execute_activity(
-                        generate_completion_summary,
-                        args=[
-                            context,
-                            # Persisted-row goal: the summary prompt labels this "ORIGINAL
-                            # GOAL" and it doubles as the DEMO cache namespace.
-                            self.demo_cache_goal,
-                            self.model,
-                            structured_response,
-                            self.output_schema,
-                            self.child_tool_counts,
-                            self._active_claude_token(),
-                            self._active_claude_source(),
-                            self._active_claude_pool_id(),
-                            self.user_id,
-                            self._active_gpt_token(),
-                            self._active_gpt_account_id(),
-                            self._active_gpt_source(),
-                            self._active_gpt_pool_id(),
-                            self.user_id,
-                            self.agent_id,
-                            self.compute_token_lineage_key,
-                            self.compute_token_demo_cache_affinity_key,
-                            self.fast_mode_cache_enabled,
-                            0,  # Fast Mode step — one completion summary per agent
-                        ],
-                        start_to_close_timeout=timedelta(seconds=60),
-                        retry_policy=RetryPolicy(maximum_attempts=3),
-                    )
+                    # A root's summary normally started while the verifier judged
+                    # (_start_speculative_completion_summary). Adopt it only when it
+                    # produced a summary; otherwise generate it here exactly as before.
+                    summary_result = await self._await_speculative_summary(speculative_summary)
+                    if summary_result is None:
+                        summary_result = await workflow.execute_activity(
+                            generate_completion_summary,
+                            args=self._completion_summary_args(context, structured_response),
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=RetryPolicy(maximum_attempts=3),
+                        )
                     summary_result = summary_result or {}
                 except Exception as summary_exc:
                     summary_error = str(summary_exc)
@@ -6502,6 +6810,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
             else:
                 summary_result = {"summary": final_answer}
+                if speculative_summary is not None:
+                    # The typed final answer replaces the summary; its spend is still accounted.
+                    self._discarded_summary_accounting.append(
+                        asyncio.create_task(self._account_discarded_summary(speculative_summary))
+                    )
 
             require_current_final_presentation()
             summary = strip_fast_mode_card_narration(summary_result.get("summary", ""))
@@ -6667,6 +6980,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # Broadcast COMPLETED status with structured output to tree
             # (output_schema is already cached from startup and included in all broadcasts)
             await self._update_tree_state(progress=1.0, status="COMPLETED", structured_output=structured_response)
+            if self._discarded_summary_accounting:
+                await self._settle_discarded_summary_accounting(wait=True)
+                self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
+                await self._persist_tree_cost()
 
             # Completion lifecycle SMS is root-only. Sub-agents report to their
             # parent; notifying per child would fan out at tree scale.

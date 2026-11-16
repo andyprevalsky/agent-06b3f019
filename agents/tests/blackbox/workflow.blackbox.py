@@ -3417,6 +3417,205 @@ def test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off
     assert restored._continuation_resume_state() == args[16]
 
 
+async def test_workflow_continuation_runtime_state_carries_feedback_and_background_once():
+    """RCA 2026-11-15 (agent 8789a5df): runtime_state was 536,819 bytes of a 2,124,477-byte
+    handoff (TMPRL1103 forever, cutover a145f654 wedged in DRAINING). Root cause: three
+    ~40 KB context compaction summaries had been admitted as user requirements, and each
+    id-less row's full text rode three times (feedback, source key, row key). Smaller: a
+    wakeable background record carried its spawn goal twice. Each piece of state must
+    travel once, and the summary only in the context argument. Feedback bound to a durable
+    USER message rides as its id + digest and is read back from the DB (claim check)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from loop.run_agent import _real_user_requirement_keys, _requirement_keys
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-runtime-state"
+    wf.user_id = "user-runtime-state"
+    wf.goal = "Find movers plus storage"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 512
+    wf.verifier = None
+    wf.parent_workflow_id = None
+    wf.parent_agent_id = None
+    wf.depth = 0
+    wf.bus_id = None
+    wf.max_iterations = None
+    wf.price_limit_cents = 500
+    wf.context_gates = {}
+    wf._response_schema_baseline_initialized = True
+    wf.context = []
+    feedback_texts = []
+    for index in range(47):
+        # Three id-less rows (signal-only delivery) key by their full text.
+        row_id = None if index % 16 == 5 else f"user-row-{index}"
+        text = f"feedback-{index:02d} " + "need it delivered by friday " * (180 if row_id is None else 36)
+        row = {"role": "USER", "text": text, "timestamp": f"2026-11-14T10:{index:02d}:00+00:00", "metadata": {}}
+        if row_id is not None:
+            row["message_id"] = row_id
+        wf.context.append(row)
+        if row_id is None:
+            continue  # admitted from the polled context below, keyed by its full text
+        wf._record_response_schema_feedback(text)
+        feedback_texts.append(text)
+    feedback_texts.extend(row["text"] for row in wf.context if "message_id" not in row)
+    # A row admitted from the polled context carries the pointer suffix; the DB row does not.
+    durable_text = "Use the Oakland unit, not Emeryville. " * 20
+    wf.context.append(
+        {
+            "role": "USER",
+            "message_id": "user-row-durable",
+            "text": f"{durable_text}\n\nReference: @ref:message:user-row-durable",
+            "timestamp": "2026-11-14T11:00:00+00:00",
+            "metadata": {},
+        }
+    )
+    feedback_texts.append(wf.context[-1]["text"])
+    db_texts = {row["message_id"]: row["text"] for row in wf.context if "message_id" in row}
+    db_texts["user-row-durable"] = durable_text
+    summaries = [
+        {
+            "role": "USER",
+            "text": f"[CONTEXT SUMMARY]: compaction {index} " + "primary request and intent " * 1_500,
+            "timestamp": f"2026-11-14T2{index}:00:00+00:00",
+            "metadata": {"compactionSummary": True},
+        }
+        for index in range(3)
+    ]
+    wf.context.extend(summaries)
+    wf._admit_durable_response_schema_feedback()
+    assert _real_user_requirement_keys(summaries) == set() == _requirement_keys(summaries), (
+        "a compaction summary is the harness's own digest, not a user requirement"
+    )
+    assert wf._response_schema_feedback == feedback_texts, "only real user feedback is admitted"
+    for index in range(31):
+        record = {
+            "tool_call_id": f"call-{index}",
+            "agent_type": "browser",
+            "foreground": False,
+            "address": f"/root/storage_quote_{index}",
+            "goal": f"storage quote {index} " + "g" * 480,
+            "status": "completed",
+            "task_name": f"storage_quote_{index}",
+            "path": f"/root/storage_quote_{index}",
+            "run": 1,
+        }
+        if index >= 21:
+            goal = f"wake goal {index} " + "validate the smartstop quote session " * 60
+            record["wake"] = {
+                "tool_args": {"type": "browser", "goal": goal, "output_schema": {"fields": ["price"] * 60}},
+                "base_goal": goal,
+                "result": f"previous result {index} " + "10x10 inside unit $75 monthly " * 110,
+            }
+        wf._background_finished[f"call-{index}"] = record
+    # A re-woken task's next-run goal differs from its base goal: both stay (negative control).
+    rewoken = wf._background_finished["call-30"]["wake"]
+    rewoken["tool_args"]["goal"] = "Use the Oakland unit instead.\n\n" + rewoken["base_goal"]
+
+    context = [
+        {"role": "TOOL", "text": f"tool {index} " + "x" * 2_000, "metadata": {"toolCallId": f"tc-{index}"}}
+        for index in range(560)
+    ] + summaries
+    context_bytes = len(json.dumps(context))
+    assert context_bytes > 1_200_000  # run_agent's byte-compaction budget (PR #2239)
+
+    args = wf._continuation_args(context)
+    state = args[16]
+    runtime_json = json.dumps(state["runtime_state"])
+
+    for summary in summaries:
+        assert summary["text"] not in runtime_json, "compaction summary rode in runtime_state"
+    claimed = wf._response_schema_feedback_message_ids
+    assert set(claimed.values()) == set(db_texts), "every id-bound feedback entry is claim-checked"
+    for index, text in enumerate(feedback_texts):
+        expected = 0 if index in claimed else 1  # claim-checked text lives only in the DB
+        assert runtime_json.count(text[:40]) == expected, f"feedback carried {expected}x expected: {text[:20]}"
+    for record in list(wf._background_finished.values())[:-1]:
+        if "wake" in record:
+            assert runtime_json.count(record["wake"]["base_goal"]) == 1, "wake goal carried twice"
+    assert "base_goal" in state["runtime_state"]["background_agents"]["finished"]["call-30"]["wake"]
+    unique_bytes = sum(
+        len(json.dumps(text)) for index, text in enumerate(feedback_texts) if index not in claimed
+    ) + len(json.dumps(wf._background_state_snapshot()))
+    assert len(runtime_json) < unique_bytes + 20_000, (len(runtime_json), unique_bytes)
+    assert len(json.dumps(args)) < 2 * 1024 * 1024 - 300_000, "handoff must stay well under 2 MiB"
+
+    restored = _bare_workflow_instance()
+    restored.max_iterations = args[12]
+    restored.agent_id, restored.user_id = wf.agent_id, wf.user_id
+    restored._restore_deployment_state(json.loads(json.dumps(state)))
+    assert restored._continuation_resume_state() == state, "an unread claim keeps its id + digest"
+    revision = restored._response_schema_revision
+    restored._response_schema_initialized = True
+    restored._response_schema_revision = restored._response_schema_applied_revision + 1
+    restored._start_response_schema_refresh()
+    assert restored._response_schema_refresh_task is None, "schema refresh waited for claim-checked text"
+    restored._response_schema_initialized = False
+    restored._response_schema_revision = revision
+    fetch = AsyncMock(return_value=dict(db_texts))
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=fetch),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+    ):
+        await restored._hydrate_claim_checked_feedback()
+    assert fetch.await_count == 1 and fetch.await_args.kwargs["args"] == [wf.user_id, sorted(db_texts)]
+    assert restored._response_schema_feedback == wf._response_schema_feedback
+    assert restored._response_schema_feedback_sources == wf._response_schema_feedback_sources
+    assert restored._response_schema_feedback_rows == wf._response_schema_feedback_rows
+    assert restored._background_finished == wf._background_finished
+    assert restored._continuation_resume_state() == state
+
+    # A user message deleted from the DB is no longer a requirement: its entry is dropped.
+    pruned = _bare_workflow_instance()
+    pruned.max_iterations = args[12]
+    pruned.agent_id, pruned.user_id = wf.agent_id, wf.user_id
+    pruned._restore_deployment_state(json.loads(json.dumps(state)))
+    gone = {key: value for key, value in db_texts.items() if key != "user-row-0"}
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=AsyncMock(return_value=gone)),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+    ):
+        await pruned._hydrate_claim_checked_feedback()
+    assert pruned._response_schema_feedback == feedback_texts[1:]
+    assert len(pruned._response_schema_feedback_sources) == len(feedback_texts) - 1
+    assert sorted(pruned._response_schema_feedback_message_ids.values()) == sorted(gone)
+
+    # A snapshot written before this change (full-text keys inline) still restores.
+    legacy_runtime = dict(state["runtime_state"])
+    legacy_runtime["response_schema_feedback_sources"] = [
+        list(source) if source is not None else None for source in wf._response_schema_feedback_sources
+    ]
+    legacy_runtime["response_schema_feedback_rows"] = [list(key) for key in sorted(wf._response_schema_feedback_rows)]
+    legacy = _bare_workflow_instance()
+    legacy.max_iterations = args[12]
+    legacy._restore_deployment_state({**state, "runtime_state": legacy_runtime})
+    assert legacy._response_schema_feedback_rows == wf._response_schema_feedback_rows
+    assert legacy._continuation_resume_state() == state
+
+    # 8789a5df's own shape: an old snapshot that already admitted a summary as feedback,
+    # with full-text source, row and baseline keys, re-serializes that text exactly once.
+    summary_key = ["legacy", summaries[0]["timestamp"], summaries[0]["text"]]
+    admitted = {
+        **legacy_runtime,
+        "response_schema_feedback": [*legacy_runtime["response_schema_feedback"], summaries[0]["text"]],
+        "response_schema_feedback_sources": [*legacy_runtime["response_schema_feedback_sources"], summary_key],
+        "response_schema_feedback_rows": [*legacy_runtime["response_schema_feedback_rows"], summary_key],
+        "response_schema_task_baseline_rows": [summary_key],
+    }
+    old = _bare_workflow_instance()
+    old.max_iterations = args[12]
+    old._restore_deployment_state({**state, "runtime_state": admitted})
+    assert tuple(summary_key) in old._response_schema_task_baseline_rows
+    assert old._response_schema_feedback_sources[-1] == tuple(summary_key)
+    reserialized = old._continuation_resume_state()
+    assert json.dumps(reserialized["runtime_state"]).count(summaries[0]["text"][:60]) == 1
+    again = _bare_workflow_instance()
+    again.max_iterations = args[12]
+    again._restore_deployment_state(json.loads(json.dumps(reserialized)))
+    assert again._response_schema_feedback_rows == old._response_schema_feedback_rows
+    assert again._response_schema_task_baseline_rows == old._response_schema_task_baseline_rows
+
+
 async def test_workflow_project_context_appears_once_across_continuation():
     """V2 (RCA 2026-11-06): the project section is derived from agent config, never duplicated.
 
@@ -4663,6 +4862,16 @@ class _FakeWorkflowModule:
 
     def patched(self, _patch_id: str) -> bool:
         return True
+
+    async def wait_condition(self, fn, *, timeout=None, **_kwargs):
+        # Event-loop turns stand in for workflow time; a bounded wait times out.
+        for _ in range(200):
+            if fn():
+                return
+            await asyncio.sleep(0)
+        if timeout is not None:
+            raise asyncio.TimeoutError()
+        raise AssertionError("unbounded wait_condition never satisfied in fake")
 
     def info(self):
         class _Info:
@@ -7573,6 +7782,40 @@ async def test_workflow_check_cost_limit_skips_non_root():
         assert wf._cost_limit_reached is False
     finally:
         _restore_workflow(original)
+
+
+async def test_workflow_check_cost_limit_texts_messaging_created_roots():
+    """The cost-limit text goes to roots started from the phone, WhatsApp the same as SMS.
+
+    Andy, 2026-11-14: "whatsapp should operate under the same conditions" as SMS.
+    A web or Mac root never touched from the phone gets no cost-limit text. The
+    text reports the cost that tripped the limit: persisted resume spend (150c)
+    above the live subtree cost (20c) must not be reported as 20c.
+    """
+    for source, expected_texts in (("SMS", 1), ("WHATSAPP", 1), ("WEB", 0), ("MAC_APP", 0)):
+        wf = _bare_workflow_instance()
+        wf.agent_id = f"root-{source.lower()}"
+        wf.user_id = "u"
+        wf.parent_workflow_id = None
+        wf.subtree_cost_cents = 20.0
+        wf._persisted_tree_cents = 150.0
+        wf.price_limit_cents = 100
+        wf.agent_source = source
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        try:
+            await wf._check_cost_limit()
+        finally:
+            _restore_workflow(original)
+        assert wf._cost_limit_reached is True, source
+        texts = [
+            args
+            for fn_name, args in fake.activity_calls
+            if fn_name == "notify_sms_event_activity" and args[1] == "cost_limit"
+        ]
+        assert len(texts) == expected_texts, (source, texts)
+        for args in texts:
+            assert args[3]["tree_cost_cents"] == 150, (source, args)
 
 
 async def test_workflow_update_tree_state_skips_without_bus():
@@ -11993,6 +12236,221 @@ async def test_workflow_mark_complete_happy_path():
         _restore_workflow(original)
 
 
+def _speculative_summary_root():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-speculative"
+    wf.user_id = "u-spec"
+    wf.goal = "research RFCs"
+    wf.model = "rose-1-ultra"
+    wf.parent_workflow_id = None
+    wf.root_agent_id = "root-speculative"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+    tracked = []
+
+    async def track(prompt_tokens, completion_tokens, **kwargs):
+        tracked.append((kwargs.get("call_site"), prompt_tokens, completion_tokens))
+
+    wf._track_llm_cost = track
+    return wf, tracked
+
+
+def _final_summary_row(fake):
+    return next(
+        (i, args[3])
+        for i, (name, args) in enumerate(fake.activity_calls)
+        if name == "post_agent_message"
+        and len(args or []) >= 4
+        and (args[3] or {}).get("toolName") == "completion_summary"
+        and (args[3] or {}).get("toolStatus") == "FINISHED"
+    )
+
+
+async def test_workflow_root_completion_summary_overlaps_verifier():
+    """A root's completion summary runs while the verifier judges, not after it.
+
+    background-agent-message-smoke e7d8ba91: verifier 74.1 s, then a serial
+    completion summary 15.9 s, COMPLETED persisted at T+185 of a 180 s budget.
+    The summary must already be running before the verdict, be adopted only
+    after a pass, appear before mark_finished, and keep its cost accounted.
+    """
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    release = asyncio.Event()
+    fake.activity_blockers["generate_completion_summary"] = release
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "Researched RFC 9110 and RFC 9111.",
+        "tool_counts": {"spawn_agent": 1},
+        "usage": {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49},
+    }
+    context = [{"role": "USER", "text": "research RFCs"}]
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await asyncio.sleep(0)
+        # Verifier still judging: the summary has already been scheduled.
+        assert [name for name, _ in fake.activity_calls] == ["generate_completion_summary"]
+        assert fake.activity_calls[0][1][3] is None, "speculative summary cannot know the verifier output"
+        await wf._settle_speculative_completion_summary(True)
+        release.set()
+        await wf._mark_complete(context=context, structured_response={"documents": [{"rfc_number": "9110"}]})
+        names = [name for name, _ in fake.activity_calls]
+        assert names.count("generate_completion_summary") == 1, names
+        row_index, row = _final_summary_row(fake)
+        assert row["completionSummary"]["summary"] == "Researched RFC 9110 and RFC 9111."
+        assert row_index < names.index("mark_finished"), "final summary must be observable before COMPLETED"
+        assert tracked.count(("completion_summary", 40, 9)) == 1, tracked
+    finally:
+        _restore_workflow(original)
+
+    # Rejected verdict: discard (still accounted), then the serial summary runs
+    # with the verified structured output exactly as before.
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "Done.",
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await wf._settle_speculative_completion_summary(False)
+        await wf._mark_complete(context=context, structured_response={"answer": "42"})
+        summary_args = [args for name, args in fake.activity_calls if name == "generate_completion_summary"]
+        assert len(summary_args) == 2, summary_args
+        assert sorted(str(args[3]) for args in summary_args) == ["None", "{'answer': '42'}"], summary_args
+        assert tracked.count(("completion_summary", 7, 3)) == 2, "discarded summary spend must stay accounted"
+    finally:
+        _restore_workflow(original)
+
+    # A failed speculative summary falls back to the existing serial call.
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    fake.activity_fail_for.add("generate_completion_summary")
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await wf._settle_speculative_completion_summary(True)
+        await asyncio.sleep(0)  # the speculative attempt runs (and fails) first
+        fake.activity_fail_for.clear()
+        fake.activity_returns["generate_completion_summary"] = {"summary": "Recovered summary.", "usage": {}}
+        await wf._mark_complete(context=context, structured_response={"answer": "42"})
+        names = [name for name, _ in fake.activity_calls]
+        assert names.count("generate_completion_summary") == 2, names
+        assert _final_summary_row(fake)[1]["completionSummary"]["summary"] == "Recovered summary."
+    finally:
+        _restore_workflow(original)
+
+    # Sub-agents keep the serial summary (no extra speculative spend per child).
+    wf, tracked = _speculative_summary_root()
+    wf.parent_workflow_id = "parent-wf"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        assert fake.activity_calls == []
+    finally:
+        _restore_workflow(original)
+
+    # A typed final answer replaces the summary call, so none is speculated.
+    wf, tracked = _speculative_summary_root()
+    wf.output_schema = {
+        "fields": [{"name": "answer", "type": "str", "required": True}],
+        "presentation": {"mode": "value", "field": "answer", "encoding": "text"},
+    }
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        assert fake.activity_calls == [] and wf._speculative_summary_handle is None
+    finally:
+        _restore_workflow(original)
+
+    # The activity's own internal-failure fallback is not adopted: regenerate.
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "Agent completed goal: research RFCs",
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "generation_failed": True,
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await wf._settle_speculative_completion_summary(True)
+        await asyncio.sleep(0)
+        fake.activity_returns["generate_completion_summary"] = {"summary": "Regenerated summary.", "usage": {}}
+        await wf._mark_complete(context=context, structured_response={"answer": "42"})
+        names = [name for name, _ in fake.activity_calls]
+        assert names.count("generate_completion_summary") == 2, names
+        assert _final_summary_row(fake)[1]["completionSummary"]["summary"] == "Regenerated summary."
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_discarded_speculative_summary_never_holds_completed():
+    """A slow summary from a rejected attempt cannot delay the verified COMPLETED.
+
+    It is still accounted after COMPLETED (bounded wait), and a run that ends
+    by failure or continue-as-new settles it first.
+    """
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    release_rejected = asyncio.Event()
+    calls = []
+
+    async def execute(fn, args=None, **_kwargs):
+        name = getattr(fn, "__name__", str(fn))
+        fake.activity_calls.append((name, args))
+        if name == "generate_completion_summary":
+            calls.append(args)
+            if len(calls) == 1:
+                await release_rejected.wait()
+                return {"summary": "Rejected-attempt summary.", "usage": {"prompt_tokens": 11, "completion_tokens": 2}}
+            return {"summary": "Verified summary.", "usage": {"prompt_tokens": 7, "completion_tokens": 3}}
+        return None
+
+    fake.execute_activity = execute
+    context = [{"role": "USER", "text": "research RFCs"}]
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)  # attempt 1
+        await wf._settle_speculative_completion_summary(False)  # rejected, still running
+        await wf._start_speculative_completion_summary(context)  # attempt 2
+        await wf._settle_speculative_completion_summary(True)
+        completing = asyncio.create_task(wf._mark_complete(context=context, structured_response={"ok": True}))
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if any(name == "mark_finished" for name, _ in fake.activity_calls):
+                break
+        names = [name for name, _ in fake.activity_calls]
+        assert "mark_finished" in names, f"verified completion waited on a rejected summary: {names}"
+        assert _final_summary_row(fake)[1]["completionSummary"]["summary"] == "Verified summary."
+        release_rejected.set()
+        await asyncio.wait_for(completing, 1)
+        assert ("completion_summary", 11, 2) in tracked and ("completion_summary", 7, 3) in tracked, tracked
+    finally:
+        _restore_workflow(original)
+
+    # Failure / continue-as-new: retire settles finished discarded spend first.
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "Discarded.",
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await wf._settle_speculative_completion_summary(True)  # verified, then superseded
+        await wf._retire_speculative_summaries()
+        assert tracked == [("completion_summary", 5, 1)], tracked
+        assert wf._speculative_summary_handle is None and wf._discarded_summary_accounting == []
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_does_not_forward_full_context():
     """Huge Fast Mode context must not ride the mark_finished Temporal payload.
 
@@ -14817,6 +15275,10 @@ async def run_all_tests():
         test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off,
     )
     await r.record_async(
+        "wf_continuation_runtime_state_carries_feedback_and_background_once",
+        test_workflow_continuation_runtime_state_carries_feedback_and_background_once,
+    )
+    await r.record_async(
         "wf_project_context_once_across_continuation",
         test_workflow_project_context_appears_once_across_continuation,
     )
@@ -15250,6 +15712,10 @@ async def run_all_tests():
     await r.record_async("wf_check_cost_limit_below", test_workflow_check_cost_limit_no_op_when_below)
     await r.record_async("wf_check_cost_limit_non_root", test_workflow_check_cost_limit_skips_non_root)
     await r.record_async(
+        "wf_check_cost_limit_texts_messaging_created_roots",
+        test_workflow_check_cost_limit_texts_messaging_created_roots,
+    )
+    await r.record_async(
         "wf_check_cost_limit_after_finished",
         test_workflow_check_cost_limit_skipped_after_finished,
     )
@@ -15449,6 +15915,13 @@ async def run_all_tests():
         "wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
+    await r.record_async(
+        "wf_root_completion_summary_overlaps_verifier", test_workflow_root_completion_summary_overlaps_verifier
+    )
+    await r.record_async(
+        "wf_discarded_speculative_summary_never_holds_completed",
+        test_workflow_discarded_speculative_summary_never_holds_completed,
+    )
     await r.record_async(
         "wf_mark_complete_does_not_forward_full_context",
         test_workflow_mark_complete_does_not_forward_full_context,

@@ -14,12 +14,16 @@
  *     (Gmail addresses, Plaid institutions, compute subscriptions): one chip per
  *     account, one bar per syncing account, "+ Add account" re-runs connect
  *     chip [SYNCING + light] (Gmail `history`) → "checking for new mail", no bar
+ *     addLabel → "+ <addLabel>" instead of "+ Add account"
  *     rowSync (the backend reports one account for the whole row) → one row bar,
  *       no per-chip bars
  *   bar text: provider phase as words, bytes as sizes, "N of M <unit>", "~ETA left"
  *   [CONNECTED, layout=rows] (compute subscriptions): one line per account instead
- *     of chips — label, the account's trailing usage meter, and a ⋯ menu holding
- *     its reconnect / remove actions (DesktopAccountRows)
+ *     of chips — label, its team-sharing caption (if any), the account's trailing
+ *     usage meter, and a ⋯ menu holding its reconnect / remove actions (DesktopAccountRows)
+ *   [CONNECTED, an account has `share`] (any shareable account — Gmail, iMessage,
+ *     WhatsApp, Plaid, LinkedIn, Granola, Fireflies — with a team to share with):
+ *     one account per line — its chip, then its team-sharing caption (AccountTeamShare)
  *
  * There is no Manage state and no details panel: everything is on the row.
  * Pure presentation; DesktopIntegrations owns data and actions.
@@ -58,6 +62,8 @@ export interface DesktopAccountView {
   errorText?: string;
   /** Row layout only: right-aligned content beside the label (compute usage meter). */
   trailing?: ReactNode;
+  /** The account's team-sharing caption: right after its chip, or beside its label in row layout. */
+  share?: ReactNode;
 }
 
 /** Sync of a multi-account row whose backend reports one account for the whole row. */
@@ -91,6 +97,10 @@ export interface DesktopIntegrationView {
   layout?: 'chips' | 'rows';
   /** Row-scoped extras (sign-in modal, inline error). */
   extra?: ReactNode;
+  /** multiAccount add button text; default "+ Add account". */
+  addLabel?: string;
+  /** Not-connected action text; default "Connect". */
+  connectLabel?: string;
 }
 
 /** Shared row look (the iPhone row reuses these so every integration row matches). */
@@ -105,7 +115,7 @@ const ERROR_LINE_CLASSES = 'text-xs text-destructive dark:text-red-300';
 
 export function DesktopSectionHeader({ children }: { children: ReactNode }) {
   return (
-    <h3 className="mb-1.5 mt-5 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground first:mt-1">
+    <h3 className="mb-1.5 mt-6 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
       {children}
     </h3>
   );
@@ -177,9 +187,13 @@ function RowAction({ view }: { view: DesktopIntegrationView }) {
       className={ACTION_CLASSES}
       onClick={view.onConnect}
       disabled={view.connecting}
-      aria-label={`Connect ${view.name}`}
+      aria-label={`${view.connectLabel ?? 'Connect'} ${view.name}`}
     >
-      {view.connecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Connect'}
+      {view.connecting ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        (view.connectLabel ?? 'Connect')
+      )}
     </button>
   );
 }
@@ -211,16 +225,27 @@ function SyncBars({ view }: { view: DesktopIntegrationView }) {
 
 function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
   const many = view.accounts.length > 1;
+  const shared = view.accounts.some((account) => account.share !== undefined);
   const rowError = view.rowSync?.errorText;
   return (
     <div className="ml-[46px] mt-2 flex flex-col gap-2">
       {view.layout === 'rows' ? (
         <DesktopAccountRows accounts={view.accounts} testId={`accounts-${view.key}`} />
       ) : (
-        <div className="flex flex-wrap gap-1.5" data-testid={`accounts-${view.key}`}>
-          {view.accounts.map((account) => (
-            <DesktopAccountChip key={accountKey(account)} account={account} />
-          ))}
+        <div
+          className={shared ? 'flex flex-col gap-1.5' : 'flex flex-wrap gap-1.5'}
+          data-testid={`accounts-${view.key}`}
+        >
+          {view.accounts.map((account) =>
+            shared ? (
+              <div key={accountKey(account)} className="flex min-w-0 items-center gap-2.5">
+                <DesktopAccountChip account={account} />
+                {account.share}
+              </div>
+            ) : (
+              <DesktopAccountChip key={accountKey(account)} account={account} />
+            ),
+          )}
         </div>
       )}
       {view.accounts
@@ -246,10 +271,11 @@ function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
           type="button"
           onClick={view.onConnect}
           disabled={view.connecting}
-          aria-label={`Add ${view.name} account`}
+          aria-label={view.addLabel ?? `Add ${view.name} account`}
           className="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-[#e8507f] disabled:opacity-60 dark:hover:text-[#ff7aa2]"
         >
-          {view.connecting && <Loader2 className="h-3 w-3 animate-spin" />}+ Add account
+          {view.connecting && <Loader2 className="h-3 w-3 animate-spin" />}+{' '}
+          {view.addLabel ?? 'Add account'}
         </button>
       )}
     </div>

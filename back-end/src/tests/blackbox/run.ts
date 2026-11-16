@@ -340,6 +340,17 @@ async function runScheduledDomain(
   return result;
 }
 
+/** The runner's own line for a failed domain process: its exit code, signal and duration. */
+function domainExitLine(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  duration: number,
+  output: string
+): string {
+  const silent = output.trim() === '' ? ' with no output' : '';
+  return `[runner] domain process exited code=${code} signal=${signal ?? 'none'} after ${duration}ms${silent}`;
+}
+
 function runDomain(domain: string, workerIndex: number): Promise<Result> {
   return new Promise((res) => {
     const file = resolve(blackboxDir, `${domain}.blackbox.ts`);
@@ -428,15 +439,19 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
       });
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      const duration = Date.now() - start;
+      const output = Buffer.concat(chunks).toString();
+      // A native crash (SIGSEGV) prints nothing; name the exit so a silent failure is diagnosable.
       res({
         domain,
         passed: code === 0,
-        duration: Date.now() - start,
-        output: Buffer.concat(chunks).toString(),
+        duration,
+        output:
+          code === 0 ? output : `${output}\n${domainExitLine(code, signal, duration, output)}`,
       });
     });
   });

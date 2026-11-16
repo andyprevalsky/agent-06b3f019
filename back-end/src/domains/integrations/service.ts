@@ -31,6 +31,7 @@ import {
   markCerebrasApiKeyOnCooldown,
   markGptApiKeyOnCooldown,
   releaseComputeTokenLineage,
+  teamComputeOwner,
 } from '../../providers/computeCredentials';
 import { resolveUserLoginByCredential } from '../../providers/computeLoginFailure';
 import {
@@ -55,7 +56,10 @@ import {
   isIntegrationAuthFailureReason,
 } from '../../providers/integrationConnectionSync';
 import * as repo from './repo';
-import { scheduleClaudeUsageRefresh } from '../../providers/computeUsageRefresh';
+import {
+  scheduleClaudeUsageRefresh,
+  scheduleCodexUsageRefresh,
+} from '../../providers/computeUsageRefresh';
 import {
   redactLanternIntegration,
   updateLanternIntegration,
@@ -712,6 +716,8 @@ export async function getComputeCodeToken(
     rootAgentId?: string;
     fastCacheAffinityKey?: string;
     tokenType?: 'claude' | 'gpt';
+    /** Team-shared subscriptions: only for the internal agents service (server-side Rose calls). */
+    includeTeam?: boolean;
   }
 ) {
   const result = await fetchComputeTokenForUser(userId, {
@@ -722,6 +728,7 @@ export async function getComputeCodeToken(
     rootAgentId: lineage?.rootAgentId,
     fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
     tokenType: lineage?.tokenType,
+    includeTeam: lineage?.includeTeam === true,
   });
   if (result === null || result === undefined) throw new NoTokensAvailableError();
   return {
@@ -733,6 +740,8 @@ export async function getComputeCodeToken(
     integrationId: result.integrationId,
     lineageKey: result.lineageKey,
     fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
+    // Which teammate's account served a team lease.
+    ...(result.source === 'team' ? { ownerUserId: result.userId, teamId: result.teamId } : {}),
   };
 }
 
@@ -750,7 +759,7 @@ export {
  */
 async function unrevokedLoginReply(
   type: 'claude' | 'gpt',
-  source: 'user' | 'pool',
+  source: 'user' | 'team' | 'pool',
   params: {
     poolTokenId?: string;
     integrationId?: string;
@@ -787,6 +796,26 @@ async function namedUserReport<
   if (params.credential === undefined || params.credential === '') return params;
   const integrationId = await resolveUserLoginByCredential(type, userId, params.credential);
   return integrationId === null ? params : { ...params, integrationId };
+}
+
+/**
+ * A cooldown or auth report on a team lease (source=team): `userId` is the
+ * teammate whose agent held it and `integrationId` the shared row. It lands on
+ * that exact row of its owner, and only while the grant is still current.
+ */
+async function teamReport<T extends { userId?: string; integrationId?: string }>(
+  type: 'claude' | 'gpt',
+  params: T
+): Promise<T & { ownerUserId: string; integrationId: string }> {
+  if (params.userId === undefined || params.userId === '') {
+    throw new Error('Missing userId for source=team');
+  }
+  if (params.integrationId === undefined || params.integrationId === '') {
+    throw new Error('Missing integrationId for source=team');
+  }
+  const ownerUserId = await teamComputeOwner(params.userId, type, params.integrationId);
+  if (ownerUserId === null) throw new Error('No current team share for this compute account');
+  return { ...params, ownerUserId, integrationId: params.integrationId };
 }
 
 export async function markTokenRateLimited(
@@ -843,7 +872,25 @@ export async function markTokenRateLimited(
       rateLimitedUntil: params.rateLimitedUntil ?? null,
     };
   }
-  throw new Error('Invalid source. Must be "pool" or "user".');
+  if (source === 'team') {
+    const report = await teamReport('claude', params);
+    const unrevoked = await unrevokedLoginReply('claude', source, report);
+    if (unrevoked !== null) return unrevoked;
+    await markUserTokenRateLimited(report.ownerUserId, {
+      rateLimitedUntil: params.rateLimitedUntil,
+      failureReason: params.failureReason,
+      integrationId: report.integrationId,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
+    });
+    return {
+      ok: true,
+      source,
+      integrationId: report.integrationId,
+      rateLimitedUntil: params.rateLimitedUntil ?? null,
+    };
+  }
+  throw new Error('Invalid source. Must be "pool", "user" or "team".');
 }
 
 export async function markComputeTokenRateLimited(
@@ -879,7 +926,17 @@ export async function markComputeTokenRateLimited(
     return result;
   }
   if (type === 'gpt') {
-    return markGptTokenRateLimited(source, params);
+    const result = await markGptTokenRateLimited(source, params);
+    // Same as Claude: Rose's own backoff says nothing about the account's
+    // windows, so ask Codex for them in the background. Never awaited; never on
+    // an auth failure.
+    if (
+      params.rateLimitAuthoritative !== true &&
+      !isIntegrationAuthFailureReason(params.failureReason)
+    ) {
+      scheduleCodexUsageRefresh(source === 'pool' ? params.poolTokenId : params.integrationId);
+    }
+    return result;
   }
   if (type === 'anthropic') {
     // The shared ANTHROPIC_API_KEY funded default. Not a per-user/pool token —
@@ -992,7 +1049,25 @@ export async function markGptTokenRateLimited(
       rateLimitedUntil: params.rateLimitedUntil ?? null,
     };
   }
-  throw new Error('Invalid source. Must be "pool" or "user".');
+  if (source === 'team') {
+    const report = await teamReport('gpt', params);
+    const unrevoked = await unrevokedLoginReply('gpt', source, report);
+    if (unrevoked !== null) return unrevoked;
+    await markGptUserTokenRateLimited(report.ownerUserId, {
+      rateLimitedUntil: params.rateLimitedUntil,
+      failureReason: params.failureReason,
+      integrationId: report.integrationId,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
+    });
+    return {
+      ok: true,
+      source,
+      integrationId: report.integrationId,
+      rateLimitedUntil: params.rateLimitedUntil ?? null,
+    };
+  }
+  throw new Error('Invalid source. Must be "pool", "user" or "team".');
 }
 
 export async function markPoolTokenAsRateLimited(

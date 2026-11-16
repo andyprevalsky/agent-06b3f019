@@ -8,7 +8,10 @@ import {
 // providers/benchmarkPaymentIdentity owns the production identity. Importing it
 // from purchases/config resolved to `undefined`, so `--live` would have resolved
 // its seed identity to undefined and the sandbox/live guard never fired.
-import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
+import {
+  BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID,
+  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
+} from '../src/providers/benchmarkPaymentIdentity';
 import { applyResolvedBenchmarkAgentCardIds } from '../src/domains/test-payment/config';
 import { loadDotenvWithCallerOverrides } from '../src/providers/loadDotenvWithCallerOverrides';
 import { isAdminUser } from '../src/utils/adminAccess';
@@ -33,6 +36,8 @@ import {
   requireLiveV2FixtureReady,
   type FixtureMode,
 } from './setup-benchmark-payment-guards';
+import { connectThenOpen } from './seed-local-helpers';
+import { prisma as sharedPrisma } from '../src/providers/database';
 
 // Cursor Cloud injects per-key secrets into the process env. A truncated
 // BENCHMARK_AGENTCARD_ORG_ID (seen as 7 chars) would otherwise beat the full
@@ -416,6 +421,45 @@ async function provisionLiveFixture(
   );
 }
 
+/**
+ * The owner's live production lifecycle probe bills a dedicated live Stripe customer, never the
+ * owner's Subscription (providers/ownerLifecycleBilling.ts). Creates or reuses that customer and
+ * requires a saved card (hosted Checkout link on first run). No database or AgentCard writes; the
+ * printed id is set as BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID on the backend.
+ */
+async function provisionOwnerLifecycleBilling(selectedCustomerId?: string): Promise<void> {
+  const stripe = new Stripe(requireStripeLiveKey(), { apiVersion: STRIPE_API_VERSION });
+  const owner = BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID;
+  let customerId = selectedCustomerId ?? process.env.BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID;
+  if (customerId !== undefined && customerId.trim() !== '') {
+    const existing = await stripe.customers.retrieve(customerId.trim());
+    if (existing.deleted === true || existing.metadata?.fixture !== OWNER_BILLING_FIXTURE) {
+      throw new Error(`${customerId} is not the owner lifecycle-probe billing customer`);
+    }
+    customerId = existing.id;
+  } else {
+    const found = await stripe.customers.search({
+      query: `metadata['fixture']:'${OWNER_BILLING_FIXTURE}'`,
+    });
+    const reuse = found.data.find((customer) => customer.metadata?.userId === owner);
+    customerId =
+      reuse?.id ??
+      (
+        await stripe.customers.create({
+          name: 'Rose Labs Owner Lifecycle Probe',
+          metadata: { userId: owner, fixture: OWNER_BILLING_FIXTURE },
+        })
+      ).id;
+  }
+  const paymentMethodId = await ensureLiveDefaultPaymentMethod(stripe, customerId);
+  console.log(
+    `Owner lifecycle-probe billing ready: live customer ${customerId} (default payment method ` +
+      `${paymentMethodId}). Set BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID=${customerId} on the backend.`
+  );
+}
+
+const OWNER_BILLING_FIXTURE = 'agent-payment-production-lifecycle-owner';
+
 export { configureLiveFixtureEnvironment } from './setup-benchmark-payment-guards';
 
 async function main(): Promise<void> {
@@ -439,7 +483,15 @@ KYC to verify connection scope, then binds it exclusively in the local database.
 It sends no OTP and never treats BENCHMARK_AGENTCARD_CARDHOLDER_ID as a v2 user.
 --live rejects BENCHMARK_AGENTCARD_V2_USER_ID; connect live users through Rose.
 A legacy cardholder is never a substitute for the current-client v2 connection.
+--owner-billing creates or reuses the dedicated live Stripe customer the owner's
+production lifecycle probe bills (never the owner's Subscription) and requires a saved
+card; it writes no database rows. Set the printed id as
+BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID on the backend.
 --help performs no database or provider calls.\n`);
+    return;
+  }
+  if (process.argv.includes('--owner-billing')) {
+    await provisionOwnerLifecycleBilling(argValue('--stripe-customer-id'));
     return;
   }
   const mode: FixtureMode = process.argv.includes('--live') ? 'live' : 'sandbox';
@@ -474,7 +526,12 @@ A legacy cardholder is never a substitute for the current-client v2 connection.
   assertDedicatedBenchmarkUser(userId, mode);
   assertUserMatchesMode(userId, mode);
   assertNonAdminBenchmarkUser(userId, mode);
-  const prisma = new PrismaClient();
+  // The AgentCard org imports above construct src/providers/database.ts's module client. Open
+  // this script's own client only after that client's first connect has run the Prisma engine's
+  // one-time TLS probe, which setenv()s SSL_CERT_FILE/DIR on an engine thread: a second client
+  // constructed earlier reads process.env during that write, and the fixture died with SIGSEGV
+  // and no output (docs/rca/cases/2026-11-08-prisma-engine-tls-probe-setenv-raced-second-client-getenv.md).
+  const prisma = await connectThenOpen(sharedPrisma, () => new PrismaClient());
   try {
     if (mode === 'live') {
       await provisionLiveFixture(prisma, userId, selectedCustomerId);
@@ -482,7 +539,7 @@ A legacy cardholder is never a substitute for the current-client v2 connection.
     }
     await seedSandboxFixture(prisma, userId);
   } finally {
-    await prisma.$disconnect();
+    await Promise.all([prisma.$disconnect(), sharedPrisma.$disconnect()]);
   }
 }
 

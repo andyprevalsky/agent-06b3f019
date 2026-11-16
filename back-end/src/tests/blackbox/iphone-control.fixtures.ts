@@ -104,7 +104,8 @@ export class Harness {
   private nextFrame?: Barrier;
   private nextRead?: Barrier;
   cleanupComplete = false;
-  beforeStop?: () => Promise<void>;
+  readonly endedSessions = new Set<string>(); // their receipts report cleanup_complete
+  beforeStop?: (sessionId: string) => Promise<void>;
   createUnknown = false;
   hideReceipt = false;
   setupVerifier: SetupVerifier = async () => {
@@ -112,6 +113,7 @@ export class Harness {
   };
   beforeAuthCompletion?: () => Promise<void>;
   authSignals = 0;
+  authSignalResponses: (string | undefined)[] = [];
   authResumes = 0;
   echoInputResult = false;
   observationResult: unknown = undefined;
@@ -246,7 +248,7 @@ export class Harness {
           const saved = [...this.sessions.values()].find((s) => s.id === sid);
           if (saved === undefined) json(404, { code: 'not_found' });
           else if (method === 'DELETE') {
-            await this.beforeStop?.();
+            await this.beforeStop?.(saved.id);
             json(202, { close_requested: true, cleanup_complete: false });
           } else {
             const held = this.sessionState === 'provisioning' ? this.nextReadiness : undefined;
@@ -383,8 +385,9 @@ export class Harness {
           beforeCompletionClaim: async () => {
             await this.beforeAuthCompletion?.();
           },
-          signalCompleted: async () => {
+          signalCompleted: async (_workflowId, _agentId, _requestId, _message, response) => {
             this.authSignals++;
+            this.authSignalResponses.push(response);
           },
           resumeAgent: async () => {
             this.authResumes++;
@@ -407,7 +410,7 @@ export class Harness {
       kind: 'device',
       state: this.sessionState,
       expires_at: expires,
-      cleanup_complete: this.cleanupComplete,
+      cleanup_complete: this.cleanupComplete || this.endedSessions.has(saved.id),
       close_requested: false,
       control:
         this.sessionState === 'ready'

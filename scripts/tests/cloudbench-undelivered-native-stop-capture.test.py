@@ -333,6 +333,41 @@ class UndeliveredNativeStopCapture(unittest.TestCase):
         self.assertFalse((self.out / "guest-cleanup.provider-manifest.json").exists())
 
 
+CLONE_SERVICES = [{
+    "protocol": "tcp", "internal_port": 8765,
+    "ports": [{"port": 8765, "handlers": ["http"]}],
+}]
+
+
+class UndeliveredNativeStopCaptureWithServices(UndeliveredNativeStopCapture):
+    """Every fleet clone inherits the donor's network services (PR #1972 owner a4b2999b).
+
+    The whole exact-owner chain (capture, stopped proof, sealed cleanup, receipt) must
+    complete with the evidence preserved: the inert boot carries no services and the
+    exact original config, services included, is restored.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.original_config["services"] = copy.deepcopy(CLONE_SERVICES)
+        self.state["machines"][MACHINE]["config"] = copy.deepcopy(self.original_config)
+        capture, state = self.helper["guest_capture"], self.state
+
+        def capture_without_listeners(fly, ident, *args):
+            assert not state["machines"][ident["machine_id"]]["config"].get("services"), \
+                "the inert boot must not expose the clone's services"
+            return capture(fly, ident, *args)
+
+        self.helper["guest_capture"] = capture_without_listeners
+
+    def test_capture_provenance_records_isolated_services(self) -> None:
+        status, _, stderr = self.capture()
+        self.assertEqual(status, 0, stderr)
+        provenance = json.loads((self.capture_dir / f"{MACHINE}.provenance.json").read_text())
+        self.assertIs(provenance["services_isolated"], True)
+        self.assertEqual(self.state["machines"][MACHINE]["config"]["services"], CLONE_SERVICES)
+
+
 PRESTACK_FILES = {
     "bench.log": (f"RUNSTAMP-{TOKEN}\n[boot 06:37:04] bootstrap-checkout 172e555bd1c4\n"
                   "[cloudbench] git-maintenance 0s\nTerminated\n").encode(),

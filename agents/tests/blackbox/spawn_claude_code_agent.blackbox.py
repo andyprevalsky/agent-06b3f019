@@ -20,6 +20,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "lib"))
+from test_quarantine import quarantine
+
 from _test_utils import (
     BlackboxResult,
     assert_captured_call,
@@ -916,6 +919,12 @@ async def test_handoff_complete_needs_standard_and_declared_fields():
         assert expected in reasoning, (expected, reasoning)
 
 
+@quarantine(
+    since="2026-11-13",
+    repair="https://boxes.dev/thread/ph70grxsq8n6vgq6sfw4m1tmf98jaxw8",
+    error="claude_ws_server_task_is_a_goal: AssertionError: not ok 4 - a user's direct turn that writes the handoff hands the session back at once: timeout waiting for CLI exit",
+    evidence="PR1865 round 67 agents-coverage-blackbox spawn-claude-code-agent FLAKY: goal-turn.test.mjs subtest 4 CLI exit not seen within 15 s under coverage load; same-source rerun passed",
+)
 async def test_claude_ws_server_starts_every_task_as_a_goal():
     """The sandbox ws-server turns each task into ``/goal <task + end condition>`` and
     hands a held session back once the goal handoff exists (goal-turn.test.mjs)."""
@@ -4443,6 +4452,14 @@ async def _run_all_tests():
     )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     r.record("native_codex_usage_retains_session_scope", test_native_codex_usage_retains_session_scope)
+    await r.record_async(
+        "judge_evidence_streamed_claude_session_native_process_trace",
+        test_judge_evidence_of_streamed_claude_session_satisfies_native_process_trace,
+    )
+    await r.record_async(
+        "valid_handoff_empty_required_list_complete_keeps_process_evidence",
+        test_valid_handoff_with_empty_required_list_is_complete_and_keeps_process_evidence,
+    )
     await r.record_async("monitor_diagnostics_non_string_event_types", test_monitor_diagnostics_preserve_non_string_event_types)
     await r.record_async("native_codex_terminal_finishes_idle_app_server", test_native_codex_terminal_event_finishes_idle_app_server)
     await r.record_async("native_codex_terminal_respects_hold_and_newer_active_turn", test_native_codex_terminal_respects_hold_and_newer_active_turn)
@@ -7248,6 +7265,262 @@ async def test_native_codex_terminal_respects_hold_and_newer_active_turn():
             assert any(row["current_turn_id"] == "second" and row["terminal_turn_id"] is None for row in rows)
         assert rows[-1]["reason"] == "native_terminal_admitted" and not rows[-1]["direct_hold"]
         teardown_mock()
+
+
+def _process_session_stream(task, *, provider="claude", filler_events=0, forbidden_write=False):
+    """Native SDK stream for a real Process Bench fixture session.
+
+    Claude codec shapes captured from process-meeting-scheduling r001-j0015
+    (agent 4fc14e8a, task f67005e9, 333 raw events): every narrated message
+    streams cumulative ``agent_message`` snapshots keyed by ``item_id`` before
+    its final block, and every Bash call streams a partial ``tool_use`` block
+    start (empty input) before the assistant envelope with the same
+    ``tool_use_id``. Codex shapes are e2b-templates/codex-code/ws-server.mjs:
+    agent_message deltas, then ``item/started`` (``partial: true``) and
+    ``item/completed`` events sharing the item's ``item_id``.
+    """
+    import hashlib
+    import importlib.util
+    import shlex
+
+    from benchmarks.process_bench import ASSETS, FIXTURE_PATH
+
+    module_spec = importlib.util.spec_from_file_location("process_fixture", ASSETS / "process-fixture.py")
+    fixture_module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(fixture_module)
+    fixture_path = ASSETS / "process-fixtures.json"
+    fingerprint = hashlib.sha256(fixture_path.read_bytes()).hexdigest()
+    spec = task.process_spec
+    outcomes = json.loads(fixture_path.read_text())[spec["case"]]
+    samples = json.loads(
+        (Path(__file__).resolve().parents[2] / "benchmarks/fixtures/process-positive-inputs.json").read_text()
+    )
+    events: list[dict] = [{"provider": provider, "type": "session", "status": "starting"}]
+    events += [{"provider": provider, "type": "cli_message", "text": f"hook {i}"} for i in range(filler_events)]
+
+    def narrate(item_id, text, snapshots):
+        for size in range(1, snapshots + 1):
+            prefix = text[: max(1, len(text) * size // (snapshots + 1))]
+            events.append({"provider": provider, "type": "agent_message", "item_id": item_id, "text": prefix, "partial": True})
+        completed = {"status": "completed"} if provider == "codex" else {}
+        events.append({"provider": provider, "type": "agent_message", "item_id": item_id, "text": text, "partial": False, **completed})
+
+    def bash(tool_use_id, tool_input, stdout, tool="Bash"):
+        if provider == "codex":
+            item = {"provider": "codex", "item_id": tool_use_id}
+            if tool == "Write":
+                change = {"type": "file_change", "tool_kind": "file", "changes": [{"path": tool_input["file_path"]}]}
+                events.append({**item, **change, "status": "started", "partial": True})
+                events.append({**item, **change, "status": "completed", "partial": False})
+                return
+            command = shlex.join(["/bin/bash", "-lc", tool_input["command"]])
+            shell = {"type": "command", "tool_kind": "shell", "command": command}
+            events.append({**item, **shell, "status": "started", "partial": True, "output": "", "exit_code": None})
+            events.append({"provider": "codex", "type": "usage", "usage_scope": "turn", "output_tokens": 10})
+            events.append({**item, **shell, "status": "completed", "partial": False, "output": stdout, "exit_code": 0})
+            return
+        events.append({"provider": "claude", "type": "tool_use", "tool": tool, "tool_use_id": tool_use_id, "input": {}, "partial": True})
+        events.append({"provider": "claude", "type": "tool_use", "tool": tool, "tool_use_id": tool_use_id, "input": tool_input})
+        events.append({"provider": "claude", "type": "usage", "usage_scope": "turn", "output_tokens": 10})
+        events.append({"provider": "claude", "type": "tool_result", "tool_use_id": tool_use_id, "is_error": False,
+                       "tool_use_result": {"stdout": stdout, "stderr": "", "interrupted": False}})
+
+    if forbidden_write:
+        bash("toolu_forbidden", {"file_path": FIXTURE_PATH, "content": "print('ok')"}, "", tool="Write")
+    with tempfile.TemporaryDirectory() as directory:
+        for index, step in enumerate(spec["steps"]):
+            condition = step.get("when")
+            if condition:
+                source = next(s for s in spec["steps"] if s["id"] == condition["step"])
+                if outcomes[source["action"]][condition["field"]] != condition["equals"]:
+                    continue
+            data = {
+                key: (samples[spec["case"]][step["id"]][key] if values == ["*"] else values[0])
+                for key, values in step["inputs"].items()
+            }
+            args = [spec["case"], step["action"], step["actor"], step["entity"], str(step["day"]), json.dumps(data), fingerprint]
+            receipt = fixture_module.execute(*args, fixture_path=fixture_path, output_dir=Path(directory))
+            narrate(f"msg_{index}:1", f"Next I am running {step['action']} for {step['entity']}.", 10)
+            bash(f"toolu_{index}", {"command": shlex.join(["python3", FIXTURE_PATH, *args])}, json.dumps(receipt))
+    narrate("msg_final:1", "The process is complete; every step returned its fixture receipt. " * 4, 205)
+    events += [{"provider": provider, "type": "result", "status": "completed"},
+               {"provider": provider, "type": "turn_ended"}, {"provider": provider, "type": "final", "status": "completed"}]
+    return events
+
+
+async def _persisted_judge_evidence_rows(code_events, provider="claude"):
+    """Run the real producer and repo; return the TOOL rows the backend received."""
+    from domains.spawn_claude_code_agent import service
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    try:
+        await service._persist_code_agent_judge_evidence(
+            agent_id="root", task_id="code-session-1", code_provider=provider,
+            code_events=code_events, output_files=[], action_summary=["ran the process"],
+        )
+        rows = []
+        for call in get_captured_requests():
+            if call.get("method") == "POST" and "/api/agents/root/messages" in (call.get("url") or ""):
+                body = json.loads(call["requestBody"])
+                if (body.get("metadata") or {}).get("toolName") == "code_agent_sdk_events":
+                    rows.append({"role": body["role"], "message": body["message"], "metadata": body["metadata"]})
+        return rows
+    finally:
+        teardown_mock()
+
+
+async def test_judge_evidence_of_streamed_claude_session_satisfies_native_process_trace():
+    """H-18 (descend 2026-11-06): a streamed session's judge evidence is complete and counted.
+
+    Observed: process-meeting-scheduling r001-j0015 persisted 84 events with
+    steps_taken=333 (raw events incl. superseded agent_message snapshots), and
+    the partial tool_use block starts duplicated every native tool identity;
+    sessions over 200 retained events were cut to their last 200. Every
+    process-* task failed process-native-trace "missing/truncated SDK evidence count".
+    The same collapse dropped every Codex ``command`` start (``partial: true``,
+    same ``item_id`` as its completion): "missing native command start".
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.process_bench import check_process_trace
+    from domains.spawn_claude_code_agent import service
+
+    task = get_task_by_name("process-meeting-scheduling")
+
+    def trace(rows):
+        return {"agent": {"agent_id": "root"}, "messages": rows, "_benchmark": {}}
+
+    def row_events(rows):
+        return [e for r in rows for e in json.loads(r["message"].split("\n\n", 1)[1])["code_agent_events"]]
+
+    for provider in ("claude", "codex"):
+        # Model-visible context (parent tool result / verifier): one tool_use per
+        # Claude call, and Codex item starts collapsed into their completions as
+        # before; the judge evidence alone keeps the Codex starts.
+        stream = _process_session_stream(task, provider=provider)
+        context = json.loads(service._build_code_event_context(code_events=stream, output_files=[], action_summary=[]))
+        tool_ids = [e["tool_use_id"] for e in context["code_agent_events"] if e.get("type") == "tool_use"]
+        assert len(tool_ids) == len(set(tool_ids)), (provider, tool_ids)
+        assert not any(e.get("status") == "started" for e in context["code_agent_events"]), provider
+        judged = row_events(await _persisted_judge_evidence_rows(stream, provider))
+        commands = [e.get("status") for e in judged if e.get("type") == "command"]
+        if provider == "codex":
+            assert commands and commands.count("started") == commands.count("completed"), commands
+        else:
+            assert not commands, commands
+
+        # The j0015 shape: well under any page bound once superseded snapshots go.
+        rows = await _persisted_judge_evidence_rows(_process_session_stream(task, provider=provider), provider)
+        passed, reason = check_process_trace(task.process_spec, trace(rows))
+        assert passed, (provider, reason)
+
+        # A long session keeps every retained event, so nothing is cut from its head.
+        long_stream = _process_session_stream(task, provider=provider, filler_events=450)
+        rows = await _persisted_judge_evidence_rows(long_stream, provider)
+        passed, reason = check_process_trace(task.process_spec, trace(rows))
+        assert passed, (provider, reason)
+        assert len(rows) > 1, "the long session must span more than one bounded evidence row"
+        assert all(len(json.loads(r["message"].split("\n\n", 1)[1])["code_agent_events"]) <= 200 for r in rows)
+        # A missing evidence row is still detected as truncated evidence.
+        passed, reason = check_process_trace(task.process_spec, trace(rows[1:]))
+        assert not passed and "truncated SDK evidence count" in reason, (provider, reason)
+
+        # A forbidden fixture edit at the head of a long session stays visible.
+        rows = await _persisted_judge_evidence_rows(
+            _process_session_stream(task, provider=provider, filler_events=450, forbidden_write=True), provider
+        )
+        passed, reason = check_process_trace(task.process_spec, trace(rows))
+        assert not passed and "protected fixture was modified" in reason, (provider, reason)
+
+
+_EMPTY_REQUIRED_LIST_HANDOFF_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "spawn_claude_code_agent"
+    / "process-expense-reimbursement-valid-handoff-empty-required-list.json"
+)
+
+
+async def test_valid_handoff_with_empty_required_list_is_complete_and_keeps_process_evidence():
+    """H-21 (descend 2026-11-06): a schema-valid handoff is the complete result.
+
+    Replays process-expense-reimbursement r002-j0032 (agent 17bbefa2, code task
+    70205ca7): the verbatim declared schema and handoff, exit 0. The handoff
+    passed its JSON Schema but answered the required ``open_issues`` with ``[]``.
+    The verifier-off path re-judged it with the extraction predicate, whose
+    unstated required-means-non-empty rule made it "unverified" (score 0.5), so
+    no SDK evidence was persisted and process-native-trace failed "need one
+    unambiguous fixture session" although all six fixture actions ran.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.process_bench import check_process_trace
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    fixture = json.loads(_EMPTY_REQUIRED_LIST_HANDOFF_FIXTURE.read_text())
+    schema, handoff = fixture["output_schema"], fixture["handoff"]
+    open_issues = next(f for f in schema["fields"] if f["name"] == "open_issues")
+    assert open_issues["required"] is True and open_issues["type"] == "list[str]", open_issues
+    assert handoff["open_issues"] == [] and fixture["exit_code"] == 0
+    task = get_task_by_name("process-expense-reimbursement")
+    stream = _process_session_stream(task)
+
+    async def run(handoff_file, *, exit_code):
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        try:
+            with (
+                patch.dict("os.environ", {"ROSE_ENABLE_CODE_AGENT_VERIFIER": ""}),
+                patch(
+                    "loop.activity_helper.call_temporal_activity_from_activity",
+                    side_effect=AssertionError("no verifier"),
+                ),
+                patch("temporalio.activity.heartbeat"),
+            ):
+                score, reasoning, struct, _i, _o = await service._run_verifier(
+                    agent_id="root",
+                    task_id="code-session-1",
+                    goal="g",
+                    model="rose-labs/rose-1-flash",
+                    terminal=TerminalFilter(cols=200, rows=50),
+                    action_summary=["ran the process"],
+                    output_schema=schema,
+                    claude_token=None,
+                    exit_code=exit_code,
+                    attempt_completion=False,
+                    code_provider="claude",
+                    code_events=stream,
+                    output_files=[],
+                    handoff=handoff_file,
+                )
+            rows = []
+            for call in get_captured_requests():
+                if call.get("method") == "POST" and "/api/agents/root/messages" in (call.get("url") or ""):
+                    body = json.loads(call["requestBody"])
+                    if (body.get("metadata") or {}).get("toolName") == "code_agent_sdk_events":
+                        rows.append({"role": body["role"], "message": body["message"], "metadata": body["metadata"]})
+            return score, reasoning, struct, rows
+        finally:
+            teardown_mock()
+
+    # The replay predates the standard rose_handoff fields every handoff now carries;
+    # add them as the code agent writes them today, keeping the declared fields verbatim.
+    written = {"rose_handoff": _standard_handoff("complete"), **handoff}
+    present = {"status": "present", "content": json.dumps(written)}
+    score, reasoning, struct, rows = await run(present, exit_code=fixture["exit_code"])
+    assert score == 1.0, reasoning
+    assert struct == handoff, struct
+    passed, reason = check_process_trace(
+        task.process_spec, {"agent": {"agent_id": "root"}, "messages": rows, "_benchmark": {}}
+    )
+    assert passed, reason
+
+    # The outcome stays truthful: a failed process or an absent handoff is
+    # neither complete nor recorded as successful code-agent evidence.
+    score, reasoning, struct, rows = await run(present, exit_code=1)
+    assert score == 0.5 and rows == [], (score, rows)
+    assert "ended without a success signal" in reasoning, reasoning
+    score, reasoning, struct, rows = await run({"status": "missing"}, exit_code=0)
+    assert score == 0.5 and struct is None and rows == [], (score, struct, rows)
+    assert "no handoff file" in reasoning, reasoning
 
 
 async def test_native_codex_active_goal_outlives_a_completed_turn():

@@ -9,6 +9,9 @@
  *                 removal, no confirm, as today); "+ Add account" = connect flow
  *   [LEGACY]      only the desktop-synced credential row exists → one "This Mac"
  *                 line disconnected through the confirmed row DELETE; no usage
+ *   each cloud account the backend lists as shareable (claude_code / gpt_code by
+ *   compute account id) shows its team-sharing caption beside its email; the
+ *   legacy "This Mac" line never does
  *
  * Usage is whatever agents last reported on the account's token (they carry it
  * on the lease heartbeat they already send); useComputeAccounts refetches it in
@@ -18,6 +21,9 @@
  */
 
 import claudeIcon from '@/assets/claude-color.svg';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
+import { computeShareProvider } from '@/lib/api/teams';
 
 import { useComputeAccounts } from '../hooks/useComputeAccounts';
 import type { ConnectedIntegration } from '../types';
@@ -61,11 +67,14 @@ export default function DesktopComputeRow({
   removal,
 }: DesktopComputeRowProps) {
   const state = useComputeAccounts(provider);
+  const { shareTarget } = useAccountShares();
+  const shareProvider = computeShareProvider(provider);
   const name = provider === 'claude' ? 'Claude Subscription' : 'ChatGPT Subscription';
   const providerLabel = provider === 'claude' ? 'Claude' : 'ChatGPT';
   const cloudAccounts: DesktopAccountView[] = state.accounts.map((account) => {
     const label = account.accountEmail ?? account.accountId;
     const warning = account.state === 'needs_reconnect';
+    const share = shareProvider && shareTarget(shareProvider, account.accountId);
     return {
       provider,
       accountId: account.accountId,
@@ -81,6 +90,7 @@ export default function DesktopComputeRow({
       resyncLabel: 'Re-authenticate',
       resyncing: state.isConnecting,
       trailing: <SubscriptionUsageMeter account={account} now={state.now} />,
+      share: share && <AccountTeamShare {...share} />,
     };
   });
   const accounts =

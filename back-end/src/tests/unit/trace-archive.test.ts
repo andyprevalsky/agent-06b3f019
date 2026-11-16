@@ -469,6 +469,15 @@ async function main(): Promise<void> {
                   .map((Key) => ({ Key })),
               };
             }
+            if (commandName === 'HeadObjectCommand') {
+              // Late-write fence probe: this bundle has no finalization marker.
+              assert.strictEqual(input.Bucket, 'unit-trace-bucket');
+              if (objects.has(String(input.Key))) return {};
+              throw Object.assign(new Error('NotFound'), {
+                name: 'NotFound',
+                $metadata: { httpStatusCode: 404 },
+              });
+            }
             throw new Error(`unexpected S3 command ${String(commandName)}`);
           };
         try {
@@ -508,6 +517,8 @@ async function main(): Promise<void> {
           assert.deepStrictEqual(sentCommands.sort(), [
             'GetObjectCommand',
             'GetObjectCommand',
+            // llm/ writes probe the root's finalization fence (late-write reconciliation).
+            'HeadObjectCommand',
             'ListObjectsV2Command',
             'ListObjectsV2Command',
             'PutObjectCommand',

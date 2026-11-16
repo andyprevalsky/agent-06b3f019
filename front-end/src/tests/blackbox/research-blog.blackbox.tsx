@@ -118,13 +118,10 @@ describe('ResearchBlog page', () => {
       expect(screen.getByText(/© 2026 Rose Labs/i)).toBeInTheDocument();
     });
 
-    it('footer contains company links (About, Privacy, Terms)', () => {
+    it('footer contains company links (Privacy, Terms) and no About page link', () => {
       renderWithProviders(<ResearchBlog />);
       const footer = document.querySelector('footer')!;
-      expect(within(footer).getByRole('link', { name: /^about$/i })).toHaveAttribute(
-        'href',
-        '/about',
-      );
+      expect(within(footer).queryByRole('link', { name: /^about$/i })).not.toBeInTheDocument();
       expect(within(footer).getByRole('link', { name: /^privacy$/i })).toHaveAttribute(
         'href',
         '/privacy',

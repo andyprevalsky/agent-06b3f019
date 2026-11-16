@@ -23,6 +23,8 @@ tags:
 sources:
   - PR #1783 deploy gate seed-memory-ratchet at ef32d1e0a8 (Blacksmith blacksmith-4vcpu-ubuntu-2404), run 2 of 5 rc 139
   - memory:seed-local-intermittent-segfault (2026-10-09 devbox ratchet run 5; 2026-11-07 cloud guest --compute-tokens-only during the PR #1757 deploy)
+  - PR #2005
+  - commit 00bdc7bd13e3c2989beac90a1dc789a6d64586d1 (PR #2005 merge, shipped)
 repro: bash back-end/scripts/run-blackbox-tests.sh seed-local-user (testLocalClientOpensAfterEngineTlsProbe; fails on the pre-fix seed-local.ts); native repro: 4x250 `/usr/bin/time -v npx tsx scripts/seed-local.ts --compute-tokens-only` with ulimit -c unlimited produced a core at run 68 of lane 2
 status: fixed
 ---
@@ -83,6 +85,26 @@ Sibling exposure, not changed here: any other Node process that constructs a sec
 rc 139 is ever seen.
 
 10k-agent behavior: none. The seed runs once per stack; one extra sequential connect at seed start.
+
+## Recurrence 2026-11-13 (PR #1981 smoke round r12): the cloud payment fixture
+
+Guest `agent-payment-test-shop` logged `seeding isolated payment fixture` at 04:03:08Z and
+`FATAL: setup-benchmark-payment.ts failed` at 04:03:09Z, with nothing in between. The driver
+captures the script's stdout and stderr (`cloudbench-boot.sh` runs the driver with `2>&1`), and a
+thrown error or `process.abort()` prints a stack. Only a signal death leaves no output, and a
+locally simulated SIGKILL reproduced that exact signature. Healthy guests print their first
+fixture line about 2 s after seeding starts, so this guest died in the first-connect window.
+`setup-benchmark-payment.ts` has the same two-client shape as the seed: its AgentCard org imports
+construct `src/providers/database.ts`'s module client, and `main()` then constructed a second
+client before either had connected. Fix: `main()` opens its client with
+`connectThenOpen(sharedPrisma, () => new PrismaClient())` and releases both. Logging the
+fixture's exit code and signal in `cloudbench-run.sh` was tried and reverted: that driver's bytes are
+pinned as a reviewed startup protocol (`cloudbench-prestart-recovery.py` FRESH_SOURCE_PROTOCOL,
+`deploy_test_native_cleanup.py`, `deploy-test-worker.test.py`). Changing them needs a protocol re-review,
+which is an open follow-up, so a signal death still prints only `FATAL`.
+Regression: `testPaymentFixtureOpensItsClientAfterTheModuleClient` in
+`seed-local-user.blackbox.ts`; it fails on the old script. The crash itself (about 1 in 1,000
+starts) was not reproduced natively for this script, so this instance's signal is unconfirmed.
 
 ## Human feedback
 
