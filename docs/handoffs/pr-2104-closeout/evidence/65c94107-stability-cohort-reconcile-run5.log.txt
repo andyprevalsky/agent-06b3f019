@@ -1,0 +1,16 @@
+.TEST_QUARANTINE status=QUARANTINED_PASS unit=CohortReconciliation.test_campaign_noop_and_mutation_share_the_completed_barrier since=2026-11-15 repair=pending-handoff:b7248ac5873d434aa5320ab2bea17f4c
+...F...
+======================================================================
+FAIL: test_dead_winner_without_completion_is_recovered_by_successor (__main__.CohortReconciliation.test_dead_winner_without_completion_is_recovered_by_successor)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/_work/rose/rose/scripts/tests/cloudbench-cohort-reconcile.test.py", line 330, in test_dead_winner_without_completion_is_recovered_by_successor
+    f.wait_entered(2)
+  File "/home/runner/_work/rose/rose/scripts/tests/cloudbench-cohort-reconcile.test.py", line 139, in wait_entered
+    self.case.fail('actual full scanner did not reach fixture metadata boundary')
+AssertionError: actual full scanner did not reach fixture metadata boundary
+
+----------------------------------------------------------------------
+Ran 8 tests in 7.492s
+
+FAILED (failures=1)
