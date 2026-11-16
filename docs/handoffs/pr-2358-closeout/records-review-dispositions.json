@@ -9,6 +9,10 @@
     {
       "finding": "Unqualified final retention wording",
       "disposition": "FIXED: limits completed retention to original cohort and historical Git; final-state retention remains pending until actual capture"
+    },
+    {
+      "finding": "Premature records-branch pushed/merged wording",
+      "disposition": "FIXED: explicitly identifies historical capture-snapshot pending state; final native readiness and actual PR merge are separate authority."
     }
   ]
 }

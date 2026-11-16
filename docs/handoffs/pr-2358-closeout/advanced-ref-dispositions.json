@@ -34,5 +34,5 @@
       "captured_tip_ancestor_of_remote": true
     }
   ],
-  "later_records_branch": "Pushed and merged by the records PR; native deletion checker verifies no local-only commits. Source branch is retained."
+  "later_records_branch_at_capture_snapshot": "Pending at this historical snapshot: records branch must subsequently be pushed and merged. Final current completion is established separately by native deletion-readiness.json and the actual records PR merge receipt. Source branch is retained."
 }
