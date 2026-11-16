@@ -73,7 +73,8 @@
   "live_processes": [],
   "manifest": "docs/handoffs/pr-2147-closeout/closeout-manifest.json",
   "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2147-closeout/closeout-manifest.json, docs/handoffs/pr-2147-closeout/private-archive-receipt.json, docs/rca/cases/2026-11-15-fly-cutover-connect-failed-write-and-orphaned-lease-recovery-409.md"
+    "1 unpushed commit(s) in /home/boxes/rose",
+    "branch records/pr2147-closeout has 1 commit(s) on no remote"
   ],
   "pr": 2147,
   "preserved_refs": {
@@ -739,12 +740,8 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-2147-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2147-closeout/private-archive-receipt.json",
-        "docs/rca/cases/2026-11-15-fly-cutover-connect-failed-write-and-orphaned-lease-recovery-409.md"
-      ],
-      "unpushed_commits": 0
+      "uncommitted": [],
+      "unpushed_commits": 1
     }
   ]
 }
