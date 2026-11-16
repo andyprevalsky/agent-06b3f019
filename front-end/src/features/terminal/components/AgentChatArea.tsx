@@ -65,12 +65,14 @@ import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 import {
   ApprovalChip,
   BackgroundAgentsBanner,
+  CodeAgentConversationView,
   PinnedQuestionMount,
   NewAgentLocation,
   QueryInput,
   TaskCompletedBar,
   useAppView,
   useOpenCodeAgent,
+  useCodeAgentView,
 } from '@/features/terminal-component-group';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
@@ -145,16 +147,18 @@ function ChatColumn({
   const readOnlyMessage = readOnlyNotice(a);
 
   const codeAgent = useOpenCodeAgent(a.selectedAgentId);
-  if (codeAgent !== null) {
+  const codeAgentView = useCodeAgentView();
+  if (codeAgent !== null)
     return (
       <AgentCodeConversation
         agents={a}
         drip={drip}
-        codeAgent={codeAgent}
-        readOnlyMessage={readOnlyMessage}
-      />
+        ownerAgentId={codeAgent.ownerAgentId}
+        onClose={codeAgentView?.close}
+      >
+        <CodeAgentConversationView key={codeAgent.taskId} {...{ codeAgent, readOnlyMessage }} />
+      </AgentCodeConversation>
     );
-  }
 
   const canSubmit = composerCanSubmit({
     selectedAgentId: a.selectedAgentId,
