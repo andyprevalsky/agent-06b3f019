@@ -500,6 +500,42 @@ async function main() {
         'RETIRED'
       );
     });
+    await test('a failed or retired generation never admits a continuation, so agents stay on their live queue', async () => {
+      // RCA 2026-11-15 (agent 08aa04a2): a cooperative handoff must never strand an agent on a
+      // generation whose deploy failed or whose bank was retired. The pointer can still name that
+      // queue; only a qualified OPEN admission gate may receive a continuation.
+      const identity = { workflowId: 'live-agent', runId: 'live-run' };
+      const native = {
+        firstExecutionRunId: 'live-first',
+        runId: 'live-run',
+        queue: 'serving-generation',
+        terminal: false,
+      };
+      const gate = rows.get(`agent-queue-admission:${queue}`)!.request as Record<string, unknown>;
+      pointer = { taskQueue: queue, surfaceHash: 'a'.repeat(12) };
+      assert.equal(gate.phase, 'RETIRED');
+      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      gate.phase = 'RETIRING';
+      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      gate.phase = 'OPEN';
+      gate.legacyCoverage = 'UNKNOWN';
+      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      gate.legacyCoverage = 'QUALIFIED';
+      pointer = { taskQueue: queue, surfaceHash: 'b'.repeat(12) };
+      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      const unpublished = `navi-agent-tasks-pool-0123456789ab@${'c'.repeat(12)}`;
+      pointer = { taskQueue: unpublished, surfaceHash: 'c'.repeat(12) };
+      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      assert.equal(
+        [...rows.values()].filter(
+          (r) =>
+            r.operationType === 'AGENT_QUEUE_CONTINUATION' &&
+            (r.request as { workflowId?: string })?.workflowId === 'live-agent'
+        ).length,
+        0,
+        'a refused continuation records no ticket'
+      );
+    });
   } finally {
     prisma.$transaction = originalTransaction;
     prisma.agentQueuePointer.findUnique = originalPointer;
