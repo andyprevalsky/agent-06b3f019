@@ -25,6 +25,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
+# The Tilion region production reaches. back.tilion.dev is an accelerator that picks the
+# region nearest the client: production (Render Navi in ohio, Fly workers in iad) lands on
+# east, while the Blacksmith gate VM lands on west, a region production never uses, whose
+# direct-exit DNS failed every lookup on both workers on 2026-11-15 (case
+# 2026-11-08-tilion-parity-dns-resolution-failure). The live provider probe tests production's region.
+TILION_PRODUCTION_REGION_BASE_URL = "https://east.back.tilion.dev"
 # deploy_commands() names in an order that satisfies every ``after`` edge when run one by one.
 PROBE_NAMES = (
     "credential-health",
@@ -209,6 +215,7 @@ def deploy_commands() -> tuple[Command, ...]:
                 "--",
                 "env",
                 "BROWSER_PROVIDER_LIVE=1",
+                f"TILION_BASE_URL={TILION_PRODUCTION_REGION_BASE_URL}",
                 "BLACKBOX_TEST_CONCURRENCY=1",
                 "bash",
                 "scripts/run-blackbox-tests.sh",

@@ -52,6 +52,10 @@ def manifest():
     with request() as response:
         data = response.read(1048577)
         assert len(data) <= 1048576 and response.status == 200
+        # read(amt) returns a short body without IncompleteRead when the stream closes early.
+        sealed = response.headers.get("Content-Length")
+        if sealed is not None and sealed.isdigit() and len(data) != int(sealed):
+            raise TruncatedTransfer(f"manifest ended at {len(data)} of {sealed} bytes")
         return json.loads(data)
 # The sealed bundle is immutable and each file is proven by its manifest hash
 # and the final manifest re-read, not by the transport. A transient transport
@@ -187,11 +191,16 @@ def exited_without_ack():
             return response.read(256).strip() != run_token.encode()
     except urllib.error.HTTPError as error:
         return error.code == 404
+class TruncatedTransfer(ConnectionError):
+    """The guest stream ended before its sealed Content-Length was delivered."""
+
 unacked_exits = 0
 shutdown_complete = False
 # DONE precedes the guest EXIT trap. Retry only seal observation and transient
 # transport reads before the first manifest, within the unchanged whole-capture
-# alarm. Once sealed, transfers and the final manifest comparison fail closed.
+# alarm. Once sealed, transfers and the final manifest comparison fail closed on
+# any HTTP rejection, header/size disagreement, hash mismatch or manifest change;
+# only a transport fault restarts that exact read (sealed_read).
 while True:
     try:
         try:

@@ -8,6 +8,10 @@ import {
 } from './config';
 import type { Transaction, IPhoneLease, IPhoneDevice } from './types';
 import { databaseNow } from './repo.clock';
+import { expiredPrivacy } from './privacy';
+import { createLogger } from '../../providers/logger';
+
+const log = createLogger('IPhoneLease');
 
 export async function closeLease(tx: Transaction, id: string, status: string) {
   const executing = await tx.iPhoneOperation.findFirst({
@@ -23,6 +27,33 @@ export async function closeLease(tx: Transaction, id: string, status: string) {
       data: { releaseRequestedAt: await databaseNow(tx), releaseStatus: status },
     });
     return;
+  }
+  const lease = await tx.iPhoneLease.findUniqueOrThrow({ where: { id } });
+  // The user grace bounds a user-held or pending-auth hold; its expiry returns control to the
+  // agent, so the private phase this lease opened ends with it (values stay vaulted for
+  // redaction). Releases, cancellations and inherited phases still need an explicit handback.
+  if (
+    status === 'EXPIRED' &&
+    lease.status === 'ACTIVE' &&
+    (lease.controlOwner === 'user' || lease.attentionRequestId !== null)
+  ) {
+    const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: lease.deviceId } });
+    let privateInputEncrypted: string | null = null;
+    try {
+      privateInputEncrypted = expiredPrivacy(device.privateInputEncrypted, lease.id);
+    } catch (error) {
+      // A malformed envelope stays as-is (privacy checks keep failing closed on it), so the
+      // lease lifecycle still advances instead of wedging every device route.
+      log.error('expiry left unreadable private phase', {
+        leaseId: lease.id,
+        deviceId: device.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (privateInputEncrypted !== null) {
+      await tx.iPhoneDevice.update({ where: { id: device.id }, data: { privateInputEncrypted } });
+      log.info('expiry ended private phase', { leaseId: lease.id, deviceId: device.id });
+    }
   }
   await tx.iPhoneLease.update({
     where: { id },

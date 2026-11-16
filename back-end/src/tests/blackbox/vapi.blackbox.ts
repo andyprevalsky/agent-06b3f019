@@ -6,12 +6,13 @@
  *   POST /api/vapi/call     — initiate an outbound phone call via Vapi (auth: API key)
  *   GET  /api/vapi/call/:id — poll call status from Vapi (auth: API key)
  *
- * Boundary capture coverage:
- *   Both endpoints make outbound HTTP calls to the Vapi API:
- *   - POST https://api.vapi.ai/call (create call)
- *   - GET  https://api.vapi.ai/call/:id (poll call)
- *   Boundary tests verify URL, method, and Authorization header of outbound calls.
- *   Note: Happy path tests may fail if VAPI_PRIVATE_KEY is not configured (returns 500).
+ * Boundary coverage (fake upstream, never the real Vapi/Twilio hosts):
+ *   The runners point VAPI_API_BASE_URL / TWILIO_API_BASE_URL / VAPI_PRIVATE_KEY at
+ *   the isolated backend's loopback fake (/api/test/fake-phone-upstream), so no
+ *   case can dial a real number. A precondition aborts the file before any call
+ *   is attempted unless the backend's effective Vapi + Twilio base URLs route to
+ *   that fake. Boundary tests read the fake's request log and assert the exact
+ *   create/poll requests (URL path, method, Authorization scheme, body).
  *
  * Invariants covered:
  *   - auth boundary: unauthenticated requests return 401
@@ -19,13 +20,13 @@
  *   - idempotency: same invalid request always returns same error
  *   - concurrency: 10 parallel auth-check requests return consistent results
  *   - same-input reproducibility: three sequential validation errors return identical status
- *   - cleanup: no state mutations (calls require real Vapi key to succeed)
+ *   - cleanup: no state mutations (calls land on the loopback fake upstream)
  *   - boundary param: Vapi API call uses expected URL, method, and auth header
  *   - harness independence: no background jobs involved
  *   - observability: covered by runner manifest and artifact directory
  *
  * Invariants not applicable:
- *   - read-after-write: cannot create real calls without Vapi key
+ *   - read-after-write: the fake upstream does not model call progress
  *   - state-transition: call state transitions happen on Vapi's side
  *   - ordering/pagination: no list endpoints
  *   - atomicity: single external API call per request
@@ -43,6 +44,13 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import {
+  assertVapiCallPlaced,
+  fakeCursor,
+  fakeRequestsAfter,
+  fakeVapiCreate,
+  testGuard_phoneUpstreamIsLocalFake,
+} from './vapi-fake-upstream.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -204,31 +212,22 @@ async function testCall_allFieldsMissing() {
 // --- Vapi not configured (500 if VAPI_PRIVATE_KEY missing) ---
 
 async function testCall_vapiNotConfigured() {
-  // If VAPI_PRIVATE_KEY is not set, the endpoint returns 500
-  // If it IS set, it will try to call Vapi and either succeed or fail
-  // Either way, it should not crash
+  const cursor = await fakeCursor();
   const res = await request(`${BASE_URL}/api/vapi/call`, {
     method: 'POST',
     headers: apiKeyHeaders(),
     body: JSON.stringify({
       to: '+10000000000',
-      system_prompt: 'Test prompt',
+      system_prompt: 'Vapi config check prompt',
       output_schema: { result: 'description' },
     }),
   });
-  // Accept 200 (success), 500 (Vapi not configured), or Vapi error codes
-  if (res.status !== 200 && res.status !== 500 && res.status < 400) {
-    throw new Error(`Unexpected status ${res.status}`);
-  }
-}
-
-function assertVapiAttemptStatus(status: number): void {
-  if (status !== 200 && status !== 500 && status < 400) {
-    throw new Error(`Unexpected status ${status}`);
-  }
+  assertVapiCallPlaced(res);
+  await fakeVapiCreate(cursor, 'Vapi config check prompt');
 }
 
 async function testCall_validSchemaAndTenDigitPhone() {
+  const cursor = await fakeCursor();
   const res = await request(`${BASE_URL}/api/vapi/call`, {
     method: 'POST',
     headers: apiKeyHeaders(),
@@ -241,10 +240,15 @@ async function testCall_validSchemaAndTenDigitPhone() {
       },
     }),
   });
-  assertVapiAttemptStatus(res.status);
+  assertVapiCallPlaced(res);
+  const { body } = await fakeVapiCreate(cursor, 'Schema normalization coverage');
+  if (body.customer?.number !== '+10000000000') {
+    throw new Error(`Expected 10-digit number normalized to +1, got ${body.customer?.number}`);
+  }
 }
 
 async function testCall_propertiesOnlySchemaAndInternationalPhone() {
+  const cursor = await fakeCursor();
   const res = await request(`${BASE_URL}/api/vapi/call`, {
     method: 'POST',
     headers: apiKeyHeaders(),
@@ -256,7 +260,18 @@ async function testCall_propertiesOnlySchemaAndInternationalPhone() {
       },
     }),
   });
-  assertVapiAttemptStatus(res.status);
+  assertVapiCallPlaced(res);
+  const { body } = await fakeVapiCreate(cursor, 'Properties-only schema normalization coverage');
+  if (body.customer?.number !== '+442079460958') {
+    throw new Error(`Expected international number unchanged, got ${body.customer?.number}`);
+  }
+  const schema = body.assistant?.analysisPlan?.structuredDataPlan?.schema as
+    { type?: string; properties?: Record<string, unknown> } | undefined;
+  if (schema?.type !== 'object' || schema.properties?.result === undefined) {
+    throw new Error(
+      `Expected properties-only schema typed as object, got ${JSON.stringify(schema)}`
+    );
+  }
 }
 
 // ==================== GET /api/vapi/call/:id ====================
@@ -274,20 +289,16 @@ async function testGetCall_nonexistentId() {
   const res = await request(`${BASE_URL}/api/vapi/call/nonexistent-call-id`, {
     headers: apiKeyHeaders(),
   });
-  // Should be 400/404 from Vapi or 500 if Vapi not configured
-  if (res.status !== 400 && res.status !== 404 && res.status !== 500) {
-    throw new Error(`Expected 400, 404, or 500 for nonexistent call, got ${res.status}`);
-  }
+  // The upstream's 404 surfaces unchanged.
+  assertStatus(res.status, 404, res.data);
 }
 
 // ==================== BOUNDARY CAPTURE ====================
 
 async function testBoundary_vapiCallCreation() {
-  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
-  if (cursorRes.status !== 200) return; // capture harness not active
-  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
+  const cursor = await fakeCursor();
 
-  await request(`${BASE_URL}/api/vapi/call`, {
+  const res = await request(`${BASE_URL}/api/vapi/call`, {
     method: 'POST',
     headers: apiKeyHeaders(),
     body: JSON.stringify({
@@ -296,75 +307,9 @@ async function testBoundary_vapiCallCreation() {
       output_schema: { result: 'string' },
     }),
   });
+  assertVapiCallPlaced(res);
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as {
-    captures: {
-      url: string;
-      method: string;
-      requestHeaders: Record<string, string>;
-      requestBody: string | null;
-    }[];
-  };
-
-  const vapiCalls = body.captures.filter(
-    (c) => c.url.includes('api.vapi.ai') && c.url.includes('/call')
-  );
-  if (vapiCalls.length === 0) {
-    // If VAPI_PRIVATE_KEY is not set, no outbound call is made (500 before fetch)
-    // This is acceptable - skip the assertion
-    return;
-  }
-
-  const call = vapiCalls[0];
-  if (call.method !== 'POST') {
-    throw new Error(`Expected POST to Vapi, got ${call.method}`);
-  }
-  const headerKeys = Object.keys(call.requestHeaders).map((k) => k.toLowerCase());
-  if (!headerKeys.includes('authorization')) {
-    throw new Error(`Expected Authorization header in Vapi call`);
-  }
-  if (call.requestBody === null) {
-    throw new Error('Expected Vapi call request body');
-  }
-
-  const outboundBody = JSON.parse(call.requestBody) as {
-    phoneNumberId?: string;
-    customer?: { number?: string };
-    phoneCallProviderBypassEnabled?: boolean;
-    assistant?: {
-      name?: string;
-      model?: {
-        provider?: string;
-        model?: string;
-        messages?: { role?: string; content?: string }[];
-        tools?: { type?: string; function?: { name?: string }; server?: { url?: string } }[];
-      };
-      voice?: {
-        provider?: string;
-        voiceId?: string;
-      };
-      transcriber?: {
-        provider?: string;
-        model?: string;
-        language?: string;
-        eotThreshold?: number;
-        eotTimeoutMs?: number;
-      };
-      firstMessage?: string;
-      endCallMessage?: string;
-      silenceTimeoutSeconds?: number;
-      maxDurationSeconds?: number;
-      analysisPlan?: {
-        summaryPlan?: { enabled?: boolean };
-        successEvaluationPlan?: { enabled?: boolean };
-        structuredDataPlan?: { enabled?: boolean; schema?: unknown };
-      };
-      serverMessages?: string[];
-      clientMessages?: string[];
-    };
-  };
+  const { body: outboundBody } = await fakeVapiCreate(cursor, 'Boundary test');
 
   const assistant = outboundBody.assistant;
   if (!assistant) {
@@ -454,14 +399,9 @@ async function testBoundary_vapiCallCreation() {
 }
 
 async function testBoundary_vapiCallWithUserOverrides() {
-  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
-  if (cursorRes.status !== 200) return; // capture harness not active
-
   // 1. Create an anonymous user to attach settings to.
   const anonRes = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
-  if (anonRes.status !== 200) {
-    return; // anonymous auth disabled in this env
-  }
+  assertStatus(anonRes.status, 200, anonRes.data);
   const anonBody = anonRes.data as {
     user: { id: string };
     session: { access_token: string };
@@ -482,9 +422,8 @@ async function testBoundary_vapiCallWithUserOverrides() {
   assertStatus(patchRes.status, 200, patchRes.data);
 
   // 3. Trigger an outbound call as the agent worker would.
-  const cursor =
-    ((await request(`${BASE_URL}/api/test/captures`)).data as { nextId: number }).nextId - 1;
-  await request(`${BASE_URL}/api/vapi/call`, {
+  const cursor = await fakeCursor();
+  const res = await request(`${BASE_URL}/api/vapi/call`, {
     method: 'POST',
     headers: apiKeyHeaders(),
     body: JSON.stringify({
@@ -495,22 +434,8 @@ async function testBoundary_vapiCallWithUserOverrides() {
     }),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as {
-    captures: { url: string; method: string; requestBody: string | null }[];
-  };
-  const vapiCalls = body.captures.filter(
-    (c) => c.url.includes('api.vapi.ai') && c.url.includes('/call')
-  );
-  if (vapiCalls.length === 0) return; // VAPI_PRIVATE_KEY not configured
-
-  const outbound = JSON.parse(vapiCalls[0].requestBody ?? '{}') as {
-    assistant?: {
-      model?: { messages?: { role?: string; content?: string }[] };
-      voice?: { voiceId?: string };
-    };
-  };
+  assertVapiCallPlaced(res);
+  const { body: outbound } = await fakeVapiCreate(cursor, 'User-override boundary test');
   const systemMessage = outbound.assistant?.model?.messages?.find(
     (m) => m.role === 'system'
   )?.content;
@@ -527,35 +452,23 @@ async function testBoundary_vapiCallWithUserOverrides() {
 }
 
 async function testBoundary_vapiCallPoll() {
-  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
-  if (cursorRes.status !== 200) return; // capture harness not active
-  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
+  const cursor = await fakeCursor();
 
-  await request(`${BASE_URL}/api/vapi/call/test-poll-id`, {
+  const res = await request(`${BASE_URL}/api/vapi/call/test-poll-id`, {
     headers: apiKeyHeaders(),
   });
+  assertStatus(res.status, 404, res.data);
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as {
-    captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
-  };
-
-  const vapiCalls = body.captures.filter(
-    (c) => c.url.includes('api.vapi.ai') && c.url.includes('/call')
+  const polls = (await fakeRequestsAfter(cursor)).filter(
+    (r) => r.method === 'GET' && r.path === '/call/test-poll-id'
   );
-  if (vapiCalls.length === 0) return; // Vapi not configured
-
-  const call = vapiCalls[0];
-  if (call.method !== 'GET') {
-    throw new Error(`Expected GET to Vapi, got ${call.method}`);
+  if (polls.length !== 1) {
+    throw new Error(`Expected the fake Vapi upstream to receive 1 poll, got ${polls.length}`);
   }
-  if (!call.url.includes('test-poll-id')) {
-    throw new Error(`Expected URL to contain call ID, got ${call.url}`);
-  }
-  const pollHeaderKeys = Object.keys(call.requestHeaders).map((k) => k.toLowerCase());
-  if (!pollHeaderKeys.includes('authorization')) {
-    throw new Error(`Expected Authorization header in Vapi poll call`);
+  if (polls[0].authorizationScheme !== 'Bearer') {
+    throw new Error(
+      `Expected Bearer Authorization in Vapi poll, got ${polls[0].authorizationScheme}`
+    );
   }
 }
 
@@ -648,6 +561,18 @@ async function runAll() {
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
 
+  const guard = await runTest(
+    'guard -- backend Vapi/Twilio upstream is the loopback fake',
+    testGuard_phoneUpstreamIsLocalFake
+  );
+  console.log(
+    `  ${guard.passed ? 'PASS' : 'FAIL'}  ${guard.name}${guard.passed ? '' : ` -- ${guard.error}`}`
+  );
+  if (!guard.passed) {
+    console.log('\nRefusing to run call-placing cases against a real phone upstream.');
+    process.exit(1);
+  }
+
   const parallelTests = [
     // auth boundary
     { name: 'POST /vapi/call -- no auth -> 401', fn: testCall_noAuth },
@@ -668,7 +593,7 @@ async function runAll() {
       name: 'POST /vapi/call -- properties schema and international phone normalization',
       fn: testCall_propertiesOnlySchemaAndInternationalPhone,
     },
-    { name: 'GET /vapi/call/:id -- nonexistent -> 404/500', fn: testGetCall_nonexistentId },
+    { name: 'GET /vapi/call/:id -- nonexistent -> 404', fn: testGetCall_nonexistentId },
     // invariants
     {
       name: 'idempotency -- same validation error same status',

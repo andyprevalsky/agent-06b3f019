@@ -6,6 +6,8 @@
  *                              --request error--> PROMPT (same idempotency key)
  * Integrations page -> CLI API -> user's template setup agent -> verified CLI list.
  * A successful start automatically opens the normal Rose setup agent.
+ * A CONNECTED CLI the backend lists as shareable (cli, by its connection's integration id)
+ * shows its team-sharing caption (AccountTeamShare) beside its name.
  *
  * Card look matches GitHub Repos and MCP servers (integrationCardStyles): app-icon
  * tile, title and detail line, plain inputs and the dark Connect button. Rendered
@@ -14,6 +16,8 @@
 import { useRef, useState } from 'react';
 import { Loader2, Plus, Terminal, X } from 'lucide-react';
 import claudeIcon from '@/assets/claude-color.svg';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 import { openAgentInCurrentClient } from '@/lib/openAgent';
 import { useCliIntegrations } from '../hooks/useCliIntegrations';
 import {
@@ -69,6 +73,7 @@ function CliStatus({ integration, onRetry }: { integration: CliIntegration; onRe
 
 export default function CliIntegrationsSection() {
   const cli = useCliIntegrations();
+  const { shareTarget } = useAccountShares();
   const [open, setOpen] = useState(false);
   const [request, setRequest] = useState('');
   const requestId = useRef<string | null>(null);
@@ -109,29 +114,35 @@ export default function CliIntegrationsSection() {
       </div>
       {cli.integrations.length > 0 && (
         <ul aria-label="Connected CLIs" aria-live="polite" className="border-t border-border">
-          {cli.integrations.map((integration) => (
-            <li key={integration.id} className={INTEGRATION_ROW_CLASSES}>
-              <div className="flex min-w-0 flex-col gap-0.5">
-                <span className="truncate font-medium">{integration.name}</span>
-                <CliStatus
-                  integration={integration}
-                  onRetry={() => {
-                    editRequest(integration.request);
-                    setOpen(true);
-                  }}
-                />
-              </div>
-              {integration.agent_id && (
-                <button
-                  type="button"
-                  className={INTEGRATION_TEXT_ACTION_CLASSES}
-                  onClick={() => openAgentInCurrentClient(integration.agent_id!)}
-                >
-                  Open setup
-                </button>
-              )}
-            </li>
-          ))}
+          {cli.integrations.map((integration) => {
+            const share = integration.status === 'connected' && shareTarget('cli', integration.id);
+            return (
+              <li key={integration.id} className={INTEGRATION_ROW_CLASSES}>
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="truncate font-medium">{integration.name}</span>
+                    {share && <AccountTeamShare {...share} />}
+                  </div>
+                  <CliStatus
+                    integration={integration}
+                    onRetry={() => {
+                      editRequest(integration.request);
+                      setOpen(true);
+                    }}
+                  />
+                </div>
+                {integration.agent_id && (
+                  <button
+                    type="button"
+                    className={INTEGRATION_TEXT_ACTION_CLASSES}
+                    onClick={() => openAgentInCurrentClient(integration.agent_id!)}
+                  >
+                    Open setup
+                  </button>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
       {cli.error && (

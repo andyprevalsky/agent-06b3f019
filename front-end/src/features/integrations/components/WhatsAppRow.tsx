@@ -1,7 +1,8 @@
 /**
  * STATE MACHINE: WhatsAppRow
  *
- *   [CONNECTED]        --> synced icon glow + "Synced" chip
+ *   [CONNECTED]        --> synced icon glow + "Synced" chip + its team-sharing caption
+ *                          (AccountTeamShare, when the backend lists WhatsApp as shareable)
  *   [DESKTOP_READY]    --connect--> [PAIRING] --paired--> [CONNECTED]
  *   [WEB]              --> "Desktop Only" + download link
  *
@@ -15,6 +16,8 @@
  */
 
 import { Button } from '@/components/ui/button';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 
 import ConnectedAccountChip from './ConnectedAccountChip';
 import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
@@ -35,7 +38,7 @@ function WhatsAppLabel({
   badge,
 }: {
   isSynced?: boolean;
-  /** Rendered next to the name, e.g. the web build's "Desktop Only" pill. */
+  /** Rendered next to the name, e.g. the web build's "Desktop Only" pill or the sharing caption. */
   badge?: React.ReactNode;
 }) {
   return (
@@ -57,10 +60,11 @@ export default function WhatsAppRow({
   isLoading,
   onConnect,
 }: WhatsAppRowProps) {
+  const target = useAccountShares().shareTarget('whatsapp');
   if (connected) {
     return (
       <div className={ROW}>
-        <WhatsAppLabel isSynced />
+        <WhatsAppLabel isSynced badge={target && <AccountTeamShare {...target} />} />
         <ConnectedAccountChip label="Synced" tone="synced" />
       </div>
     );

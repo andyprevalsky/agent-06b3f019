@@ -38,8 +38,6 @@ from helpers.handle_tool_event import handle_tool_event
 from helpers.jev_progress import JEVSession, prefix_events, with_jev_session
 from helpers.llm import (
     LLMStructuredOutputError,
-    _completed_child_handoff_identity,
-    _completed_child_task_structured_handoff,
     _is_from_ancestor_agent,
     _pending_llm_context,
     build_llm_messages,
@@ -80,29 +78,17 @@ from utils.user_tool_models import build_user_tool_registry, llm_declarations
 logger = context_logger()
 
 
-class RequiredTurnToolError(LLMStructuredOutputError):
-    """A valid structured result called a tool forbidden on this turn."""
-
-
-def _validate_required_turn_tool(result: Any, required_tool: Optional[str]) -> None:
-    """Reject direct-activity responses that violate a required-tool handoff."""
-    if not required_tool:
-        return
-    tool_names = []
-    for tool_call in getattr(result, "tool_calls", None) or []:
-        if hasattr(tool_call, "model_dump"):
-            payload = tool_call.model_dump()
-        elif isinstance(tool_call, dict):
-            payload = tool_call
-        else:
-            payload = {}
-        tool_names.append(payload.get("tool"))
-    if len(tool_names) != 1 or tool_names[0] != required_tool:
-        raise RequiredTurnToolError(f"LLM must call exactly one tool, '{required_tool}'. Got: {tool_names}")
 
 
 # Check credits every N iterations
 CREDIT_CHECK_INTERVAL = 5
+
+# Serialized-context byte budget that also triggers compaction. The context
+# rides every continue_as_new (generation handoff, pause, overflow) and the
+# compactor activity input, both capped by Temporal's 2 MiB payload limit. A
+# JSON-heavy context can cross that far below the token trigger (prod 8789a5df:
+# ~191k tokens, 2,124,477 bytes), wedging its handoff and the cutover drain.
+CONTEXT_PAYLOAD_COMPACTION_BYTES = 1_200_000
 
 # Buffer-based compaction trigger (mirrors Claude Code's autoCompact.ts).
 # Reserve room for output + a safety buffer before the model's hard limit, so
@@ -997,8 +983,12 @@ async def run_agent(
             agent_type="explore" if cache_call_site == "explore_agent" else None,
         ):
             context_tokens = _estimate_tokens(context)
+            context_bytes = _context_payload_bytes(context)
+        over_compaction_trigger = (
+            context_tokens >= compaction_trigger or context_bytes >= CONTEXT_PAYLOAD_COMPACTION_BYTES
+        )
 
-        if context_tokens >= compaction_trigger and compactor_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+        if over_compaction_trigger and compactor_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             # Breaker open while the context is still over the trigger. Falling
             # through would send an over-window context to the model on every
             # remaining iteration and fail with a provider-side length error
@@ -1006,11 +996,13 @@ async def run_agent(
             message = (
                 "Context compression unavailable: compactor failed "
                 f"{compactor_failures} consecutive times and the context estimate "
-                f"{context_tokens} tokens still exceeds trigger {compaction_trigger}."
+                f"{context_tokens} tokens ({context_bytes} bytes) still exceeds trigger "
+                f"{compaction_trigger} tokens / {CONTEXT_PAYLOAD_COMPACTION_BYTES} bytes."
             )
             logger.error(
                 "Compactor circuit breaker open with context still over trigger",
                 context_tokens=context_tokens,
+                context_bytes=context_bytes,
                 trigger=compaction_trigger,
                 compactor_failures=compactor_failures,
             )
@@ -1026,10 +1018,12 @@ async def run_agent(
                 "message": message,
             }
 
-        if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+        if over_compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
                 "Context overflow",
                 context_tokens=context_tokens,
+                context_bytes=context_bytes,
+                byte_trigger=CONTEXT_PAYLOAD_COMPACTION_BYTES,
                 trigger=compaction_trigger,
                 effective_window=effective_window,
             )
@@ -1060,24 +1054,36 @@ async def run_agent(
 
             if success:
                 compressed_tokens = _estimate_tokens(compressed)
+                compressed_bytes = _context_payload_bytes(compressed)
                 # Signed on purpose: a compaction that GREW the context must not
                 # be indistinguishable from one that saved nothing. The old
                 # max(0.0, ...) clamp reported 0.0 for the -0.4% growth in prod
                 # agent e14d5abb. Negative values are still < the minimum, so
                 # the MIN_AUTOCOMPACT_SAVINGS_RATIO check below is unchanged in
                 # direction — it just now sees the real number.
-                saved_ratio = compaction_saved_ratio(context_tokens, compressed_tokens)
+                # Measure savings in the unit that fired: a byte-only trigger saves
+                # bytes held in metadata the token estimate ignores
+                # (codex_reasoning_items); token-triggered runs keep token savings.
+                byte_only_trigger = context_tokens < compaction_trigger
+                saved_ratio = (
+                    compaction_saved_ratio(context_bytes, compressed_bytes)
+                    if byte_only_trigger
+                    else compaction_saved_ratio(context_tokens, compressed_tokens)
+                )
 
-                if compressed_tokens >= compaction_trigger:
+                if compressed_tokens >= compaction_trigger or compressed_bytes >= CONTEXT_PAYLOAD_COMPACTION_BYTES:
                     message = (
                         "Context compression ineffective: compressed context estimate "
-                        f"{compressed_tokens} tokens still exceeds trigger {compaction_trigger} "
+                        f"{compressed_tokens} tokens ({compressed_bytes} bytes) still exceeds trigger "
+                        f"{compaction_trigger} tokens / {CONTEXT_PAYLOAD_COMPACTION_BYTES} bytes "
                         f"(original estimate {context_tokens})."
                     )
                     logger.error(
                         "Compaction did not get below overflow trigger",
                         context_tokens=context_tokens,
                         compressed_tokens=compressed_tokens,
+                        context_bytes=context_bytes,
+                        compressed_bytes=compressed_bytes,
                         trigger=compaction_trigger,
                         saved_ratio=saved_ratio,
                     )
@@ -1097,8 +1103,13 @@ async def run_agent(
                     ineffective_compactions += 1
                     message = (
                         "Context compression ineffective: compressed context saved only "
-                        f"{saved_ratio:.1%} of estimated tokens "
-                        f"(original {context_tokens}, compressed {compressed_tokens})."
+                        + (
+                            f"{saved_ratio:.1%} of serialized bytes "
+                            f"(original {context_bytes}, compressed {compressed_bytes})."
+                            if byte_only_trigger
+                            else f"{saved_ratio:.1%} of estimated tokens "
+                            f"(original {context_tokens}, compressed {compressed_tokens})."
+                        )
                     )
                     logger.warning(
                         "Compaction saved too little",
@@ -1150,39 +1161,7 @@ async def run_agent(
             if get_response_schema:
                 response_schema = await get_response_schema()
 
-            # A browser/code child has already run its own verifier before emitting
-            # a terminal structured_response. When that response covers every
-            # parent output field, the parent verifier has a deterministic fast
-            # path for accepting it. Synthesize attempt_completion below so the
-            # normal verifier and completion persistence still run without paying
-            # for (or depending on) an LLM to repeat an action we already know.
-            completed_child_output = None
-            completed_child_tool_call_id = ""
-            if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
-                completed_child_handoff = _completed_child_task_structured_handoff(context, response_schema)
-                if completed_child_handoff:
-                    completed_child_output, completed_child_tool_call_id = completed_child_handoff
-            completion_instruction = None
-            # Keep the provider-visible tool schema stable across turns. The
-            # completion instruction tells the model what to do and required_tool
-            # enforces it at the activity boundary; narrowing this list would move
-            # the native tool/schema block at the front of the provider prompt and
-            # invalidate the growing-conversation cache prefix.
             turn_tools = tools
-            required_turn_tool = None
-            if completed_child_output is not None:
-                required_turn_tool = "attempt_completion"
-                completion_instruction = (
-                    "A previously delegated browser or code task already completed and returned verified structured "
-                    "output covering every required parent response field. Do not repeat that work or spawn another "
-                    "agent. Call attempt_completion now so the parent verifier can accept the completed child result."
-                )
-                logger.info(
-                    "run_agent.completed_child_forces_completion",
-                    agent_id=agent_id,
-                    iteration=iteration,
-                    output_fields=sorted(completed_child_output),
-                )
 
             # Only history visible before this turn; prediction runs beside the decision.
             if _jev_session is not None:
@@ -1271,11 +1250,9 @@ async def run_agent(
                         agent_id=agent_id,
                         session_id=task_id or "",
                         max_context_tokens=max_context_tokens,
-                        request_overhead=attachment_request_overhead(AgentAction, completion_instruction),
+                        request_overhead=attachment_request_overhead(AgentAction),
                         require_inline_attachments=require_inline_attachments,
                     )
-            if is_inside_temporal_activity and completion_instruction and messages is not None:
-                messages.append({"role": "user", "content": completion_instruction})
 
             # Resolve direct compute tokens dynamically when the workflow provides
             # getters; otherwise use this loop's remembered successful token state.
@@ -1294,29 +1271,7 @@ async def run_agent(
             # Once the provider returns and we accept the response, the turn has
             # really been spent (tokens are charged in _account_llm_usage below), so
             # a later failure in accounting/broadcast must NOT refund the iteration.
-            if completed_child_output is not None:
-                child_identity = _completed_child_handoff_identity(completed_child_tool_call_id)
-                identity_segment = f"{child_identity}-" if child_identity else ""
-                synthetic_tool_call_id = f"completed-child-attempt-completion-{identity_segment}{_safe_uuid4()}"
-                result = type(
-                    "CompletedChildAction",
-                    (),
-                    {
-                        "response": "",
-                        "tool_calls": [{"tool": "attempt_completion"}],
-                        "codex_reasoning_items": [],
-                    },
-                )()
-                usage = {}
-                detected_tools_ordered = [("attempt_completion", synthetic_tool_call_id, _safe_now().timestamp())]
-                llm_response_accepted = True
-                logger.info(
-                    "run_agent.completed_child_dispatches_completion",
-                    agent_id=agent_id,
-                    iteration=iteration,
-                    tool_call_id=synthetic_tool_call_id,
-                )
-            elif is_inside_temporal_activity:
+            if is_inside_temporal_activity:
                 # Inside activity (browser agent) - call LLM directly with streaming callback
                 sequence = [0]
                 last_text = [""]
@@ -1449,7 +1404,6 @@ async def run_agent(
                 max_llm_attempts = 3
                 try:
                     for llm_attempt in range(1, max_llm_attempts + 1):
-                        attempt_usage = None
                         try:
                             async with span(
                                 "call_llm",
@@ -1493,24 +1447,10 @@ async def run_agent(
                                     _exclude_anthropic_family=exclude_anthropic_family_on_llm_retry,
                                     _skip_models=skip_models_on_llm_retry,
                                 )
-                                attempt_usage = usage
-                                _validate_required_turn_tool(pydantic_result, required_turn_tool)
                             break  # Success
                         except Exception as e:
                             error_message = extract_error_message(e)
-                            retryable_structured_result = "Failed to parse" in error_message or (
-                                required_turn_tool is not None and error_chain_has_type(e, "RequiredTurnToolError")
-                            )
-                            required_tool_rejected = required_turn_tool is not None and error_chain_has_type(
-                                e, "RequiredTurnToolError"
-                            )
-                            if required_tool_rejected and attempt_usage is not None:
-                                if await _account_llm_usage(
-                                    attempt_usage,
-                                    label=f"rejected semantic attempt {llm_attempt}",
-                                ):
-                                    logger.info("Agent paused after rejected-attempt cost check")
-                                    return _paused_after_cost_result()
+                            retryable_structured_result = "Failed to parse" in error_message
                             if llm_attempt < max_llm_attempts and retryable_structured_result:
                                 skip_models_on_llm_retry = skip_models_on_llm_retry | excluded_models_from_error(e)
                                 logger.warning(
@@ -1518,36 +1458,6 @@ async def run_agent(
                                     error=error_message,
                                     skip_models=sorted(skip_models_on_llm_retry),
                                 )
-                                if required_tool_rejected:
-                                    # The live response was structurally valid
-                                    # but semantically rejected. An active Fast
-                                    # Mode context could replay that same wrong
-                                    # tool forever, so only semantic retries
-                                    # bypass reads/writes. Transport retries keep
-                                    # the original trajectory position.
-                                    set_context(
-                                        DemoCacheContext(
-                                            enabled=False,
-                                            goal=goal_text or "",
-                                            base_step=demo_cache_step,
-                                            write_enabled=False,
-                                        )
-                                    )
-                                    (
-                                        current_claude_token,
-                                        current_claude_token_source,
-                                        current_claude_token_pool_id,
-                                        current_gpt_token,
-                                        current_gpt_account_id,
-                                        current_gpt_token_source,
-                                        current_gpt_token_pool_id,
-                                    ) = _resolve_current_compute_credentials(
-                                        prefer_remembered=bool(
-                                            is_inside_temporal_activity
-                                            and attempt_usage
-                                            and attempt_usage.get("compute_token_used")
-                                        )
-                                    )
                                 # Keep sequence monotonic because this retry reuses
                                 # the same stream_id and may follow emitted chunks.
                                 last_text[0] = ""
@@ -1609,8 +1519,8 @@ async def run_agent(
                         current_claude_token,
                         call_site_label,
                         current_system_prompt,
-                        completion_instruction,
-                        required_turn_tool,
+                        None,  # extra_user_message
+                        None,  # required_tool
                         False,
                         "",
                         current_claude_token_source,
@@ -1669,23 +1579,18 @@ async def run_agent(
                 # Get detected tools for ID matching (from activity)
                 detected_tools_ordered = llm_result.get("detected_tools_ordered", [])
 
-            # Account the successful provider attempt. Semantically rejected
-            # attempts were already accounted before their retries above. A
-            # deterministic child-completion handoff did not call a provider,
-            # so it must not emit a synthetic zero-token billing event.
+            # Account the successful provider attempt.
             exclude_anthropic_family_on_llm_retry = False
             bypass_fast_mode_cache_on_llm_retry = False
             skip_models_on_llm_retry = frozenset()
-            paused_after_provider_cost = completed_child_output is None and await _account_llm_usage(
+            paused_after_provider_cost = await _account_llm_usage(
                 usage,
                 label="accepted attempt",
             )
             if paused_after_provider_cost:
                 # External PAUSE between LLM acceptance and tool dispatch must
-                # not discard already-returned tool_calls. Dropping a forced
-                # attempt_completion here leaves the agent ACTIVE after a
-                # successful child handoff (see
-                # test_pause_after_forced_completion_llm_still_dispatches_attempt_completion).
+                # not discard already-returned tool_calls (an attempt_completion
+                # dropped here would leave the agent ACTIVE).
                 pending_tool_calls = result.tool_calls if hasattr(result, "tool_calls") else []
                 if pending_tool_calls:
                     logger.info(
@@ -1696,8 +1601,7 @@ async def run_agent(
                     logger.info("Agent paused after cost check")
                     return _paused_after_cost_result()
 
-            if completed_child_output is None:
-                demo_cache_llm_position = demo_cache_step
+            demo_cache_llm_position = demo_cache_step
 
             # Persist + broadcast own tokens after each LLM call. Descendant
             # subtree totals have their own durable maps in AgentWorkflow.
@@ -1903,6 +1807,8 @@ async def run_agent(
 
             processed_tools.append((tool_name, tool_args, tool_call_id))
 
+        # This branch removed the completed-child handoff path, so the model authored every tool call.
+        completed_child_output = None
         # 10. Persist assistant message (including tool-only declaration turns)
         assistant_metadata = {}
         if assistant_tool_calls:
@@ -2855,6 +2761,11 @@ def _estimate_tokens(context: List[Dict]) -> int:
     return estimate_context_tokens(context)
 
 
+def _context_payload_bytes(context: List[Dict]) -> int:
+    """Serialized size of ``context``, the largest continue_as_new argument (same json.dumps encoding the workflow's payload check uses)."""
+    return len(json.dumps(context, default=str))
+
+
 async def _compress_context(
     execute_activity,
     context: List[Dict],
@@ -2966,6 +2877,10 @@ def _real_user_requirement_keys(context: List[Dict]) -> set:
         # Rows hidden from this agent's model (e.g. a Browser-composer message
         # addressed to one browser task) are not this agent's requirements.
         if is_agent_authored_user_metadata(metadata) or is_excluded_from_model(message):
+            continue
+        # The compactor's USER-role summary digests rows already admitted; as a
+        # requirement it re-queued ~40 KB of feedback per compaction (agent 8789a5df).
+        if metadata.get("compactionSummary") is True:
             continue
         request_id = metadata.get("attentionRequestId")
         if metadata.get("source") == "attention_response" and isinstance(request_id, str) and request_id:

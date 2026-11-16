@@ -157,6 +157,9 @@ def main():
                 for port in (a, b, a + 20, a + 21):
                     listener = socket.socket()
                     sockets.append(listener)
+                    # Like the fixture's real servers, ignore an earlier connection's TIME_WAIT (a previous
+                    # consecutive run); a second live listener on the same port still fails to bind.
+                    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     try:
                         listener.bind(('127.0.0.1', port))
                         listener.listen()

@@ -6,7 +6,7 @@
  * service.ts for max-lines compliance.
  */
 
-import { resolveTeamDataAccess } from '../../providers/teamAccess';
+import { MEETING_NOTE_PROVIDERS, resolveTeamDataAccess } from '../../providers/teamAccess';
 import { hasGoogleWorkspaceAccount } from '../../services/integrations/googleWorkspaceSync';
 import { SourceNotFoundError } from './errors';
 import * as repo from './repo';
@@ -35,6 +35,8 @@ const DOCUMENT_PROVIDER_CONNECTORS: Record<string, string> = {
   granola_transcript: 'granola',
 };
 
+const MEETING = new Set<string>(MEETING_NOTE_PROVIDERS);
+
 function connectorForSource(rawSource: string): string | null {
   if (isSourceName(rawSource)) {
     return DATA_SOURCE_CONFIGS[rawSource].connector;
@@ -44,6 +46,21 @@ function connectorForSource(rawSource: string): string | null {
     return DOCUMENT_PROVIDER_CONNECTORS[rawSource];
   }
   throw new SourceNotFoundError(rawSource);
+}
+
+/**
+ * Providers whose teammate grant serves this source in the default scope, so the reader's
+ * own connector is not required. Shared Plaid items are read only under an explicit team
+ * scope (grepTool and the explore agent skip that probe), so `transactions` is not here.
+ */
+function sharedProviders(rawSource: string): string[] {
+  if (rawSource === 'email' || rawSource === 'gmail') return ['gmail'];
+  if (rawSource === 'imessage' || rawSource === 'whatsapp') return [rawSource];
+  if (rawSource === 'meeting_notes') return [...MEETING_NOTE_PROVIDERS];
+  const connector = Object.prototype.hasOwnProperty.call(DOCUMENT_PROVIDER_CONNECTORS, rawSource)
+    ? DOCUMENT_PROVIDER_CONNECTORS[rawSource]
+    : undefined;
+  return connector !== undefined && MEETING.has(connector) ? [connector] : [];
 }
 
 function needsGoogleWorkspaceGrant(rawSource: string): boolean {
@@ -70,24 +87,22 @@ function connectUrlForConnector(connector: string): string {
  */
 export async function getSourceStatus(userId: string, sources: string[]): Promise<SourceStatus[]> {
   const statuses: SourceStatus[] = [];
-  const grants = sources.some((source) => ['email', 'gmail', 'imessage'].includes(source))
+  const grants = sources.some((source) => sharedProviders(source).length > 0)
     ? await resolveTeamDataAccess(userId)
     : [];
   const shared = (source: string) =>
-    grants.some((grant) =>
-      source === 'imessage'
-        ? grant.provider === 'imessage' && grant.accountId === ''
-        : ['email', 'gmail'].includes(source) &&
-          grant.provider === 'gmail' &&
-          Boolean(grant.accountEmail)
-    );
+    grants.some((grant) => sharedProviders(source).includes(grant.provider));
   for (const rawSource of sources) {
     // One generic source requires either provider, never both. Keep the actual
     // provider identity for connected results and a working connect route otherwise.
     if (rawSource === 'meeting_notes') {
       const providers = ['granola', 'fireflies'];
       const connections = await Promise.all(
-        providers.map((provider) => repo.isConnectorConnected(userId, provider))
+        providers.map(
+          async (provider) =>
+            grants.some((grant) => grant.provider === provider) ||
+            (await repo.isConnectorConnected(userId, provider))
+        )
       );
       const connectedIndex = connections.findIndex(Boolean);
       const connector = providers[connectedIndex < 0 ? 0 : connectedIndex];

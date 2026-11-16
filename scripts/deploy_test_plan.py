@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from deploy_test_cycle import ROOT, QUICK, source, validate_plan, write
+from deploy_test_cycle import ROOT, QUICK, bounded_read, digest, source, validate_plan, write
 from select_affected_tests import Selector, changed_files
 from deploy_test_bindings import generate as generate_bindings
 
@@ -154,7 +154,60 @@ BLACKSMITH_REFERENCE_HOST = ("--host-cpus", "8", "--host-mem-mb", "13500", "--ho
                              "--host-watchdog-mb", "14400")
 
 
-def standard_template(host: tuple = ()) -> dict:
+def retained_quarantine_inventory(selected: list[str], root: Path,
+                                  state_dir: Path | None) -> tuple[list[str], dict | None]:
+    """Keep one recorded check as a policy omission, never future execution.
+
+    Only the caller's explicitly configured native cycle is read. Fresh cycles
+    use the normal selector; no global/default state discovery occurs here.
+    """
+    if state_dir is None:
+        return selected, None
+    state_dir = Path(state_dir)
+    if not state_dir.is_absolute() or state_dir.resolve() != state_dir or state_dir.is_symlink():
+        raise ValueError('quarantine inventory requires the exact configured native state directory')
+    path = state_dir / 'cycle.json'
+    if path.is_symlink():
+        raise ValueError('quarantine inventory native cycle must be a regular file')
+    if not path.exists():
+        return selected, None
+    if not path.is_file() or path.resolve() != path:
+        raise ValueError('quarantine inventory native cycle path changed')
+    state = bounded_read(path, 'quarantine inventory native cycle')
+    prior = state['plan']
+    if state.get('plan_digest') != digest(prior) or state.get('source') != prior.get('source'):
+        raise ValueError('quarantine inventory recorded source/plan binding changed')
+    gates = [gate for gate in prior['gates'] if gate.get('name') == 'smoke']
+    if not gates:
+        return selected, None
+    if len(gates) != 1:
+        raise ValueError('quarantine inventory requires one recorded native smoke gate')
+    gate = gates[0]
+    command = gate.get('command', [])
+    workspace = gate.get('worker_root') or gate.get('cwd') or str(root)
+    if (gate.get('category') != 'smoke' or gate.get('native_cloud') is not True
+            or gate.get('worker_transport') != 'benchmark-cloud-cli'
+            or len(command) != 2 or Path(command[1]) != root / 'scripts/deploy_test_cloud.py'
+            or (root / workspace).resolve() != root.resolve()):
+        raise ValueError('quarantine inventory recorded smoke recipe/root changed')
+    checks = gate['checks']
+    if (not isinstance(checks, list) or not checks or len(checks) != len(set(checks))
+            or not all(isinstance(name, str) and name for name in checks)):
+        raise ValueError('quarantine inventory recorded checks changed')
+    removed = set(checks) - set(selected)
+    if not removed:
+        return selected, None
+    from deploy_test_quarantine import catalog_deploy_quarantines, USER_DEPLOY_CASE, USER_DEPLOY_REASON
+    reasons = catalog_deploy_quarantines(root, list(removed))
+    if removed != {USER_DEPLOY_CASE} or reasons != {USER_DEPLOY_CASE: USER_DEPLOY_REASON}:
+        raise ValueError('quarantine inventory may retain only the user-excluded mass-agent check')
+    inventory = [*checks, *(name for name in selected if name not in checks)]
+    metadata = {'kind': 'retained-user-deploy-quarantine-inventory-v1', 'checks': reasons,
+                'executed': False, 'credit_granted': False}
+    return inventory, metadata
+
+
+def standard_template(host: tuple = (), *, state_dir: Path | None = None) -> dict:
     result = subprocess.run([sys.executable, str(ROOT / "scripts/run_deploy_pipeline.py"),
         "plan", "--group", "all", "--backend", "--frontend", "--agents", "--smoke", "cloud",
         "--live-probes", "--semantic-stack", "--e2b-smoke", *host],
@@ -182,8 +235,11 @@ def standard_template(host: tuple = ()) -> dict:
                                    timeout=PLANNING_TIMEOUT_SECONDS).stdout.splitlines()
             if not tasks or len(set(tasks)) != len(tasks):
                 raise ValueError('cloud smoke selector did not return an exact task inventory')
+            tasks, retained = retained_quarantine_inventory(tasks, ROOT, state_dir)
             gate.update(checks=tasks, native_cloud=True, case_protocol=True,
                         command=[sys.executable, str(ROOT / 'scripts/deploy_test_cloud.py')])
+            if retained is not None:
+                gate['deploy_quarantine_inventory'] = retained
     gates += [
         {"name": "format", "category": "format", "command": [sys.executable, "scripts/check_deploy_static.py", "format"],
          "checks": ["format"]},
@@ -207,6 +263,7 @@ def standard_template(host: tuple = ()) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--state-dir', type=Path, help='read-only existing cycle whose named user-quarantined inventory must be retained')
     parser.add_argument('--template', type=Path, help='optional case-aware recipes; default existing full gate commands')
     workers = parser.add_mutually_exclusive_group()
     workers.add_argument('--workers', type=Path, help='explicit existing adapter bindings')
@@ -225,7 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error('the following arguments are required: --output')
     changed = changed_files(args.base, None)
     result = affected(changed)
-    template = json.loads(args.template.read_text()) if args.template else standard_template()
+    template = (json.loads(args.template.read_text()) if args.template else
+                standard_template(state_dir=args.state_dir.resolve() if args.state_dir is not None else None))
     if args.list_selected:
         selection = select(template, changed, result, None, base=args.base)
         gates = selection['gates']

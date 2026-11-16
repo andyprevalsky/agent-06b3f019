@@ -1,7 +1,8 @@
 /**
  * STATE MACHINE: DesktopAccountRows (row layout for multi-account rows, e.g. compute)
  *
- *   one row per account: [⚠] label [· detail]   trailing (usage meter)   ⋯
+ *   one row per account: [⚠] label [· detail] [team-sharing caption]   trailing (usage meter)   ⋯
+ *     the caption (AccountTeamShare) opens its own team picker; see TeamSharing
  *     tone synced  → plain label
  *     tone warning → amber label + ⚠ (e.g. "Reconnect")
  *   ⋯ [CLOSED] --click--> [MENU OPEN]: ↻ resync item (e.g. "Re-authenticate", when
@@ -105,6 +106,7 @@ function AccountRow({ account }: { account: DesktopAccountView }) {
         {account.detail !== undefined && account.detail !== '' && (
           <span className="shrink-0 opacity-70">· {account.detail}</span>
         )}
+        {account.share}
       </span>
       {account.trailing}
       <AccountMenu account={account} />

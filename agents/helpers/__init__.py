@@ -14,7 +14,7 @@ with workflow.unsafe.imports_passed_through():
         resolve_fast_cache_goal_activity,
         unpack_demo_cache_goal_resolution,
     )
-    from .fetch_config import fetch_agent_config
+    from .fetch_config import fetch_agent_config, fetch_message_texts
     from .fetch_queue_pointer import fetch_agent_queue_pointer
     from .fetch_tools import fetch_agent_tools
 
@@ -46,6 +46,7 @@ __all__ = [
     "get_model_context_window",
     "mark_finished",
     "fetch_agent_config",
+    "fetch_message_texts",
     "fetch_agent_queue_pointer",
     "fetch_child_terminal_result_activity",
     "resolve_fast_cache_goal_activity",

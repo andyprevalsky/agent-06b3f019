@@ -1391,10 +1391,12 @@ def test_mass_deploy_quarantine_cannot_reenter_through_floor_or_paths(tmp_path, 
     assert "Deploy quarantine (not run): test-mass-agent-run-0" in format_report(selection)
     task = next(t for t in load_tasks(CATALOG) if t.name == "test-mass-agent-run-0")
     assert not _eligible(task, surface)
-    # The executable task, smoke tag, prompt and evaluators remain in the catalog.
-    assert task.is_smoke and task.eligible_status
+    # User-directed retirement (2026-11-12): the definition, smoke tag and history stay in the
+    # catalog, but the task is no longer an eligible status for any selector.
+    assert task.is_smoke and task.status == "retired" and not task.eligible_status
     from .benchmark_tasks import get_task_by_name
     assert get_task_by_name(task.name).name == task.name
+
 
 
 def test_deploy_quarantine_does_not_disable_ordinary_failure_quarantine(tmp_path):
@@ -1406,6 +1408,7 @@ def test_deploy_quarantine_does_not_disable_ordinary_failure_quarantine(tmp_path
     selection = select_predeploy_benches(catalog=catalog, changed_files=[], repo_root=ROOT)
     assert selection.selected == ["still-run"]
     assert selection.deploy_quarantined == {"disabled": "user instruction"}
+
 
 
 def test_stale_cloud_deploy_plan_cannot_admit_quarantined_mass(tmp_path, monkeypatch):
@@ -1422,10 +1425,11 @@ def test_stale_cloud_deploy_plan_cannot_admit_quarantined_mass(tmp_path, monkeyp
     launch = Mock(side_effect=AssertionError("must never launch the quarantined task"))
     monkeypatch.setattr(cloud, "origin_fetchable", fetch)
     monkeypatch.setattr(cloud, "launch", launch)
-    with pytest.raises(cloud.SourceRefusal, match="regenerate selection: test-mass-agent-run-0"):
+    with pytest.raises(cloud.SourceRefusal, match="deploy-quarantined checks cannot be dispatched: test-mass-agent-run-0"):
         cloud.execute({"checks": ["test-mass-agent-run-0"], "token": "fixture", "source": source}, tmp_path)
     fetch.assert_not_called()
     launch.assert_not_called()
+    assert not (tmp_path / ".context/deploy-cloud").exists()
 
 
 def test_refresh_omits_only_explicit_deploy_quarantines(tmp_path, monkeypatch):
@@ -1482,6 +1486,7 @@ def test_manual_eligibility_bypasses_only_deploy_quarantine(tmp_path, surface, f
     assert _eligible(task, surface, for_deploy=False) is eligible
 
 
+
 def test_manual_cloud_eligibility_still_rejects_local_only(tmp_path):
     from .select_predeploy_benches import _eligible, load_tasks
 
@@ -1493,6 +1498,117 @@ def test_manual_cloud_eligibility_still_rejects_local_only(tmp_path):
     task = load_tasks(catalog)[0]
     assert _eligible(task, "local", for_deploy=False)
     assert not _eligible(task, "cloud", for_deploy=False)
+
+
+def test_native_current_inventory_retains_only_named_quarantine_without_dispatch(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    import deploy_test_plan as planner
+    from deploy_test_cycle import digest
+    from deploy_test_quarantine import USER_DEPLOY_CASE, USER_DEPLOY_REASON
+
+    root = tmp_path / 'repo'
+    catalog = root / 'agents/benchmarks/tasks.json'
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps([{'name': USER_DEPLOY_CASE, 'deploy_quarantine': USER_DEPLOY_REASON}]))
+    directory = root / '.context/exact-cycle'
+    directory.mkdir(parents=True)
+    checks = [USER_DEPLOY_CASE, *[f'case-{index}' for index in range(17)]]
+    gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
+            'worker_transport': 'benchmark-cloud-cli', 'cwd': str(root),
+            'command': ['python3', str(root / 'scripts/deploy_test_cloud.py')], 'checks': checks}
+    prior = {'source': {'head': '1' * 40, 'digest': '2' * 64}, 'gates': [gate]}
+    state = {'source': prior['source'], 'plan': prior, 'plan_digest': digest(prior)}
+    path = directory / 'cycle.json'
+    path.write_text(json.dumps(state))
+    original = path.read_bytes()
+    retained, metadata = planner.retained_quarantine_inventory(checks[1:], root, directory)
+    assert retained == checks
+    assert metadata == {'kind': 'retained-user-deploy-quarantine-inventory-v1',
+                        'checks': {USER_DEPLOY_CASE: USER_DEPLOY_REASON},
+                        'executed': False, 'credit_granted': False}
+    assert path.read_bytes() == original
+    # An unrelated ambient state setting is never a native planning authority.
+    monkeypatch.setenv('DEPLOY_TEST_CYCLE_STATE_DIR', str(directory))
+    assert planner.retained_quarantine_inventory(checks[1:], root, None) == (checks[1:], None)
+    assert planner.retained_quarantine_inventory(checks[1:], root, root / '.context/fresh') == (checks[1:], None)
+    # Other originally selected checks cannot disappear under this named policy.
+    with pytest.raises(ValueError, match='only the user-excluded'):
+        planner.retained_quarantine_inventory(checks[2:], root, directory)
+    # Qualification metadata is stable on repeated planning of the same cycle.
+    assert planner.retained_quarantine_inventory(checks[1:], root, directory) == (retained, metadata)
+
+
+@pytest.mark.parametrize('corruption', ['source', 'digest', 'adapter', 'workspace', 'marker', 'symlink'])
+def test_native_retained_quarantine_refuses_foreign_or_unbound_cycle(tmp_path, monkeypatch, corruption):
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    import deploy_test_plan as planner
+    from deploy_test_cycle import digest
+    from deploy_test_quarantine import USER_DEPLOY_CASE, USER_DEPLOY_REASON
+
+    root = tmp_path / 'repo'
+    catalog = root / 'agents/benchmarks/tasks.json'
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps([{'name': USER_DEPLOY_CASE, 'deploy_quarantine': USER_DEPLOY_REASON}]))
+    directory = root / '.context/exact-cycle'
+    directory.mkdir(parents=True)
+    gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
+            'worker_transport': 'benchmark-cloud-cli', 'cwd': str(root),
+            'command': ['python3', str(root / 'scripts/deploy_test_cloud.py')],
+            'checks': [USER_DEPLOY_CASE, 'remaining-task']}
+    prior = {'source': {'head': '1' * 40, 'digest': '2' * 64}, 'gates': [gate]}
+    if corruption == 'adapter':
+        gate['command'][1] = str(root / 'scripts/foreign.py')
+    if corruption == 'workspace':
+        gate['cwd'] = str(tmp_path / 'foreign')
+    state = {'source': dict(prior['source']), 'plan': prior, 'plan_digest': digest(prior)}
+    if corruption == 'source':
+        state['source']['head'] = '3' * 40
+    if corruption == 'digest':
+        state['plan_digest'] = '0' * 64
+    if corruption == 'marker':
+        catalog.write_text(json.dumps([{'name': USER_DEPLOY_CASE, 'deploy_quarantine': 'unverified reason'}]))
+    path = directory / 'cycle.json'
+    path.write_text(json.dumps(state))
+    if corruption == 'symlink':
+        path.rename(directory / 'saved.json')
+        path.symlink_to(directory / 'saved.json')
+    with pytest.raises(ValueError):
+        planner.retained_quarantine_inventory(['remaining-task'], root, directory)
+
+
+def test_explicit_manual_full_selector_excludes_retired_mass(tmp_path):
+    import io
+    import runpy
+
+    full = runpy.run_path(str(ROOT / 'scripts/cloudbench-full-selection.py'))
+    attempts = tmp_path / 'attempts.jsonl'
+    _write_attempts(attempts, [('test-mass-agent-run-0', True)] * full['PASS_STREAK'])
+    report = io.StringIO()
+    # Retired from all future runs (user-directed 2026-11-12), even when explicitly admitted.
+    with pytest.raises(SystemExit):
+        full['select_full'](
+            CATALOG, attempts, 1, ['README.md'], lambda: 1000,
+            report=report, admitted=lambda: {'test-mass-agent-run-0'}, copy_cap=lambda: 20,
+        )
+    assert 'not cloud-eligible (status/local-only/production-only/rootless): test-mass-agent-run-0' in report.getvalue()
+
+
+def test_native_facade_passes_only_its_explicit_configured_cycle(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    import deploy_gates as gates
+
+    observed = []
+    template = {'gates': []}
+
+    def standard(host=(), *, state_dir=None):
+        observed.append((host, state_dir))
+        return template
+
+    monkeypatch.setattr(gates, 'standard_template', standard)
+    directory = (tmp_path / 'configured-native-cycle').resolve()
+    assert gates.build_template(2, 2, executor='blacksmith', state_dir=directory) == template
+    assert observed == [(gates.BLACKSMITH_REFERENCE_HOST, directory)]
+
 
 
 def test_manual_full_selection_keeps_deploy_quarantined_task(tmp_path, monkeypatch):

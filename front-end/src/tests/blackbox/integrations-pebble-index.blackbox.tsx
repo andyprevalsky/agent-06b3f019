@@ -51,15 +51,17 @@ describe('Pebble Index 01 integration', () => {
   });
   afterEach(() => localStorage.clear());
 
-  it('is the last Rose Desktop row, under "Other" after Granola, and Connect opens the setup', async () => {
+  it('is the Wearables row after Granola, right before Other, and Connect opens the setup', async () => {
     serveCredentials();
     const user = userEvent.setup();
     const list = await renderDesktop();
     await waitFor(() => expect(within(list).getByText('Compute')).toBeInTheDocument());
     const rows = [...list.querySelectorAll('[data-testid^="integration-row-"]')];
-    expect(rows[rows.length - 1]).toBe(rowEl('pebble-index'));
-    expect(rows[rows.length - 2]).toBe(rowEl('fireflies'));
-    const other = within(list).getByRole('region', { name: 'Other' });
+    // The "Other" integration request row closes the list; Pebble ends Wearables just before it.
+    expect(rows[rows.length - 1]).toBe(rowEl('integration-request'));
+    expect(rows[rows.length - 2]).toBe(rowEl('pebble-index'));
+    expect(rows[rows.length - 3]).toBe(rowEl('fireflies'));
+    const other = within(list).getByRole('region', { name: 'Wearables' });
     expect(within(list).getByRole('region', { name: 'Meeting note taker' })).toContainElement(
       rowEl('granola'),
     );
