@@ -220,6 +220,25 @@ class DurableLaunchContract(DurableLaunchBase):
         self.assertEqual((receipt["knob"], receipt["secret"], receipt["controller"]), ("7", None, unit))
         self.assertTrue(wait_for(lambda: f"stub controller output pid={main_pid}" in self.log_text()))
 
+    def durable_options(self, env) -> list[str]:
+        result = self.run_bench(TASK, "--durable-log", str(self.log), "--durable", env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = json.loads((self.state / "systemd-run.json").read_text())
+        return argv[:argv.index("--")]
+
+    def test_own_fly_config_dir_reaches_the_service(self):
+        # A second rolling campaign's own FLY_CONFIG_DIR (its own WireGuard peer) is a
+        # path, not a credential; dropping it ran the controller on ~/.fly, where the
+        # campaign WireGuard claim refused it.
+        fly_config_dir = str(self.tmp / "fly-own")
+        options = self.durable_options(dict(self.env, FLY_CONFIG_DIR=fly_config_dir))
+        self.assertIn(f"--setenv=FLY_CONFIG_DIR={fly_config_dir}", options)
+
+    def test_unset_fly_config_dir_is_not_invented(self):
+        env = {k: v for k, v in self.env.items() if k != "FLY_CONFIG_DIR"}
+        options = self.durable_options(env)
+        self.assertFalse([o for o in options if "FLY_CONFIG_DIR" in o], options)
+
     def test_fallback_warns_loudly_and_keeps_exec_semantics(self):
         result = self.run_bench(TASK, "--durable-log", str(self.log), env=dict(self.env, FIXTURE_SUDO_DENIED="1"))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

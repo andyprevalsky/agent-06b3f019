@@ -23,6 +23,8 @@
  * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
  *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
  *   overlay the content (no right bar, no content inset). Flag off: no icons.
+ * ACCOUNT CHANGE: app providers remount on identity changes (not invite checks)
+ *   to clear the previous account's cached tabs.
  * APP VIEW (AppViewProvider): a code-agent chip's "Open app" button opens the
  *   code session's preview full screen in place of the chat column (Rose
  *   Desktop only; AgentChatArea). It holds no list and reads nothing itself.
@@ -30,10 +32,10 @@
  *   row (or ?agent-id=<owner>&code-agent=<task id>) opens that Claude Code /
  *   Codex session as its own conversation in the chat column; the sidebar marks
  *   its row and AgentChatArea renders it. Flag off: never opens.
- * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
+ * THEME (RoseThemeProvider, all Rose Desktop visitors): light (default) <->
  *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
  *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
- *   calm dark background. Stock accounts and shared views never leave light.
+ *   calm dark background. Guests use separate local preferences; shared views never leave light.
  * HEADER FRAME (Rose Desktop): the header sits in a zero-height box spanning
  *   the content area beyond the fixed 64px rail. Sidebar expansion and resize
  *   overlay the trajectory without shifting the header or content. Mobile
@@ -61,6 +63,7 @@ import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
 import { isRoseDesktopSession, roseDesktopAccountId } from '@/lib/roseDesktopSession';
+import { getSession } from '@/lib/supabase';
 import { RoseDesktopContext, useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
@@ -134,7 +137,7 @@ function resolveUserUiUserId(agents: ReturnType<typeof useTerminalAgents>): stri
   return roseDesktopAccountId(agents);
 }
 
-/** Rose Desktop chrome is on only for flagged, signed-in accounts (lib/roseDesktop.ts). */
+/** Rose Desktop chrome is available to every visitor (lib/roseDesktop.ts). */
 function isRoseDesktopAccount(agents: ReturnType<typeof useTerminalAgents>): boolean {
   return isRoseDesktopSession(agents);
 }
@@ -143,15 +146,18 @@ function TerminalLayout(props: TerminalLayoutProps) {
   const onLogout = useTerminalLogoutAction(props.agents.handleLogout);
   if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} />;
   const roseDesktop = isRoseDesktopAccount(props.agents);
-  // Same identity that turns Rose Desktop on, so the theme/apps never flip when
-  // the async invite check resolves (stock accounts keep the invite-gated user).
+  // Stored identity is available before the asynchronous auth and invite checks.
+  const sessionUser = getSession()?.user;
+  const appStateKey = sessionUser?.is_anonymous ? 'guest' : (sessionUser?.id ?? 'guest');
+  // Account state stays signed-in only, even though guests use the same chrome.
   const accountUserId = roseDesktop
     ? roseDesktopAccountId(props.agents)
     : (props.agents.user?.id ?? null);
   return (
     <RoseDesktopContext.Provider value={roseDesktop}>
-      <RoseThemeProvider userId={accountUserId} darkOnLogin>
+      <RoseThemeProvider userId={accountUserId ?? 'guest'} darkOnLogin={accountUserId !== null}>
         <RoseAppsProvider
+          key={appStateKey}
           agents={props.agents.agents}
           selectedAgentId={props.agents.selectedAgentId}
           onSelectAgent={props.agents.handleSelectAgent}

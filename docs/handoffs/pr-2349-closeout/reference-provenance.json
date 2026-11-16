@@ -1,0 +1,37 @@
+{
+  "codex": {
+    "recorded_revision": "14ff9c3a43ebf9bf543cf5f7c45cff2bfea2e512",
+    "own_git_metadata": false,
+    "clean_checkout_proven": false,
+    "recipe": "scripts/sync-reference-repos.sh",
+    "disposition_basis": "documented regenerable reference source; parent Git status is not independent clean proof"
+  },
+  "openclaw": {
+    "recorded_revision": "76ddbf697fc263cc1bf89fe3f4d08d96ed4a43af",
+    "own_git_metadata": false,
+    "clean_checkout_proven": false,
+    "recipe": "scripts/sync-reference-repos.sh",
+    "disposition_basis": "documented regenerable reference source; parent Git status is not independent clean proof"
+  },
+  "kimi-code": {
+    "recorded_revision": "1dd5578649e01dd8f5a2c0c7f924977f919c0b22",
+    "own_git_metadata": false,
+    "clean_checkout_proven": false,
+    "recipe": "scripts/sync-reference-repos.sh",
+    "disposition_basis": "documented regenerable reference source; parent Git status is not independent clean proof"
+  },
+  "prime-agent": {
+    "recorded_revision": "49480faa0295aeaab528a6310d40269f0757a644",
+    "own_git_metadata": false,
+    "clean_checkout_proven": false,
+    "recipe": "scripts/sync-reference-repos.sh",
+    "disposition_basis": "documented regenerable reference source; parent Git status is not independent clean proof"
+  },
+  "hermes-agent": {
+    "recorded_revision": "d94b70f675205c2c046138997819428772cd2678",
+    "own_git_metadata": false,
+    "clean_checkout_proven": false,
+    "recipe": "scripts/sync-reference-repos.sh",
+    "disposition_basis": "documented regenerable reference source; parent Git status is not independent clean proof"
+  }
+}

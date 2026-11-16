@@ -20,7 +20,7 @@ sources:
   - PR #2259 source 759e325c27b8302de4e6400369f5d3c64f2a7b25
   - memory:GitHub Actions run 43777553297 artifact 14186849376
 repro: front-end/src/tests/blackbox/browser-start-recovery.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -206,3 +206,29 @@ all three local tests (exit 0). The controller records execution recovery, not
 a waiver: focused, complete failed-gate and final-source qualification remain
 required. The independent RCA and every original native failure are retained
 under `.context/browser-chip-repair/structural-rca/`.
+
+## Shipped verification
+
+Fixed in PR #2293, merged as `1ac75606167f7973aeb63f983eedfa8aed2c3775`.
+The final integrated source passed the original command
+`bash scripts/run-deploy-semantic-stack.sh`: all 76 native cases passed,
+including both browser-chip cases, with no native flake and cleanup complete.
+Evidence: https://github.com/Rose-Ai-Labs/rose/actions/runs/43832253183 .
+The original assertions and 30-second chip budget are unchanged; the assigned
+quarantine marker is removed.
+
+Production verified that exact merged SHA: Render and Vercel live, backend
+endpoint smoke and log scan passed, Mac release workflow 43837929415 passed,
+and production semantic workflow 43838938423 passed on attempt 1 with exact
+source/live binding. All seven final cloud-smoke tasks passed; their nine
+original Machine/volume allocations and owned controllers/Hubs were released.
+The full source-bound gate and production receipts, original failed attempts,
+and exact-owner teardown evidence are preserved privately with authenticated
+read-back receipts in `docs/handoffs/pr-2293-closeout/`.
+
+Additional account-ordering and iPhone-verifier flakes were independently
+attributed NOT_INTRODUCED, quarantined narrowly and delivered after merge to
+independent repair goals. They do not replace or waive this assigned repair.
+CodeRabbit review was skipped under confirmed organization spending-cap
+evidence (merged unreviewed); Anthropic credential-health retained its
+credits-exhausted warning. Neither is reported as a provider PASS.

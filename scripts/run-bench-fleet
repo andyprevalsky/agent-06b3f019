@@ -7856,6 +7856,24 @@ PY
     fi
 }
 
+record_capacity_deferral() {  # <reason> <wait seconds>
+    # The controller's own pre-provision capacity deferral marker. The aggregate
+    # reports CAPACITY_DEFERRED instead of INFRA_ERROR for it, so an expired
+    # shared-capacity wait never counts toward a campaign's infra stop. Reasons:
+    # cleanup_disk_reserve, delegating_primary_ceiling, demo_guest_ceiling.
+    python3 - "$FLEET_DIR/_batch" "$1" "$2" <<'PY'
+import json, os, sys, time
+from pathlib import Path
+batch = Path(sys.argv[1])
+batch.mkdir(parents=True, exist_ok=True)
+marker = batch / "capacity-deferred.json"
+temporary = batch / (".capacity-deferred." + str(os.getpid()) + ".tmp")
+temporary.write_text(json.dumps({"schema": "cloudbench-capacity-deferred-v1", "reason": sys.argv[2],
+                                 "wait_seconds": int(sys.argv[3]), "observed_at_epoch": time.time()}) + "\n")
+os.replace(temporary, marker)
+PY
+}
+
 admit_cleanup_disk_reserve() {
     # Startup reserve admission. A shortage that outlasts the bounded wait is
     # recorded as an explicit capacity deferral, which the aggregate reports as
@@ -7867,17 +7885,7 @@ admit_cleanup_disk_reserve() {
     reserve_cleanup_disk_space "$wait_seconds" || status=$?
     [ "$status" -ne 0 ] || return 0
     if [ "$status" -eq 75 ]; then
-        python3 - "$FLEET_DIR/_batch" "$wait_seconds" <<'PY' || status=1
-import json, os, sys, time
-from pathlib import Path
-batch = Path(sys.argv[1])
-batch.mkdir(parents=True, exist_ok=True)
-marker = batch / "capacity-deferred.json"
-temporary = batch / (".capacity-deferred." + str(os.getpid()) + ".tmp")
-temporary.write_text(json.dumps({"schema": "cloudbench-capacity-deferred-v1", "reason": "cleanup_disk_reserve",
-                                 "wait_seconds": int(sys.argv[2]), "observed_at_epoch": time.time()}) + "\n")
-os.replace(temporary, marker)
-PY
+        record_capacity_deferral cleanup_disk_reserve "$wait_seconds" || status=1
     fi
     echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
     return "$status"
@@ -15104,7 +15112,7 @@ campaign_inventory_wait() {
     # All pre-provision borrowed observations share the existing admission
     # budget. Healthy reads do not start it; first pending or admission does.
     local status remaining interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
-    local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
+    local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-1800}"
     # A caller with its own gate deadline (the deploy cloud adapter) passes it as
     # an absolute epoch; the shared admission clock then ends there instead.
     local caller_deadline="${CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH:-}"
@@ -18030,6 +18038,8 @@ enforce_app_capacity_guard() {
     local projected_machines soft_line
 
     CAPACITY_ADMISSION_RETRYABLE=0
+    # Set only by a lane-ceiling refusal on this observation (admit_lane_capacity).
+    CAPACITY_ADMISSION_DEFERRAL_REASON=""
 
     CAPACITY_RESERVATION_ROOT="${CAPACITY_RESERVATION_ROOT:-${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}}"
     CAPACITY_RESERVATION_TOKEN="${CAPACITY_RESERVATION_TOKEN:-$FLEET_OWNER_TOKEN-primary}"
@@ -18271,12 +18281,14 @@ print(demo, delegating)
     read -r live_demo live_delegating <<< "$live"
     if [ $(( live_demo + requested_demo )) -gt "$demo_ceiling" ]; then
         CAPACITY_ADMISSION_RETRYABLE=1
+        CAPACITY_ADMISSION_DEFERRAL_REASON=demo_guest_ceiling
         echo "❌ DEMO guest ceiling reached: $live_demo live + $requested_demo requested > $demo_ceiling" >&2
         echo "   Each DEMO guest holds 4 production-pooler clients; non-production has 300 of 1000 (back-end/src/providers/database.ts)." >&2
         return 1
     fi
     if [ $(( live_delegating + requested_delegating )) -gt "$delegating_ceiling" ]; then
         CAPACITY_ADMISSION_RETRYABLE=1
+        CAPACITY_ADMISSION_DEFERRAL_REASON=delegating_primary_ceiling
         echo "❌ Delegating-guest ceiling reached: $live_delegating live REAL/SIM primaries + $requested_delegating requested > $delegating_ceiling" >&2
         echo "   They lease production compute tokens and shared provider capacity; $delegating_ceiling is the widest proven-safe width." >&2
         return 1
@@ -18287,12 +18299,13 @@ print(demo, delegating)
 admit_app_capacity_with_wait() {
     local deadline interval remaining inventory_status phase="during admission wait"
     local refresh_inventory="${1:-0}"
-    local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
+    local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-1800}"
     # Every devbox shares the app's ceilings, so a shortfall is normally another
-    # devbox's fleet that will release. A caller with its own gate deadline (the
-    # deploy cloud adapter) passes it explicitly as an absolute epoch and
-    # admission keeps polling at the same cadence until then; the ceilings and
-    # the 300 s default for other callers are unchanged.
+    # devbox's fleet that will release; the default wait matches the teardown
+    # disk-reserve wait (CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS). A caller with
+    # its own gate deadline (the deploy cloud adapter) passes it explicitly as
+    # an absolute epoch and admission keeps polling at the same cadence until
+    # then. The ceilings are unchanged.
     local caller_deadline="${CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH:-}" budget_label
     interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
     case "$wait_seconds:$interval:$caller_deadline" in
@@ -18317,6 +18330,7 @@ admit_app_capacity_with_wait() {
     CAPACITY_ADMISSION_DEADLINE="$deadline"
     while :; do
         inventory_status=0
+        CAPACITY_ADMISSION_DEFERRAL_REASON=""
         if [ "$refresh_inventory" = 1 ]; then
             warm_json="$(fleet_admission_machines_json)" || inventory_status=$?
         fi
@@ -18332,6 +18346,17 @@ admit_app_capacity_with_wait() {
         remaining=$((deadline - SECONDS))
         if [ "$remaining" -le 0 ]; then
             echo "❌ capacity admission remained blocked for ${wait_seconds}s (${budget_label})" >&2
+            # A shared lane ceiling still full of other workstreams' guests when
+            # the wait expires is capacity, not infrastructure: nothing was
+            # allocated for this fleet. Every other refusal stays INFRA.
+            case "${CAPACITY_ADMISSION_DEFERRAL_REASON:-}" in
+                delegating_primary_ceiling|demo_guest_ceiling)
+                    echo "CLOUDBENCH_RETRYABLE_CAPACITY=$CAPACITY_ADMISSION_DEFERRAL_REASON" >&2
+                    record_capacity_deferral "$CAPACITY_ADMISSION_DEFERRAL_REASON" "$wait_seconds" || return 1
+                    echo "❌ app-wide ${CAPACITY_ADMISSION_DEFERRAL_REASON//_/ } stayed full for the ${wait_seconds}s capacity wait; no provider allocation. Deferred as capacity (CAPACITY_DEFERRED), not INFRA." >&2
+                    return 75
+                    ;;
+            esac
             return 1
         fi
         [ "$interval" -gt "$remaining" ] && interval="$remaining"
@@ -20582,7 +20607,8 @@ if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
     start_machines_snapshot_loop || inventory_status=$?
     case "$inventory_status" in 0|75) ;; *) exit "$inventory_status" ;; esac
 fi
-admit_app_capacity_with_wait 1 || exit 1
+# An expired lane-ceiling wait is a recorded capacity deferral (75); other refusals exit 1.
+admit_app_capacity_with_wait 1 || { [ "$?" -eq 75 ] && exit 75; exit 1; }
 
 # ── Clone one machine per bench + launch its isolated run ────────────────────
 mkdir -p "$FLEET_DIR"

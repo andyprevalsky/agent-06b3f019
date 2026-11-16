@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout/browser-chip-count-726b25a4/smoke-54d2f0a3-native.bin",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "6e4472572b31474eb85cd51d89770bc55550637de06237d7f0a810e97dfdef7b",
+  "gzip_sha256": "7d853ade115a9f170b04f3559684b48eb7cb0dafb196a2a45d63bbd8eaf24131",
+  "stored_bytes": 132283301,
+  "frames": 16,
+  "files": 11,
+  "original_bytes": 132371008,
+  "manifest_sha256": "b6dc94b07ca8369e89849d817c406d0fc9990b3e8f820d36021b34af59778989",
+  "full_readback_verified": true
+}
