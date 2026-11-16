@@ -527,6 +527,19 @@ class ReleaseReport(unittest.TestCase):
         several = detail.replace('(1 failed case(s): port_ownership', '(2 failed case(s): port_ownership, other')
         with self.assertRaisesRegex(ValueError, 'single failed case'):
             q.validate_attribution({**occurrence, 'detail': several}, entry, self.root)
+        # Only the runner's own (first) summary counts, never one quoted inside a case's error text.
+        nested = ("  ❌ listed FAIL (2 failed case(s): other, port_ownership; first error: other: "
+                  "AssertionError: (1 failed case(s): port_ownership; first error: boom)")
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': nested}, entry, self.root)
+        # An unrelated call naming the label is not a registration of the marked function.
+        unregistered = domain.replace('        ("port_ownership", test_port_ownership),\n', '').replace(
+            '    return result.all_passed\n', '    log("port_ownership", test_port_ownership)\n'
+            '    return result.all_passed\n')
+        self.assertNotEqual(unregistered, domain)
+        (self.root / 'tests' / 'listed.blackbox.py').write_text(unregistered)
+        with self.assertRaisesRegex(ValueError, 'must record case port_ownership'):
+            q.validate_attribution(occurrence, entry, self.root)
 
     def test_typescript_domain_flake_binds_the_marker_of_its_single_failed_native_case(self):
         occurrence_id = 'd' * 32
