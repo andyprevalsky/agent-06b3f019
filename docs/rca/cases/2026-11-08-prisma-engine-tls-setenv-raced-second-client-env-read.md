@@ -26,6 +26,7 @@ sources:
   - PR #1775
   - commit cc3642ae2 (failed source)
   - PR #2104 (recurrence, FLAKY fe640f0e, failed source 64ea62ef9b)
+  - PR #2329 (recurrence fix, merged ab8e1adffa)
 repro: back-end/src/tests/blackbox/send-sms.blackbox.ts case 'only the app client exists before the first query' (red at 2 clients pre-fix); originally, run the unchanged test file on a private database in a loop with core dumps on (1 SIGSEGV in 1,500 runs here), or a script that does new PrismaClient twice then a first query (3 SIGSEGV in about 2,850 runs); inspect the core with gdb
 status: fixed
 ---
@@ -104,7 +105,7 @@ head never ran its tests because of a GitHub 504).
 Still exposed, not changed here: any other process that starts two Prisma clients, namely the backend's own
 startup (`providers/database.ts` plus `demoCacheStore.ts`) and multi-client blackbox processes.
 
-Recurrence fix (send-sms): the support file re-exports the app's `prisma` from `providers/database` instead of building
+Recurrence fix (send-sms, PR #2329, merged ab8e1adffa 2026-11-16; production lanes PASS): the support file re-exports the app's `prisma` from `providers/database` instead of building
 a second client, so the process holds one client before its first query (deleting the redundant client rather than
 ordering two). Regression in the same domain: case `only the app client exists before the first query` spawns
 `tests/fixtures/send-sms-prisma-clients.child.ts`, which loads every module the domain imports with construction

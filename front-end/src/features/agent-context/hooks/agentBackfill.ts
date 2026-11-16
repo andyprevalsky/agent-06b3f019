@@ -209,7 +209,12 @@ export async function runPostSubscribeBackfill({
       for (const { taskId } of activeBrowsers) {
         registerBrowserBackfillTask(leaseRef, selectedAgentId, taskId);
       }
-      if (!latestChatTurnNeedsCompletionBackfill(data) && activeBrowsers.length === 0) break;
+      // A zero-browser snapshot closes the observed tasks, not the recovery
+      // window: a successor can commit immediately afterwards and lose its
+      // INSERT just like a terminal can. Keep the existing finite lease; only
+      // a newly observed task above renews it, never a repeated snapshot.
+      const hasBrowserLease = (lease.browserTaskIds?.size ?? 0) > 0;
+      if (!latestChatTurnNeedsCompletionBackfill(data) && !hasBrowserLease) break;
     } catch (error) {
       if (isCancelled()) return;
       consecutiveFailures += 1;
