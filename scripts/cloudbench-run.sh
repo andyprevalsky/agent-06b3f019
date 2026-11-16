@@ -769,7 +769,17 @@ emit_report_and_result() {
     echo "$RESULT_BEGIN"
     if [ -n "$emitted_run" ] && [ -f "$emitted_run" ]; then
         echo "run_file: $emitted_run"
-        cat "$CONTEXT_DIR/run.json"
+        if [ "${CLOUDBENCH_INLINE_RUN_RESULT:-1}" = "0" ]; then
+            # Boot-launch fleets take the terminal record from the sealed
+            # runtime-evidence run.json. A second copy here made bench.log
+            # 55-77 MB on long tasks, streamed through the shared relay in
+            # 256 KiB reads (RCA 2026-11-14 sealed-evidence recurrence).
+            # Emit only its identity; the controller checks it against the
+            # sealed bytes.
+            echo "run_result: bytes=$(wc -c < "$emitted_run" | tr -d ' ') sha256=$(sha256sum "$emitted_run" | cut -d' ' -f1)"
+        else
+            cat "$CONTEXT_DIR/run.json"
+        fi
     else
         echo '{"error":"no fresh matching benchmark run produced"}'
     fi
