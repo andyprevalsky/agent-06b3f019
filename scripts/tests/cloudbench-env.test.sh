@@ -2746,8 +2746,9 @@ warm_source_maintenance_wait_contract() (  # <run-bench-fleet>
   command sleep 3600 &
   holder=$!
   trap 'kill "$holder" 2>/dev/null || true' EXIT
-  # Simulated clock: Bash SECONDS is assignable, so the stop wait's sleep and
-  # every SECONDS-based deadline advance together without real waiting.
+  # Make SECONDS an ordinary fixture variable: the special Bash clock also
+  # advances with real wall time, contaminating the explicit simulated ticks.
+  unset SECONDS
   sleep() { SECONDS=$((SECONDS + ${1%.*})); }
   machines_snapshot_identity() { printf 'generation-1\n'; }
   campaign_inventory_capture() { printf -v "$1" '%s' '[]'; }
