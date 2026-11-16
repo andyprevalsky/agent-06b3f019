@@ -61,6 +61,8 @@ def private(path, value):
 
 
 PROVIDER_CAPACITY_MEMBERS = ('cloudbench-provider-capacity.py', 'cloudbench-provider-limits.json')
+# The working-tree catalogs whose task groups select a measured provider demand profile.
+DEMAND_PROFILE_CATALOG_MEMBERS = ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json')
 MANIFEST_CATALOG_MEMBERS = ('fleet_infra_sample.py', 'cloudbench_catalog.py')
 CANONICAL_SEED_MEMBERS = ('back-end/prisma/schema.prisma', 'agents/benchmarks/seed_cache_path.py')
 # Import closure of scripts/cloudbench-timeout-policy.py inside agents/benchmarks.
@@ -2030,8 +2032,9 @@ class Portable(unittest.TestCase):
             self.assertFalse(thread.is_alive())
 
     @contextmanager
-    def public_check(self, fixture, requests, limits=None):
-        """The public CLI in a committed fixture checkout; `limits` selects a validated registry."""
+    def public_check(self, fixture, requests, limits=None, catalogs=False):
+        """The public CLI in a committed fixture checkout; `limits` selects a validated registry and
+        `catalogs` commits the working-tree task catalogs that select provider demand profiles."""
         class Machines(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 requests.append(('GET', self.path, self.headers.get('Authorization')))
@@ -2067,14 +2070,15 @@ class Portable(unittest.TestCase):
             for member in PROVIDER_CAPACITY_MEMBERS + MANIFEST_CATALOG_MEMBERS:
                 (root/'scripts'/member).write_bytes((ROOT/'scripts'/member).read_bytes())
             # The guests' canonical base-fixture token is derived from these at the source ref.
-            for member in CANONICAL_SEED_MEMBERS:
+            committed = CANONICAL_SEED_MEMBERS + (DEMAND_PROFILE_CATALOG_MEMBERS if catalogs else ())
+            for member in committed:
                 (root/member).parent.mkdir(parents=True, exist_ok=True)
                 (root/member).write_bytes((ROOT/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             disable_auto_maintenance(root)
             # Copy the exact historical catalog locally; timed checks own every needed object.
             cache_public_check_catalog(root)
-            subprocess.run(['git', '-C', str(root), 'add', 'scripts', *CANONICAL_SEED_MEMBERS], check=True)
+            subprocess.run(['git', '-C', str(root), 'add', 'scripts', *committed], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
                             '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], check=True)
             ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
@@ -2297,6 +2301,46 @@ class Portable(unittest.TestCase):
             value = json.loads(original.stdout)
             self.assertEqual((value['manifest']['original'], value['shard_bindings'], value['copies']), (True, {}, 70))
             self.assertEqual(value['shard_campaign_options'][7:11], ['--timeout', '1200', '--e2e-timeout', '5400'])
+
+    def test_sharded_polar_manifest_selects_its_demand_profile_while_mixed_and_original_keep_70(self):
+        # run-bench routes 74 Polar copies (>32) to this sharded operator; its capacity check must
+        # select the measured Polar demand profile as fleets and campaigns do, not the global 70.
+        requests = []
+        with self.public_check(warm_fixture(time.time()), requests, catalogs=True) as fx:
+            def manifest_args(label, names):
+                path = private(fx.inputs/label, names)
+                return fx.args[:fx.args.index('--tasks')+1] + [str(path)] + fx.args[fx.args.index('--tasks')+2:]
+            polar = polar_names(74)
+            self.assertEqual(len(polar), 74)
+            admitted = subprocess.run(manifest_args('polar74', polar) + ['--repetitions', '1', '--task-timeout', '480'],
+                                      cwd='/', env=fx.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(admitted.returncode, 0, admitted.stderr)
+            self.assertNotIn('REFUSED_PROVIDER_RATE_LIMITS', admitted.stdout)
+            self.assertIn('provider demand profile polar-bench', admitted.stderr)
+            value = json.loads(admitted.stdout)
+            self.assertEqual((value['status'], value['copies'], value['manifest']['original']),
+                             ('CHECKED_NOT_LAUNCHED', 74, False))
+            self.assertEqual(len(requests), 2)
+            requests.clear()
+            # One non-Polar task leaves the selection without a single measured group: global peaks.
+            self.assertIn('chat-mode', catalog_names(lambda row: row.get('status', 'ready') == 'ready'))
+            mixed = subprocess.run(manifest_args('mixed74', polar[:73] + ['chat-mode']) + ['--repetitions', '1', '--task-timeout', '480'],
+                                   cwd='/', env=fx.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(mixed.returncode, 78, mixed.stderr)
+            self.assertIn('requested 74 concurrent benches, maximum 70.', mixed.stderr)
+            self.assertNotIn('provider demand profile', mixed.stderr)
+            self.assertEqual(json.loads(mixed.stdout), dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=fx.args[3],
+                                                            copies=74, max_concurrent_benches=70, provider_calls=0))
+            # The pinned original manifest keeps the global peaks at the same width.
+            original = subprocess.run(fx.args + ['--task-count', '37', '--repetitions', '2'], cwd='/', env=fx.env,
+                                      capture_output=True, text=True, timeout=60)
+            self.assertEqual(original.returncode, 78, original.stderr)
+            self.assertIn('requested 74 concurrent benches, maximum 70.', original.stderr)
+            self.assertEqual(json.loads(original.stdout), dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=fx.args[3],
+                                                               copies=74, max_concurrent_benches=70, provider_calls=0))
+            self.assertEqual(requests, [])
+            self.assertFalse(fx.marker.exists())
+            self.assertEqual(list(fx.state.iterdir()), [])
 
     def test_provider_capacity_refuses_600_copies_before_any_credential_or_provider_read(self):
         requests = []
