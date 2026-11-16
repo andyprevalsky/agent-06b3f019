@@ -90,11 +90,12 @@ function isFiniteLiteralAlternation(source: string, flags: string): boolean {
 
 /**
  * A union of branches that are each a literal or two literals joined by one
- * `.*` (`azure.*credit|credit.*azure`), optionally wrapped in one unquantified
- * group, is at most quadratic: nothing repeats the union, so every branch is
- * searched on its own, and each is the allowed `meeting.*tomorrow` shape.
- * recheck takes over a second to classify such unions, past its deadline, so
- * without this proof grep rejected them as unclassified.
+ * `.*` or `.+` (`azure.*credit|credit.*azure`), with optional zero-width `\b`
+ * or `\B`, optionally wrapped in one unquantified group, is at most quadratic:
+ * nothing repeats the union, so every branch is searched on its own, and each
+ * is the allowed `meeting.*tomorrow` shape. recheck takes over a second to
+ * classify such unions, past its deadline, so without this proof grep
+ * rejected them as unclassified.
  */
 function isWildcardLiteralAlternation(source: string, flags: string): boolean {
   if (!/^[ims]*$/.test(flags)) return false;
@@ -108,9 +109,10 @@ function isWildcardLiteralAlternation(source: string, flags: string): boolean {
     const char = body[index];
     if (char === '\\') {
       index += 1;
+      if (body[index] === 'b' || body[index] === 'B') continue;
       if (index === body.length || !'\\^$.*+?()[]{}|'.includes(body[index])) return false;
       segmentLength += 1;
-    } else if (char === '.' && body[index + 1] === '*') {
+    } else if (char === '.' && (body[index + 1] === '*' || body[index + 1] === '+')) {
       if (branchHasWildcard || segmentLength === 0) return false;
       branchHasWildcard = true;
       segmentLength = 0;

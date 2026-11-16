@@ -99,6 +99,9 @@ async function testWildcardLiteralAlternations(): Promise<void> {
     ],
     ['(?:move.*out|moving)', ''],
     [String.raw`a\.b.*c\|d|e`, 'm'],
+    // Measured 1149-1374 ms in recheck: `.+` is one wildcard too, and `\b` is zero-width.
+    ['azure.+credit|credit.+azure|azure.+spend', 'i'],
+    [String.raw`\bazure\b.*credit|credit.*\bazure\b`, 'i'],
   ]) {
     assert.equal(
       (await checkPatternSafety(pattern, flags, 0)).ok,
@@ -111,7 +114,11 @@ async function testWildcardLiteralAlternations(): Promise<void> {
     'a.*.*b|c',
     '.*a|b',
     'a.*|b',
-    'a.+b|c',
+    'a.+|b',
+    '.+a|b',
+    'a.+.*b|c',
+    'a.*b.+c|d',
+    'a.+?b|c',
     'a.*?b|c',
     'a.b|c',
     'a.*b|c+',
@@ -132,6 +139,12 @@ async function testWildcardLiteralAlternations(): Promise<void> {
     'a.*b|c$',
     '[ab].*c|d',
     String.raw`a.*\w|b`,
+    String.raw`\b|a`,
+    String.raw`a.*\b|c`,
+    String.raw`a\b|\B`,
+    String.raw`a\b+|c`,
+    // Optional atoms multiply backtracking per optional, so they stay analyzer-owned.
+    'google.?cloud.*submit|oauth',
   ]) {
     assert.equal(
       (await checkPatternSafety(pattern, '', 0)).ok,

@@ -44,7 +44,7 @@ with `metadata.grep`, text `Grep {...}`) found 27 chat-router greps between the
 feature's launch on 2026-11-10 and 2026-11-16, of which 9 ended
 `toolStatus: ERROR` (a third). Render logs show the matching
 `[ChatHandler] Grep failed` lines. Replaying each stored argument set through
-`validateGrepInput` reproduced all 9 outcomes exactly (and all 18 successes):
+`validateGrepInput` reproduced all 9 outcomes exactly (and all 17 successes):
 
 | Count | Error | Example arguments |
 |------:|-------|-------------------|
@@ -104,22 +104,41 @@ lesson applies directly to class 2).
 
 - `regexSafety.ts`: new local proof `isWildcardLiteralAlternation` — a union
   whose branches are each a non-empty literal, or two non-empty literals joined
-  by one `.*`, optionally wrapped in one unquantified `(`/`(?:` group spanning
-  the whole pattern, flags `[ims]` only. Nothing repeats the union, so its
-  backtracking cost is the sum of the branches' unanchored searches, each at
-  most quadratic. Everything else (two wildcards in a branch, `.+`, lazy or
-  quantified groups, prefixes/suffixes around the group, anchors, classes,
-  escapes like `\w`) stays analyzer-owned and fails closed on an unknown or
-  degree > 2 verdict. The deadline is unchanged.
+  by one `.*` or `.+` (zero-width `\b`/`\B` allowed), optionally wrapped in one
+  unquantified `(`/`(?:` group spanning the whole pattern, flags `[ims]` only.
+  Nothing repeats the union, so its backtracking cost is the sum of the
+  branches' unanchored searches, each at most quadratic. Everything else (two
+  wildcards in a branch, lazy wildcards, optional atoms, quantified or nested
+  groups, prefixes/suffixes around the group, anchors, classes, escapes like
+  `\w`) stays analyzer-owned and fails closed on an unknown or degree > 2
+  verdict. The deadline is unchanged.
 - `validate.agent.ts`: a merged agent_trajectories search accepts
   `order: newest_first`; `oldest_first` and `page_after` stay rejected by name.
-- Regressions: the unit test proves the production patterns locally under a
-  0 ms analyzer deadline and keeps 25 boundary shapes analyzer-owned, plus
-  real-analyzer rejection of unions with an exponential or degree-3 branch; the
-  contract blackbox replays the production chat-router calls verbatim through
-  `POST /api/data/grep`; the task-path blackbox asserts merged `newest_first`
-  returns 200 with `display_order: newest_first` and merged `oldest_first` stays
-  400 naming `order`.
+- Regressions: the unit test proves the production patterns (and the measured
+  `.+` / `\b` variants) locally under a 0 ms analyzer deadline, keeps over 30
+  boundary shapes analyzer-owned, and checks that unions with an exponential or
+  degree-3 branch are still rejected by the real analyzer. The contract blackbox
+  replays the production chat-router calls verbatim through
+  `POST /api/data/grep`. The task-path blackbox asserts that merged
+  `newest_first` returns 200 with `display_order: newest_first` and that merged
+  `oldest_first` stays a 400 naming `order`.
+- Independent review (fresh sub-agent, no diagnosis given): reached the same
+  four classes and first-bad boundaries before seeing this diagnosis. No
+  counterexample to the proof: 430 random unions accepted only by the new proof
+  were all rated degree ≤ 2 by recheck's automaton checker, and parsing-hole
+  probes (lookarounds, scoped flags, `(a.*b)|(c)`, quantified groups, trailing
+  escaped `)`, lazy wildcards, `***=`) all stay analyzer-owned. A further 40
+  random `.+`/`\b` unions also rated degree ≤ 2 with no unknown verdict.
+  Unit test 5/5 idle and 5/5 under CPU load.
+- Remaining analyzer-owned degree-2 shapes still exceed the deadline. Examples
+  measured by the reviewer: `oauth.*verif|google.?cloud.*submit` at 1269 ms and
+  `(google|gcp).*(oauth|verification)|oauth.*review` at 1528 ms. Optional atoms
+  multiply backtracking per optional (the existing proof caps them at one), so
+  proving them needs its own argument. The SMS supervisor logged the same
+  rejection three times (2026-11-11, 2026-11-13) through the same validator;
+  its patterns were not logged, so whether this fix covers them is unverified.
+  The rejection texts ("nested quantifiers or stacked wildcards"; "search it
+  alone or remove order") are unchanged model-visible strings.
 - 10k-agent behavior: an O(pattern length ≤ 1000) scan with no state, query or
   worker; it removes up to 1 s of analyzer wait and an analyzer slot per such
   grep from the shared backend.
