@@ -1,0 +1,34 @@
+[
+  {
+    "path": "/home/boxes/.codex/AGENTS.md",
+    "sha256": "e1b83a2abd1216551fabfc00bdd5d712531b3aa11ef8eb81dc4b6f5ca236d9aa",
+    "mode": "0o644",
+    "uid": 1002,
+    "gid": 1002,
+    "freedom_standing_text_present": true
+  },
+  {
+    "path": "/home/boxes/.claude/CLAUDE.md",
+    "sha256": "5d2c9ec335e84757bc590e802b48c20b1659afc290f85c9062860a653a71b385",
+    "mode": "0o644",
+    "uid": 1002,
+    "gid": 1002,
+    "freedom_standing_text_present": true
+  },
+  {
+    "path": "/home/boxes/rose/AGENTS.md",
+    "sha256": "9d8df9926136e588334b7e77ee01ca7cb8675591e7ab576258da67887938c9da",
+    "mode": "0o644",
+    "uid": 1002,
+    "gid": 1002,
+    "freedom_standing_text_present": false
+  },
+  {
+    "path": "/home/boxes/rose/CLAUDE.md",
+    "sha256": "77a24cdc9312475fb28ea112e6b8736641df551dc9de6451fbb7b4ea903c0264",
+    "mode": "0o644",
+    "uid": 1002,
+    "gid": 1002,
+    "freedom_standing_text_present": false
+  }
+]
