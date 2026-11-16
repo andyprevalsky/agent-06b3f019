@@ -16,6 +16,8 @@ import time
 import unittest
 
 ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT/'scripts'/'lib'))
+from condition_wait import wait_until
 
 
 def receive_exact(stream,count):
@@ -959,11 +961,10 @@ with (root/'wireguard-calls').open('a')as stream:
             self.addCleanup(lambda:process.poll()is not None or(process.kill(),process.wait()))
             return process
         def wait_ready(process):
-            deadline=time.monotonic()+20
-            while not (f.root/'standalone-ready').exists():
+            def ready():
                 if process.poll()is not None:self.fail('standalone fixture exited: %r'%(process.communicate(),))
-                self.assertLess(time.monotonic(),deadline,'standalone fixture never became ready')
-                time.sleep(.02)
+                return (f.root/'standalone-ready').exists()
+            wait_until(ready,timeout=20,description='standalone fixture ready')
         def finish(process):
             out,err=process.communicate(input='\n',timeout=20);return process.returncode,out+err
         with patch.dict(os.environ,environment,clear=True):
@@ -991,9 +992,7 @@ with (root/'wireguard-calls').open('a')as stream:
                 except ConnectionRefusedError:return True
                 finally:probe.close()
                 return False
-            deadline=time.monotonic()+5
-            while not refused():
-                self.assertLess(time.monotonic(),deadline,'killed default agent kept listening');time.sleep(.02)
+            wait_until(refused,timeout=5,description='killed default agent stops listening')
             self.assertTrue(default_socket.exists(),'fixture expected a stale default socket file')
             # Order 2: a campaign comes first; a second campaign and a standalone run refuse.
             first_dir=f.root/'campaign-a';first_dir.mkdir()
