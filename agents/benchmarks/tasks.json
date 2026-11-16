@@ -676,6 +676,12 @@
   },
   {
     "name": "parallel-tool-calls",
+    "quarantine": {
+      "since": "2026-11-16",
+      "repair": "pending-handoff:57ed261e68c94c6b9795d986e1639a80",
+      "error": "Timeout after 601s (task timeout=600s) | Agent status: ACTIVE (expected COMPLETED); first native attempt FAILED, single same-source automatic rerun PASS (FLAKY).",
+      "evidence": "PR2404 source6694 original root5b50f1ad; exact baseline770611/current6694 schema/scrape/retry/final-stream/600s poll replay; .context/schema-repair/parallel-smoke-rca/investigation/report.md; private-preservation/pr2404/parallel-smoke-attribution-20261116T2051Z.tar.gz.gcm"
+    },
     "title": "Parallel Web Searches",
     "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.\n\nStart in execute phase. Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. Do NOT use Claude Code, a browser agent, or any code sandbox.",
     "timeout_seconds": 300,
@@ -950,6 +956,12 @@
   },
   {
     "name": "background-agent-message-smoke",
+    "quarantine": {
+      "since": "2026-11-16",
+      "repair": "pending-handoff:3824b0e2c79a485885f6d2ab5998244b",
+      "error": "Timeout after 183s (task timeout=180s) | Agent status: ACTIVE (expected COMPLETED); first native attempt FAILED, single same-source automatic rerun PASS (FLAKY).",
+      "evidence": "PR2404 source6694 original root7de4c80d; exact baseline770611/current6694 schema-getter/client/verifier/routing/180s poll replay; .context/schema-repair/background-smoke-rca/investigation/REPORT.md; private-preservation/pr2404/background-smoke-attribution-20261116T2043Z.tar.gz.gcm"
+    },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,
