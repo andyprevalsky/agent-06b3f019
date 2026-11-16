@@ -24,7 +24,7 @@ import hashlib
 import json
 import math
 import re
-import runpy
+import subprocess
 import shlex
 import sys
 import tarfile
@@ -47,9 +47,13 @@ CATEGORIES = ("PASS", "AGENT FAIL", "HARNESS", "INFRA", "UNKNOWN", "CANCELLED", 
 CATEGORY_CLASS = {"PASS": "ok", "AGENT FAIL": "agent", "HARNESS": "harness", "INFRA": "bad",
                   "UNKNOWN": "warn", "CANCELLED": "na", "SKIPPED": "na"}
 STATE_ICON = {"RUNNING": "🔵", "COMPLETE": "✅", "FAILED": "🔴", "ABORTED": "🔴", "HELD": "⏸",
-              "INCOMPLETE": "🟠", "NOT LAUNCHED": "⚪", "UNRECORDED": "🟠"}
+              "INCOMPLETE": "🟠", "NOT LAUNCHED": "⚪", "UNRECORDED": "🟠", "CONTROLLER LOST": "🔴",
+              "UNVERIFIED": "🟠"}
 STATE_CLASS = {"RUNNING": "run", "COMPLETE": "ok", "FAILED": "bad", "ABORTED": "bad", "HELD": "warn",
-               "INCOMPLETE": "warn", "NOT LAUNCHED": "na", "UNRECORDED": "warn"}
+               "INCOMPLETE": "warn", "NOT LAUNCHED": "na", "UNRECORDED": "warn", "CONTROLLER LOST": "bad",
+               "UNVERIFIED": "warn"}
+# Non-terminal states whose recorded controller is not verified alive: never RUNNING.
+UNLIVE = {"CONTROLLER LOST": "INTERRUPTED/UNRECONCILED", "UNVERIFIED": "IN_PROGRESS (UNVERIFIED)"}
 LIFE_ICON = {"ok": "✅", "fail": "🔴", "warn": "🟠", "pending": "🔵"}
 REQUIRED_SECTIONS = ("header", "kpis", "outcomes", "causes", "timing", "lifecycle", "history",
                      "agents", "issues", "footer")
@@ -151,6 +155,13 @@ def read_epoch(path: Path) -> float | None:
     try:
         return float(Path(path).read_text().strip())
     except (OSError, ValueError):
+        return None
+
+
+def read_epoch_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
         return None
 
 
@@ -542,6 +553,88 @@ def load_fleet(run_dir: Path) -> dict:
     return finish_experiment(exp)
 
 
+def process_birth(pid: int) -> str | None:
+    """``pid``'s identity in the form cloudbench-campaign-inventory.sh records ("" = not alive, None = unreadable)."""
+    if Path("/proc/self/stat").exists():
+        try:
+            fields = Path("/proc", str(pid), "stat").read_text().rsplit(") ", 1)[1].split()
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        except (FileNotFoundError, ProcessLookupError):
+            return ""
+        except (OSError, IndexError):
+            return None
+        return "" if fields[0] in ("Z", "X") else f"proc-start:{boot}:{fields[19]}"
+    try:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode in (0, 1) else None
+
+
+def controller_liveness(run_dir: Path, summary: dict) -> dict:
+    """Is the campaign controller that wrote ``summary.json`` still the live process it recorded?
+
+    Its exact identity is the parent PID + birth the campaign inventory publisher records in
+    ``shared-inventory/owner``. A summary alone cannot prove liveness: a SIGKILLed controller
+    leaves ``status: running`` forever (I-22).
+    """
+    recorded = (summary.get("shared_inventory") or {}).get("directory")
+    owner = {}
+    for path in [run_dir / "shared-inventory/owner"] + ([Path(recorded) / "owner"] if isinstance(recorded, str) else []):
+        try:
+            owner = dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
+            break
+        except OSError:
+            continue
+    # Without a shared-inventory owner (concurrency 1), use the identity the campaign recorded itself.
+    own = summary.get("controller") if isinstance(summary.get("controller"), dict) else {}
+    pid = owner.get("parent_pid") or str(own.get("pid") or "")
+    start = owner.get("parent_start") or str(own.get("birth") or "")
+    if not pid.isdigit() or not start:
+        return {"state": "UNVERIFIED", "pid": None, "detail": "campaign controller PID/birth not recorded"}
+    current = process_birth(int(pid))
+    if current == start:
+        return {"state": "ALIVE", "pid": int(pid), "detail": f"controller PID {pid} alive"}
+    if start.startswith("proc-start:"):
+        boot = Path("/proc/sys/kernel/random/boot_id")
+        try:
+            same_boot = start.split(":")[1] == boot.read_text().strip()
+        except OSError:  # missing or unreadable: the boot cannot be confirmed
+            same_boot = False
+        if not same_boot:
+            return {"state": "UNVERIFIED", "pid": int(pid), "detail": f"controller PID {pid} recorded on another host boot"}
+    if current is None:
+        return {"state": "UNVERIFIED", "pid": int(pid), "detail": f"controller PID {pid} liveness unreadable"}
+    return {"state": "LOST", "pid": int(pid),
+            "detail": f"controller PID {pid} " + ("not alive" if current == "" else "reused by another process (birth differs)")}
+
+
+RELEASE_KEYS = ("run_id", "fleet_dir", "fleet_owner_token", "resources_released", "lifecycle_verified",
+                "released_at_epoch")
+
+
+def refresh_release(run_dir: Path, summary: dict) -> None:
+    """For finished jobs whose summary never recorded a release check (plain campaigns before
+    I-29), read the fleet teardown receipts through the campaign's own release verifier, in
+    memory only. The runner's exit-time check already covers jobs that recorded one; a receipt
+    that cannot be verified, or that raises, leaves the job unverified."""
+    parts = run_dir.resolve().parts
+    if len(parts) < 5 or parts[-4:-1] != (".context", "benchmarks", "campaigns"):
+        return  # The verifier binds receipts to the owning workspace root.
+    verify = None
+    for job in summary.get("jobs") or []:
+        if (not isinstance(job, dict) or "resources_released" in job or not job.get("finished_at")
+                or not isinstance(job.get("log"), str)):
+            continue
+        try:
+            verify = verify or runpy.run_path(str(HERE / "run-bench-campaign.py"))["released_attempt"]
+            found = verify(Path(*parts[:-4]), job)
+        except Exception:
+            continue
+        if isinstance(found, dict) and found.get("resources_released") is True:
+            job.update({key: found[key] for key in RELEASE_KEYS if key in found})
+
+
 def campaign_fleet(attempt: dict) -> Path | None:
     """Read the physical handle emitted by the controller, including non-retry campaigns.
 
@@ -699,6 +792,7 @@ def load_campaign(run_dir: Path, operator_ends=None) -> dict:
         summary = json.loads(raw)
     else:
         summary = read_json(run_dir / "summary.json") or {}
+    refresh_release(run_dir, summary)
     exp = empty_experiment("campaign", run_dir)
     exp["id"] = summary.get("campaign_id") or run_dir.name
     exp["scheduled_total"] = summary.get("group_total") or summary.get("total_jobs")
@@ -795,6 +889,14 @@ def load_campaign(run_dir: Path, operator_ends=None) -> dict:
         exp["state"] = {"passed": "COMPLETE", "failed": "FAILED", "cancelled": "ABORTED"}.get(status, "INCOMPLETE")
         if summary.get("e2e_timeout_exceeded"):
             exp["state_reason"] = "whole-experiment deadline exceeded"
+    elif not operator:
+        live = controller_liveness(run_dir, summary)
+        if live["state"] != "ALIVE":
+            exp["controller"] = dict(live, last_update_at=read_epoch_mtime(run_dir / "summary.json"))
+            exp["state"] = "CONTROLLER LOST" if live["state"] == "LOST" else "UNVERIFIED"
+            exp["state_reason"] = f'last update {pacific(exp["controller"]["last_update_at"])} · {live["detail"]}'
+            lifecycle_item(exp, "fail" if live["state"] == "LOST" else "warn", "Campaign controller",
+                           live["detail"], issue=False)
     operator = (operator_ends or {}).get(run_dir.resolve())
     if operator:
         source = exp.get("source_ref")
@@ -1389,6 +1491,8 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
     since = None
     if exp["state"] == "RUNNING":
         since = {"state": "RUNNING"}
+    elif exp["state"] in UNLIVE:
+        since = {"state": "END UNRECORDED"}
     elif ended:
         at, label = max(ended)
         since = {"state": "ENDED", "label": label, "at": at, "age": now - at}
@@ -1578,6 +1682,19 @@ def _history_row(exp: dict) -> dict:
 
 def _issues(exp: dict) -> list[dict]:
     out = []
+    controller = exp.get("controller")
+    if controller and exp["state"] in UNLIVE:
+        progress = exp.get("progress") or {}
+        counts = (f'{progress.get("in_progress", 0)} in-progress job(s) {UNLIVE[exp["state"]]}, '
+                  f'{progress.get("queued", 0)} queued' if progress else "job counts UNMEASURED")
+        updated = f'summary.json last updated {pacific(controller.get("last_update_at"))}'
+        if exp["state"] == "CONTROLLER LOST":
+            out.append({"severity": "red", "text": f'Campaign controller lost: {controller["detail"]}; {updated}; {counts}.',
+                        "owner": "parent", "action": "exact-owner recovery of its job controllers and guests; "
+                        "preserve summary.json, job logs and original clocks before any relaunch"})
+        else:
+            out.append({"severity": "amber", "text": f'Campaign controller liveness UNVERIFIED: {controller["detail"]}; {updated}; {counts}.',
+                        "owner": "parent", "action": "verify the exact controller PID/birth before treating the run as live"})
     if exp.get("infra_unattributed_cancelled"):
         out.append({"severity": "amber", "text": f'{exp["infra_unattributed_cancelled"]} cancelled jobs carry '
                     'unattributed INFRA_ERROR flags; pre-cancellation infra count is UNCLASSIFIED.',
@@ -1794,7 +1911,8 @@ def render_html(card: dict) -> str:
     goal_elapsed = (f' · goal elapsed {e(duration(card["generated_at"] - rate["goal_started_at"]))}' if rate else "")
     out.append('<section data-section="header"><div class="title">'
                f'<span>🧪 Experiment {e(number)}</span>'
-               f'<span class="badge {STATE_CLASS[state]}">{STATE_ICON[state]} {e(state)}</span></div>'
+               f'<span class="badge {STATE_CLASS[state]}">{STATE_ICON[state]} {e(state)}</span>'
+               + (f'<span class="sub {STATE_CLASS[state]}">{e(exp["state_reason"])}</span>' if state in UNLIVE else "") + "</div>"
                f'<div class="sub"><b>{e(exp["label"])}</b> · {e(shape)} · {e(surface)} · src {e(short_ref(exp.get("source_ref")))}'
                + (f' · tasks {e(short_ref(exp["task_ref"]))}' if exp.get("task_ref") else "") + "</div>"
                f'<div class="sub">Triggered {e(pacific(exp.get("triggered_at")))}{goal_elapsed}</div>'
@@ -1817,14 +1935,14 @@ def render_html(card: dict) -> str:
     window = f'exec window {duration(exp["window_s"])}' if exp.get("window_s") else "exec window UNRECORDED"
     threshold = exp.get("infra_threshold")
     tiles = []
-    for label, key in (("QUEUED", "queued"), ("IN_PROGRESS", "in_progress"), ("COMPLETED", "completed")):
+    for label, key in (("QUEUED", "queued"), (UNLIVE.get(state, "IN_PROGRESS"), "in_progress"), ("COMPLETED", "completed")):
         count = str(progress[key]) if progress else "UNMEASURED"
         detail = "logical tasks" if progress else "no job records yet"
         if label == "COMPLETED" and progress:
             detail = f'of {total} scheduled' if total else "recorded terminal outcomes"
         if exp.get("never_started"):
             detail += " · never started"
-        tiles.append(f'<div class="tile"><div class="k">{label}</div><div class="v {"run" if progress else "warn"}">{e(count)}</div><div class="s">{e(detail)}</div></div>')
+        tiles.append(f'<div class="tile"><div class="k">{label}</div><div class="v {(STATE_CLASS[state] if state in UNLIVE and key == "in_progress" else "run") if progress else "warn"}">{e(count)}</div><div class="s">{e(detail)}</div></div>')
     if card.get("iterations") is not None:
         tiles += [
             f'<div class="tile"><div class="k">✅ Pass</div><div class="v {pass_cls}">{e(pass_value)}</div><div class="s">{e(pass_sub)}</div></div>',
@@ -2051,7 +2169,8 @@ def render_text(card: dict) -> str:
     total = exp.get("scheduled_total") or 0
     state = exp["state"]
     rate = card.get("rate")
-    lines = [f'🧪 EXPERIMENT #{card["number"] or "UNRECORDED"} · {STATE_ICON[state]} {state}',
+    lines = [f'🧪 EXPERIMENT #{card["number"] or "UNRECORDED"} · {STATE_ICON[state]} {state}'
+             + (f' · {exp["state_reason"]}' if state in UNLIVE else ""),
              f'{exp["label"]} · {total or "UNRECORDED"} scheduled · {exp.get("surface")} · src {short_ref(exp.get("source_ref"))}',
              f'Triggered {pacific(exp.get("triggered_at"))}',
              _rate_text(card)]
@@ -2062,7 +2181,7 @@ def render_text(card: dict) -> str:
     lines.append("Since last benchmark ended: " + ("RUNNING" if since.get("state") == "RUNNING" else
                  f'{duration(since["age"])} ({since["label"]})' if since.get("state") == "ENDED" else "END UNRECORDED"))
     prog = exp.get("progress")
-    lines.append(f'QUEUED {prog["queued"]} · IN_PROGRESS {prog["in_progress"]} · COMPLETED {prog["completed"]}/{total}'
+    lines.append(f'QUEUED {prog["queued"]} · {UNLIVE.get(state, "IN_PROGRESS")} {prog["in_progress"]} · COMPLETED {prog["completed"]}/{total}'
                  + (" · never started (start barrier aborted before release)" if exp.get("never_started") else "")
                  if prog else "QUEUED / IN_PROGRESS / COMPLETED UNMEASURED")
     harness, _ = _harness(exp)

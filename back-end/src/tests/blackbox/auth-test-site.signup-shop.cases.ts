@@ -306,6 +306,15 @@ test('member_discount_purchase: a member pays less than a guest for the same car
           cart
         );
         const cookies = `${cart}; ${sessionCookie(verified)}`;
+        const account = await (await getPage(base, pagePath(manifest, '/account'), cookies)).text();
+        assert(
+          account.includes('<dd>a free account</dd>'),
+          'the zero-fee shop account must state its actual free terms'
+        );
+        assert(
+          !account.includes('Rose Shop Annual'),
+          'a free shop account must not invent an annual plan'
+        );
         const checkout = await (
           await getPage(base, pagePath(manifest, '/checkout'), cookies)
         ).text();

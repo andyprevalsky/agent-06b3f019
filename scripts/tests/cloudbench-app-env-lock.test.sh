@@ -12,6 +12,8 @@
 #   case 3 — an ADEQUATE budget waits the live holder out and acquires (the fix).
 #   case 4 — the shipped DEFAULT budget is large enough to outlast a real refresh
 #            (locks in that nobody silently reverts it toward the fatal 120s).
+#   case 5 — the read-only live-owner probe run-bench-fleet uses to outwait
+#            in-flight warm-source maintenance reports only a live peer owner.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -80,5 +82,33 @@ esac
 [ "$default_budget" -ge 900 ] \
     || fail "case 4: default lock wait ${default_budget}s is too short to outlast a warm-dep refresh (fatal-120s regression)"
 echo "PASS case 4 — default lock wait ${default_budget}s outlasts a real refresh"
+
+# ── case 5: read-only live-owner probe (fleet warm-source maintenance wait) ──
+# run-bench-fleet waits past its stop budget only while a LIVE peer owns this
+# lock; the probe must never report an absent, stale, malformed or own lock,
+# and must never acquire or break the lock it reads.
+rm -f "$APP_ENV_LOCK_FILE"
+( source "$LIB"; app_environment_lock_live_owner >/dev/null ) \
+    && fail "case 5: an absent lock reported a live owner"
+sleep 30 &
+HOLDER_PID=$!
+printf '%s\n' "$HOLDER_PID" > "$APP_ENV_LOCK_FILE"
+probe="$( source "$LIB"; app_environment_lock_live_owner )" \
+    || fail "case 5: a live peer owner was not reported"
+[ "$probe" = "$HOLDER_PID" ] || fail "case 5: live owner probe printed '$probe', expected $HOLDER_PID"
+[ "$(cat "$APP_ENV_LOCK_FILE")" = "$HOLDER_PID" ] || fail "case 5: the probe changed the live owner's lock"
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+( source "$LIB"; app_environment_lock_live_owner >/dev/null ) \
+    && fail "case 5: a dead-owner lock reported a live owner"
+[ "$(cat "$APP_ENV_LOCK_FILE")" = "$HOLDER_PID" ] || fail "case 5: the probe broke a stale lock it only reads"
+HOLDER_PID=""
+printf 'not-a-pid\n' > "$APP_ENV_LOCK_FILE"
+( source "$LIB"; app_environment_lock_live_owner >/dev/null ) \
+    && fail "case 5: a malformed lock reported a live owner"
+( source "$LIB"; printf '%s\n' "$$" > "$APP_ENV_LOCK_FILE"; app_environment_lock_live_owner >/dev/null ) \
+    && fail "case 5: the caller's own lock was reported as a peer maintenance owner"
+rm -f "$APP_ENV_LOCK_FILE"
+echo "PASS case 5 — live-owner probe reports only a live peer owner, read-only"
 
 echo "ALL PASS: cloudbench app-env lock"

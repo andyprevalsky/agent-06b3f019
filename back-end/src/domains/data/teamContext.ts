@@ -1,5 +1,6 @@
 /** Read-only team map. No account config, credentials, or project execution data. */
 import {
+  agentAccountId,
   getTeamContext,
   listSharedProjects,
   resolveTeamDataAccess,
@@ -14,20 +15,16 @@ export async function getSharedDataMap(userId: string) {
   return {
     you: { userId },
     teams: teams.map(({ id, name, role }) => ({ id, name, role })),
-    accounts: grants
-      .filter(
-        (grant) =>
-          (grant.provider === 'gmail' && Boolean(grant.accountEmail)) ||
-          (grant.provider === 'imessage' && grant.accountId === '')
-      )
-      .map(({ teamId, ownerUserId, ownerName, provider, accountId, accountEmail }) => ({
-        teamId,
-        ownerUserId,
-        ownerName,
-        provider,
-        accountId,
-        accountEmail,
-      })),
+    // Every grant the resolver validated, named by the exact id grep takes as `account_id`.
+    accounts: grants.map((grant) => ({
+      teamId: grant.teamId,
+      ownerUserId: grant.ownerUserId,
+      ownerName: grant.ownerName,
+      provider: grant.provider,
+      accountId: agentAccountId(grant),
+      accountEmail: grant.accountEmail,
+      label: grant.label,
+    })),
     projects: projects.map(({ projectId, teamId, teamName, ownerUserId, name }) => ({
       projectId,
       teamId,

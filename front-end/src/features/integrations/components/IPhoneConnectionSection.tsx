@@ -1,7 +1,8 @@
 /**
  * STATE MACHINE: IPhoneConnectionSection (one integration row, same look as DesktopIntegrationRow)
  *
- *   section header "IPHONE" · row: app-icon tile · "iPhone" · right-side status + action
+ *   section header "PHONE" · row: app-icon tile · "iPhone" · right-side status + action
+ *   · then the Android row (DesktopIntegrationRow, "Coming soon")
  *
  *   [LOADING]        "Checking…" (Connect waits for the first read)
  *   [DISABLED]       "Request access" → persists request + admin SMS → [ACCESS_REQUESTED]
@@ -25,13 +26,24 @@ import { usePhoneLauncher } from '@/hooks/phoneLauncherContext';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import { useIPhoneConnection } from '../hooks/useIPhoneConnection';
-import {
+import DesktopIntegrationRow, {
   ACTION_CLASSES,
   DESKTOP_ROW_CLASSES,
   DESKTOP_ROW_NAME_CLASSES,
   DesktopSectionHeader,
+  type DesktopIntegrationView,
 } from './DesktopIntegrationRow';
-import DropdownIconFrame, { warningGlowGradient } from './DropdownIconFrame';
+import DropdownIconFrame, { DropdownIconPreset, warningGlowGradient } from './DropdownIconFrame';
+import { AndroidLogo } from './toolIcons';
+
+/** Android sits under iPhone in the same Phone category until it ships. */
+const ANDROID_ROW: DesktopIntegrationView = {
+  key: 'android',
+  name: 'Android',
+  icon: { preset: DropdownIconPreset.android, glyph: <AndroidLogo /> },
+  accounts: [],
+  availability: 'coming-soon',
+};
 
 function AppleIcon() {
   return (
@@ -81,7 +93,7 @@ export default function IPhoneConnectionSection() {
     : null;
   return (
     <section aria-label="iPhone connection">
-      <DesktopSectionHeader>iPhone</DesktopSectionHeader>
+      <DesktopSectionHeader>Phone</DesktopSectionHeader>
       <div className={DESKTOP_ROW_CLASSES} data-testid="integration-row-iphone">
         <div className="flex items-center gap-3">
           <DropdownIconFrame
@@ -172,6 +184,7 @@ export default function IPhoneConnectionSection() {
           </p>
         )}
       </div>
+      <DesktopIntegrationRow view={ANDROID_ROW} />
     </section>
   );
 }

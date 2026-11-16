@@ -4,7 +4,7 @@ This is the SINGLE helper for GET /api/agents/{agent_id}.
 Other helpers should import and use _fetch_agent_data_impl directly.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 import structlog
@@ -96,3 +96,38 @@ async def fetch_agent_config(agent_id: str) -> Dict:
     except Exception as e:
         logger.error("Failed to fetch agent config", agent_id=agent_id, error=str(e))
         raise
+
+
+MESSAGE_BATCH_LIMIT = 50  # POST /api/agents/messages/batch maximum
+
+
+@activity.defn
+async def fetch_message_texts(user_id: str, message_ids: List[str]) -> Dict[str, str]:
+    """Activity (read-only, so retries are idempotent): {message_id: text} for the user's USER/TOOL rows.
+
+    Claim check for continuation state: a workflow carries durable message ids
+    across continue_as_new and resolves their text here instead of in its args.
+    """
+    config = load_config()
+    client = get_http_client()
+    texts: Dict[str, str] = {}
+    for start in range(0, len(message_ids), MESSAGE_BATCH_LIMIT):
+        chunk = message_ids[start : start + MESSAGE_BATCH_LIMIT]
+        activity.heartbeat(f"Fetching message texts {start}/{len(message_ids)}")
+        response = await client.post(
+            f"{config.backend.api_url}/api/agents/messages/batch",
+            headers={"X-API-Key": config.backend.api_key, "X-User-Id": user_id, "Content-Type": "application/json"},
+            json={"ids": chunk, "user_id": user_id},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        for row in response.json().get("messages", []):
+            if isinstance(row.get("id"), str) and isinstance(row.get("text"), str):
+                texts[row["id"]] = row["text"]
+    logger.info(
+        "[ContinuationClaimCheck] Message texts fetched",
+        user_id=user_id,
+        requested=len(message_ids),
+        found=len(texts),
+    )
+    return texts

@@ -92,6 +92,27 @@ def publish_rebuilt_packet(destination: Path, canonical: Path, rejected: Path, h
     sync(canonical.parent)
 
 
+def preserve_failed_partial(canonical: Path) -> None:
+    """Move a failed build's manifest-less partial archive aside, never deleting it.
+
+    A failed build keeps its partial originals.tar.gz for diagnosis but never
+    publishes a manifest. Left in place, it blocked every retry. Only that exact
+    shape is preserved under a digest-named sibling; anything else still refuses.
+    """
+    if not os.path.lexists(canonical):
+        return
+    info = canonical.lstat()
+    assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(), "existing forensic packet is unsafe"
+    assert {entry.name for entry in canonical.iterdir()} == {"originals.tar.gz"}, \
+        "a forensic packet already exists; use --rebuild-existing"
+    partial = canonical / "originals.tar.gz"
+    assert stat.S_ISREG(partial.lstat().st_mode)
+    digest = hashlib.sha256(partial.read_bytes()).hexdigest()
+    helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-original-volume-capture.py")))
+    helper["rename_noreplace"](canonical, canonical.with_name(f"_forensic.partial-{digest[:16]}"))
+    helper["fsync_directory"](canonical.parent)
+
+
 def build(args) -> None:
     registry = args.registry.resolve()
     owner = registry.name
@@ -139,6 +160,7 @@ def build(args) -> None:
         run_identity = run_info.st_dev, run_info.st_ino
     else:
         destination = canonical
+        preserve_failed_partial(canonical)
         destination.mkdir(mode=0o700, exist_ok=False)
     archive_path = destination / "originals.tar.gz"
     rows = []
@@ -274,11 +296,22 @@ def build(args) -> None:
                             forensic["verify_original_volume_provenance"](meta, entry, originals)
                             for relative, data in wrappers.items():
                                 add(relative, data)
-                            for relative in (services_name, "repo/.context/cloudbench/stack.log",
-                                             "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"):
+                            absent = [services_name, "repo/.context/cloudbench/stack.log",
+                                      "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"]
+                            if forensic["pre_backend_native_stop"](out, owner, meta["run_id"], entry):
+                                # The stack launcher ran but the backend never
+                                # started: stack.log is original evidence. The
+                                # exact native stop and zero-session recovery
+                                # receipt are retained with the originals.
+                                entry["phase"] = "pre-backend-exit"
+                                assert "repo/.context/cloudbench/stack.log" in seen
+                                absent.remove("repo/.context/cloudbench/stack.log")
+                                for relative, source in forensic["PRE_BACKEND_RECEIPTS"].items():
+                                    add(relative, read(out / source, 1048576))
+                            for relative in absent:
                                 assert relative not in seen and relative in entry["missing"]
                         ack = f"cloudbench-driver-clean-{run_token}.ack"
-                        if ack not in seen:
+                        if ack not in seen and ack not in entry["missing"]:
                             entry["missing"].append(ack)
                 if fresh:
                     entry["runtime_evidence_complete"] = False
@@ -291,12 +324,22 @@ def build(args) -> None:
                         continue
                     parent = primary_by_id[original["source_machine_id"]]
                     base = run / parent["task"] / "worker-runtime-evidence" / machine
-                    worker_manifest = json.loads(read(base / "capture/manifest.json", 1048576))
                     worker = {"machine_id": machine, "volume_id": original["volume_id"],
                               "primary_machine_id": parent["machine_id"], "task": parent["task"],
                               "run_token": parent["run_token"], "proof_credit": 0, "files": {}}
-                    for relative in ("owner.json", "capture/manifest.json", *("capture/" + name for name in worker_manifest["files"])):
-                        data = read(base / relative, 512 * 1024 * 1024)
+                    if os.path.lexists(base / "not-launched.json"):
+                        # An inert clone whose wrapper never launched has no
+                        # runtime to capture; preserve its sealed receipts and
+                        # the exact stage log, rechecked by the consumer.
+                        worker["kind"] = "not-launched"
+                        originals = forensic["verify_unlaunched_worker"](
+                            run / parent["task"], machine, parent["machine_id"], parent["run_token"])
+                    else:
+                        worker_manifest = json.loads(read(base / "capture/manifest.json", 1048576))
+                        originals = {relative: read(base / relative, 512 * 1024 * 1024) for relative in (
+                            "owner.json", "capture/manifest.json",
+                            *("capture/" + name for name in worker_manifest["files"]))}
+                    for relative, data in originals.items():
                         worker["files"][relative] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
                         info = tarfile.TarInfo(f"_normal_workers/{machine}/{relative}")
                         info.size, info.mode, info.mtime = len(data), 0o600, 0
@@ -315,12 +358,16 @@ def build(args) -> None:
         with archive_path.open("rb") as original:
             os.fsync(original.fileno())
         archive_bytes = archive_path.stat().st_size
-        assert archive_bytes <= 512 * 1024 * 1024
+        # The fresh consumer bounds the packet by one producer runtime budget
+        # per guest it covers; the pool consumer keeps its fixed bound.
+        limit = (forensic["forensic_archive_limit"](len(rows) + len(normal_workers))
+                 if fresh else 512 * 1024 * 1024)
+        assert archive_bytes <= limit, f"forensic archive {archive_bytes} bytes exceeds {limit}"
         manifest = {
             "schema": "cloudbench-forensic-retirement-v1" if fresh else "cloudbench-interrupted-pool-evidence-v1",
             "owner": owner, "run_id": meta["run_id"], "proof_credit": 0,
             "archive_bytes": archive_bytes,
-            "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+            "archive_sha256": forensic["regular_sha256"](archive_path, limit),
             "tasks": rows,
             **({"uncompressed_bytes": uncompressed, "normal_workers": normal_workers,
                 "preserved_files": preserved} if fresh else {}),

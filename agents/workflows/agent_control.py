@@ -332,16 +332,16 @@ class AgentControlMixin:
                 structured_response=structured,
             ),
             "USER",
-            metadata={
-                **agent_notification_metadata(
-                    address=address,
-                    agent_type=agent_type,
-                    status=status,
-                    background_task_id=base_id,
-                    idempotency_key=key,
-                ),
-                "subAgentId": child_agent_id,
-            },
+            # The parent's only copy of the new result: the same parent-visible
+            # metadata as a first-run notification. A ``subAgentId`` stamp would mark
+            # it as the child's internal work and drop it from the parent's context.
+            metadata=agent_notification_metadata(
+                address=address,
+                agent_type=agent_type,
+                status=status,
+                background_task_id=base_id,
+                idempotency_key=key,
+            ),
         )
         self._has_new_messages = True
         self._note_wait_wake(

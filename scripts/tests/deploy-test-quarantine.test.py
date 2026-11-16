@@ -488,6 +488,16 @@ class ReleaseReport(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'single failed case'):
             q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'real_model_controls'},
                                    self.root)
+        # PR #1865 2026-11-13: a domain returning a bare bool reports no counts prefix
+        # ("FAIL (1 failed case(s): X; first error: ..."); the single failed case still binds.
+        bare = detail.replace('121 passed, 1 failed; ', '')
+        recorded = q.validate_attribution({**occurrence, 'detail': bare}, {**entry, 'case': 'real_model_controls'},
+                                          self.root)
+        self.assertEqual('dom', recorded['post_merge']['unit'])
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': bare.replace('1 failed case(s): real_model_controls',
+                                                                         '2 failed case(s): real_model_controls, other')},
+                                   {**entry, 'case': 'real_model_controls'}, self.root)
 
     def test_bool_returning_domain_with_listed_cases_binds_its_single_failed_case(self):
         # browser-tilion (PR #2214, occurrence 5cb2ca0e): run_all_tests() returns a bool, so the runner

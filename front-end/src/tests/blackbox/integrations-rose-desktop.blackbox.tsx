@@ -81,6 +81,7 @@ describe('Rose Desktop integrations: one account per integration', () => {
       'CLIs',
       'MCP servers',
       'Meeting note taker',
+      'Wearables',
       'Other',
     ]);
     expect(within(list).queryByText(/manage/i)).not.toBeInTheDocument();

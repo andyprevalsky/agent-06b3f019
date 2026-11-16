@@ -1,8 +1,10 @@
 name: Production Semantic Frontend Gate
 # The run title names the exact source commit so a watcher can bind to this
 # run from `gh run view --json displayTitle` (inputs and job summaries are not
-# exposed there). Deployment-triggered runs name the deployment instead.
-run-name: "Production semantic gate ${{ github.event_name == 'workflow_dispatch' && format('source_sha={0}', inputs.source_sha || github.sha) || format('deployment={0}', github.event.deployment.id) }}"
+# exposed there). Deployment-triggered runs name the deployment instead. A
+# dispatch also names its own dispatch_id: two concurrent verifications bound to
+# the same live commit share a source_sha, so only the id tells their runs apart.
+run-name: "Production semantic gate ${{ github.event_name == 'workflow_dispatch' && format('source_sha={0}', inputs.source_sha || github.sha) || format('deployment={0}', github.event.deployment.id) }}${{ inputs.dispatch_id && format(' dispatch={0}', inputs.dispatch_id) || '' }}"
 
 on:
   deployment_status:
@@ -22,6 +24,12 @@ on:
           source. It must already be on the default branch (verified before
           checkout). Default: the head of the dispatched ref, which can be a
           later commit than the one a deploy merged.
+        required: false
+        default: ""
+      dispatch_id:
+        description: >-
+          Unique id of the dispatching invocation, echoed in the run title so
+          the dispatcher adopts exactly the run it created. Default: none.
         required: false
         default: ""
 

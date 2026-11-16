@@ -15,6 +15,7 @@
  * Rose Desktop (window.api.openExternal): sign-in opens the system browser and
  * returns to the public web origin's callback; this hook then re-lists every
  * MCP_SIGN_IN_POLL_MS until that row is connected (or MCP_SIGN_IN_TIMEOUT_MS).
+ * `signingInId` names the server being awaited (its chip shows syncing).
  * Each poll run has an identity (a newer sign-in replaces it), and responses
  * from an older request or from before a mutation never overwrite newer state.
  * A browser that fails to open ({success:false} or a rejection) is a connect error.
@@ -72,6 +73,8 @@ export function useMcpServers() {
   const [connectError, setConnectError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
+  /** Desktop: the server whose system-browser sign-in is being awaited. */
+  const [signingInId, setSigningInId] = useState<string | null>(null);
   const mounted = useRef(false);
   /** Identity of the current desktop sign-in poll; a replaced or stopped run ignores its callbacks. */
   const pollRun = useRef(0);
@@ -118,13 +121,17 @@ export function useMcpServers() {
   const awaitDesktopSignIn = useCallback((id: string) => {
     if (poll.current !== null) clearInterval(poll.current);
     const run = ++pollRun.current;
+    setSigningInId(id);
     const startedAt = Date.now();
     let applied = 0;
     let sent = 0;
     const handle = setInterval(() => {
       const stop = () => {
         // Invalidate this run too, so its in-flight responses cannot apply afterwards.
-        if (run === pollRun.current) pollRun.current += 1;
+        if (run === pollRun.current) {
+          pollRun.current += 1;
+          if (mounted.current) setSigningInId(null);
+        }
         clearInterval(handle);
         if (poll.current === handle) poll.current = null;
       };
@@ -227,6 +234,7 @@ export function useMcpServers() {
     clearConnectError: () => setConnectError(null),
     busyId,
     rowError,
+    signingInId,
     connect,
     reconnect,
     remove,

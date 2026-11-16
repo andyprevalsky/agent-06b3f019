@@ -446,25 +446,62 @@ def _is_masked_secret_ref(ref: str) -> bool:
     return isinstance(ref, str) and bool(ref)
 
 
-def mask_secret_values(value: Any, secret_refs: Optional[Mapping[str, str]]) -> Any:
+# A cardholder name, expiry and CVV are short or ordinary words: the merchant
+# can share the cardholder's name and a CVV can equal a step number. In page
+# observations they are masked only where the page holds them as a value.
+_VALUE_SCOPED_CARD_REFS = frozenset({"card_name", "card_expiry", "card_cvv"})
+# Result fields built only from the rendered page or from the model's own
+# arguments. Every other field, and every other result, is a raw readback
+# (auth state, runtime URLs, errors, downloads) and stays strict.
+VALUE_SCOPED_RESULT_FIELDS = {
+    "read_browser_state": frozenset({"url", "title", "dom_tree", "tabs", "formatted_state"}),
+    "request_payment_card": frozenset({"payment_request"}),
+}
+# Where serialized page data carries a complete value: a form field's value
+# (the attributes browser-use withholds for password fields), a URL query or
+# fragment value, or a quoted string literal. Prefixes are masked strictly.
+_VALUE_CONTEXTS = (
+    ("attr", r"(?<![\w-])(?:aria-)?(?:value|valuetext)=", r"(?=\s*/?>|\s+[\w:-]+=|\s*$|[\r\n])"),
+    ("query", r"[?&#][^=&#?\s\"'<>]+=", r"(?=[&#\s\"'<>)\\]|$)"),
+    ("dquote", r"\"", r"(?=\\?\")"),
+    ("squote", r"'", r"(?=\\?')"),
+)
+
+
+def mask_secret_values(
+    value: Any, secret_refs: Optional[Mapping[str, str]], *, value_scoped: bool = False
+) -> Any:
     """Copy model-visible data while masking registered plaintext and JSON echoes.
 
     Outer dictionary keys belong to the tool protocol; nested page-supplied
     keys are redacted along with their values. Booleans remain protocol values.
-    Exact numeric echoes of numeric credentials are also replaced by their ref.
-    A larger digit sequence is a different numeric value: a CVV of ``234``
-    matches ``cvv234`` but does not rewrite DOM index ``1234``. Nonnumeric
-    credentials retain substring masking, including inside surrounding labels.
-    Replacement text is never rescanned, including when refs contain secrets.
+    By default every form of every secret is masked wherever it occurs, and
+    exact numeric echoes of numeric credentials are replaced by their ref
+    (callers restore harness-owned protocol numbers such as steps and
+    indexes). Use the default for logs, raw readbacks (evaluate values, logs,
+    network bodies, exceptions, transport errors) and anything unclassified.
+    A larger digit sequence is a different numeric value: ``234`` does not
+    rewrite ``1234``. Only browser-state observations and the model's own
+    authored content pass ``value_scoped=True``: a cardholder name, expiry or
+    CVV is then masked only as a complete value (a whole string, a form field
+    value, a URL query or fragment value, or a quoted literal), never inside
+    prose and never as a number. Passwords and card numbers stay masked
+    everywhere, including inside the context prefixes. Replacement text is never rescanned, including when refs
+    contain secrets.
     """
     bindings = _string_refs(secret_refs)
     forms: Dict[str, str] = {}
+    scoped_forms: Dict[str, str] = {}
     numeric: Dict[Decimal, str] = {}
     formatted_patterns = []
     formatted_refs = {}
+    scoped_formatted: list[tuple[str, str]] = []
     for ref, plaintext in bindings.items():
         if not plaintext:
             continue
+        canonical_ref = re.sub(r"(?::previous|#redacted-[0-9]+)+$", "", ref)
+        scoped = value_scoped and canonical_ref in _VALUE_SCOPED_CARD_REFS
+        target = scoped_forms if scoped else forms
         common_forms = {
             plaintext,
             html_escape(plaintext, quote=True),
@@ -479,30 +516,34 @@ def mask_secret_values(value: Any, secret_refs: Optional[Mapping[str, str]]) -> 
                 json.dumps(common_form, ensure_ascii=False)[1:-1],
                 json.dumps(common_form, ensure_ascii=True)[1:-1],
             ):
-                forms.setdefault(form, ref)
+                target.setdefault(form, ref)
                 if "/" in form:
-                    forms.setdefault(form.replace("/", "\\/"), ref)
+                    target.setdefault(form.replace("/", "\\/"), ref)
         # Hosted payment widgets commonly format the same PAN with spaces or
         # hyphens. Match only those bounded separators, never arbitrary text.
-        canonical_ref = re.sub(r"(?::previous|#redacted-[0-9]+)+$", "", ref)
         if canonical_ref == "card_number" and re.fullmatch(r"[0-9]{12,19}", plaintext):
             name = f"formatted_{len(formatted_patterns)}"
             pattern = r"(?<![0-9])" + r"[ \u00a0\u202f\-]?".join(plaintext) + r"(?![0-9])"
             formatted_patterns.append(f"(?P<{name}>{pattern})")
             formatted_refs[name] = ref
         if canonical_ref == "card_expiry" and re.fullmatch(r"[0-9]{2}/[0-9]{2}", plaintext):
-            name = f"formatted_{len(formatted_patterns)}"
             month, year = plaintext.split("/")
-            pattern = r"(?<![0-9])" + month + r"[ \t\u00a0\u202f]{0,3}/[ \t\u00a0\u202f]{0,3}" + year + r"(?![0-9])"
-            formatted_patterns.append(f"(?P<{name}>{pattern})")
-            formatted_refs[name] = ref
+            core = month + r"[ \t\u00a0\u202f]{0,3}/[ \t\u00a0\u202f]{0,3}" + year
+            if scoped:
+                scoped_formatted.append((core, ref))
+            else:
+                name = f"formatted_{len(formatted_patterns)}"
+                formatted_patterns.append(f"(?P<{name}>(?<![0-9]){core}(?![0-9]))")
+                formatted_refs[name] = ref
+        if scoped:
+            continue
         try:
             number = Decimal(plaintext)
             if number.is_finite():
                 numeric.setdefault(number, ref)
         except InvalidOperation:
             pass
-    if not forms:
+    if not forms and not scoped_forms:
         return value
     aliases = "|".join(re.escape(ref) for ref in sorted(bindings, key=len, reverse=True))
     # Already-advertised references are public identifiers. Protect complete
@@ -512,21 +553,43 @@ def mask_secret_values(value: Any, secret_refs: Optional[Mapping[str, str]]) -> 
         r"(?P<public_ref>\{\{secret:(?:" + aliases + r")\}\}"
         r"|(?<![\w:@.+-])(?:" + aliases + r")(?![\w:@.+-]))"
     )
+    scoped_value = "|".join(
+        [core for core, _ in scoped_formatted]
+        + [re.escape(form) for form in sorted(scoped_forms, key=len, reverse=True)]
+    )
+    scoped_contexts = [
+        f"(?P<scoped_prefix_{kind}>{prefix})(?P<scoped_{kind}>{scoped_value}){suffix}"
+        for kind, prefix, suffix in _VALUE_CONTEXTS
+    ] if scoped_value else []
     literals = [
         (r"(?<![0-9])" + re.escape(form) + r"(?![0-9])")
         if re.fullmatch(r"[0-9]+", form) else re.escape(form)
         for form in sorted(forms, key=len, reverse=True)
     ]
-    pattern = re.compile("|".join([protected, *formatted_patterns, *literals]))
+    pattern = re.compile("|".join([protected, *scoped_contexts, *formatted_patterns, *literals]))
+
+    def scoped_ref(text: str) -> Optional[str]:
+        if text in scoped_forms:
+            return scoped_forms[text]
+        return next((ref for core, ref in scoped_formatted if re.fullmatch(core, text)), None)
 
     def replacement(match: re.Match[str]) -> str:
-        if match.lastgroup == "public_ref":
+        if match.group("public_ref") is not None:
             return match.group(0)
-        ref = formatted_refs[match.lastgroup] if match.lastgroup is not None else forms[match.group(0)]
+        for kind, _, _ in (_VALUE_CONTEXTS if scoped_contexts else ()):
+            if match.group(f"scoped_{kind}") is not None:
+                ref = scoped_ref(match.group(f"scoped_{kind}"))
+                return pattern.sub(replacement, match.group(f"scoped_prefix_{kind}")) + secret_placeholder(ref)
+        ref = formatted_refs[match.lastgroup] if match.lastgroup in formatted_refs else forms[match.group(0)]
         return secret_placeholder(ref)
 
     def mask(item: Any, *, outer: bool = False) -> Any:
         if isinstance(item, str):
+            stripped = item.strip()
+            ref = scoped_ref(stripped) if scoped_value and stripped else None
+            if ref is not None:
+                start = item.index(stripped)
+                return item[:start] + secret_placeholder(ref) + item[start + len(stripped):]
             return pattern.sub(replacement, item)
         if isinstance(item, bool):
             return item
@@ -591,9 +654,13 @@ def register_logging_secret_refs(refs: Optional[Mapping[str, str]]) -> None:
         _register_log_bindings(bindings, refs)
 
 
-def redact_current_secret_values(value: Any) -> Any:
-    """Redact known activity bindings before DOM binding or during cleanup."""
-    return mask_secret_values(value, _LOG_SECRET_REFS.get())
+def redact_current_secret_values(value: Any, *, value_scoped: bool = False) -> Any:
+    """Redact known activity bindings before DOM binding or during cleanup.
+
+    ``value_scoped`` is only for a browser-state observation or model-authored
+    content (see ``mask_secret_values``); everything else stays strict.
+    """
+    return mask_secret_values(value, _LOG_SECRET_REFS.get(), value_scoped=value_scoped)
 
 
 def current_secret_placeholders() -> frozenset[str]:

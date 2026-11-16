@@ -153,6 +153,32 @@ class DeployLiveProbeTests(unittest.TestCase):
             self.assertEqual(probe.argv[-2:], ("scripts/run-blackbox-tests.sh", domain))
             self.assertEqual(probe.cwd, ROOT / "back-end")
 
+    def test_live_tilion_cases_reach_the_production_region_from_any_runner(self) -> None:
+        """The gate VM's accelerator route (back.tilion.dev) lands on west, which production
+        never uses and whose direct-exit DNS was dead on 2026-11-15; the live Tilion cases must
+        reach east, the region production's Render (ohio) and Fly (iad) clients reach, even
+        when the runner's own environment names another region."""
+        module = _load_module()
+        self.assertEqual(module.TILION_PRODUCTION_REGION_BASE_URL, "https://east.back.tilion.dev")
+        commands = {command.name: command for command in module.deploy_commands()}
+        argv = commands["browser-provider-live"].argv
+        env_args = argv[argv.index("env") + 1 : argv.index("bash", argv.index("env"))]
+        self.assertIn("TILION_BASE_URL=https://east.back.tilion.dev", env_args)
+        # `env NAME=VALUE` replaces an inherited value, so a west runner environment cannot win.
+        result = subprocess.run(
+            [*argv[argv.index("env") : argv.index("bash", argv.index("env"))], "printenv", "TILION_BASE_URL"],
+            env={**os.environ, "TILION_BASE_URL": "https://west.back.tilion.dev"},
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        self.assertEqual(result.stdout.strip(), "https://east.back.tilion.dev")
+        # Negative control: no other probe is pinned to a Tilion region.
+        for name, command in commands.items():
+            if name != "browser-provider-live":
+                self.assertFalse(any(arg.startswith("TILION_BASE_URL=") for arg in command.argv), name)
+
     def test_migration_preflight_checks_branch_migrations_against_production(self) -> None:
         module = _load_module()
         commands = {command.name: command for command in module.deploy_commands()}

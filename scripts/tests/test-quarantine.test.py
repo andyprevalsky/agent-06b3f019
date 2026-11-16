@@ -137,6 +137,20 @@ class UnittestRunTest(Fixture):
                 def test_skips(self):
                     raise unittest.SkipTest('not here')
 
+                @quarantine({marker_source()})
+                def test_subtest_fails(self):
+                    # unittest.subTest() records this failure without re-raising it.
+                    for value in (1, 2, 3):
+                        with self.subTest(value=value):
+                            self.assertNotEqual(value, 2)
+                    print('SUBTESTS-CONTINUED', flush=True)
+
+                @quarantine({marker_source()})
+                def test_subtests_pass(self):
+                    for value in (1, 2):
+                        with self.subTest(value=value):
+                            self.assertTrue(value)
+
             class Async(unittest.IsolatedAsyncioTestCase):
                 @quarantine({marker_source()})
                 async def test_fails(self):
@@ -163,6 +177,7 @@ class UnittestRunTest(Fixture):
         self.assertEqual(sorted((r['unit'], r['status']) for r in rows), [
             ('Async.test_fails', 'QUARANTINED_FAIL'), ('Async.test_passes', 'QUARANTINED_PASS'),
             ('Sync.test_fails', 'QUARANTINED_FAIL'), ('Sync.test_passes', 'QUARANTINED_PASS'),
+            ('Sync.test_subtest_fails', 'QUARANTINED_FAIL'), ('Sync.test_subtests_pass', 'QUARANTINED_PASS'),
         ])
         for value in rows:
             self.assertTrue(progress.valid(value), value)
@@ -172,6 +187,10 @@ class UnittestRunTest(Fixture):
         failed = {r['unit']: r for r in rows if r['status'] == 'QUARANTINED_FAIL'}
         self.assertIn('AssertionError: 2 != 3', failed['Sync.test_fails']['detail'])
         self.assertIn('RuntimeError: async boom', failed['Async.test_fails']['detail'])
+        # A failing subTest block is the method's quarantined failure; later blocks still run.
+        self.assertIn('AssertionError: 2 == 2', failed['Sync.test_subtest_fails']['detail'])
+        self.assertIn("in subTest {'value': 2}", failed['Sync.test_subtest_fails']['detail'])
+        self.assertIn('SUBTESTS-CONTINUED', result.stdout)
         self.assertEqual(progress.failures(rows), [])
         for value in rows:
             self.assertIn(f"TEST_QUARANTINE status={value['status']} unit={value['unit']} "
@@ -194,7 +213,7 @@ class UnittestRunTest(Fixture):
         module = self.write_suite()
         result = self.run_child([PYTHON, str(module)])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.count('TEST_QUARANTINE status='), 4)
+        self.assertEqual(result.stdout.count('TEST_QUARANTINE status='), 6)
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ['quarantined_unittest.py'])
 
 

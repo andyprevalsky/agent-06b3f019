@@ -295,4 +295,5 @@ export type IntegrationCatalogKey =
   | 'meetingNotes'
   | 'pebble'
   | 'clis'
-  | 'mcp';
+  | 'mcp'
+  | 'other';

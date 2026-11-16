@@ -3406,19 +3406,50 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
         '  case "$1 $2" in "run view"|"run list") echo "$FAKE_GH_DENY_MESSAGE" >&2; exit 1 ;; esac\n'
         'fi\n'
         'case "$1 $2" in\n'
-        '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }; exit 0 ;;\n'
+        '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }\n'
+        '    for a in "$@"; do case "$a" in dispatch_id=*) echo "${a#dispatch_id=}" > "$FAKE_GH_DIR/dispatch-id" ;; esac; done; exit 0 ;;\n'
         '  "run list") [ -f "$FAKE_GH_DIR/list-fail" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }\n'
         '    n=$(cat "$FAKE_GH_DIR/list-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/list-count"\n'
-        '    f="$FAKE_GH_DIR/list-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/list-last.json"; cat "$f" ;;\n'
+        '    f="$FAKE_GH_DIR/list-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/list-last.json"\n'
+        '    sed "s/__DISPATCH__/$(cat "$FAKE_GH_DIR/dispatch-id" 2>/dev/null)/g" "$f" ;;\n'
         '  "run rerun") [ -f "$FAKE_GH_DIR/rerun-fail" ] && { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }\n'
         '    touch "$FAKE_GH_DIR/rerun-done"; exit 0 ;;\n'
         '  "run view") prefix=view; [ -f "$FAKE_GH_DIR/rerun-done" ] && prefix=rerun-view\n'
         '    n=$(cat "$FAKE_GH_DIR/$prefix-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/$prefix-count"\n'
-        '    f="$FAKE_GH_DIR/$prefix-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/$prefix-last.json"; cat "$f" ;;\n'
+        '    f="$FAKE_GH_DIR/$prefix-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/$prefix-last.json"\n'
+        '    sed "s/__DISPATCH__/$(cat "$FAKE_GH_DIR/dispatch-id" 2>/dev/null)/g" "$f" ;;\n'
         '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
         "esac\n")
     (bin_dir / "gh").chmod(0o755)
-    sem_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake)}
+    # The live frontend's /version.json (vite.config.ts productionBuildId): by
+    # default it serves the merge's own build, so the exact binding applies.
+    version_body = fake / "version.json"
+    version_body.write_text(json.dumps({"buildId": f"{merged[:12]}-mwfixture"}))
+
+    class VersionHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args) -> None:  # keep the fixture output clean
+            return
+
+        def do_GET(self) -> None:
+            with (fake / "version-requests.log").open("a") as log:
+                log.write(f"{self.path} {self.headers.get('Cache-Control')}\n")
+            if (fake / "version-fail").exists():
+                self.send_error(503, "fixture outage")
+                return
+            count = int((fake / "version-count").read_text()) + 1 if (fake / "version-count").exists() else 1
+            (fake / "version-count").write_text(str(count))
+            step = fake / f"version-{count}.json"  # an optional per-read sequence, then version.json
+            body = step.read_bytes() if step.exists() else version_body.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    version_server = ThreadingHTTPServer(("127.0.0.1", 0), VersionHandler)
+    threading.Thread(target=version_server.serve_forever, daemon=True).start()
+    sem_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake),
+               "DEPLOY_SEMANTIC_VERSION_URL": f"http://127.0.0.1:{version_server.server_address[1]}/version.json"}
     sem_env.pop("DEPLOY_GH_BIN", None)
     calls = fake / "calls.log"
     tokens = fake / "tokens.log"
@@ -3426,8 +3457,11 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     later = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def row(run_id: int, created: str, sha: str | None, head: str, status: str = "in_progress") -> dict:
-        title = f"Production semantic gate source_sha={sha}" if sha else "Production semantic gate deployment=77"
+    def row(run_id: int, created: str, sha: str | None, head: str, status: str = "in_progress",
+            dispatch: str = "__DISPATCH__") -> dict:
+        """``__DISPATCH__`` is the fake gh's latest dispatch_id: the run that dispatch created."""
+        title = (f"Production semantic gate source_sha={sha} dispatch={dispatch}" if sha
+                 else "Production semantic gate deployment=77")
         return {"databaseId": run_id, "createdAt": created, "headSha": head, "status": status, "conclusion": None,
                 "event": "workflow_dispatch", "url": f"https://github.com/acme/rose/actions/runs/{run_id}",
                 "displayTitle": title}
@@ -3440,6 +3474,10 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     old_other = row(101, past, "3" * 40, "3" * 40, "completed")
     ours = row(200, future, merged, other_head)
     newer_other = row(300, later, "4" * 40, "4" * 40)
+    # Another dispatch's run of the same source, created after ours (two
+    # verifications bound to one live commit, 2026-11-15 runs 43690260324 and
+    # 43690277150): its dispatch id differs, so it is never adopted.
+    twin = row(250, later, merged, other_head, dispatch="f" * 32)
     decoy = row(400, later, None, merged)
 
     def job(name: str, conclusion: str | None, status: str = "completed") -> dict:
@@ -3506,19 +3544,22 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     state = tmp / "semantic-state"
     gate = run_gate(state)
     assert gate["status"] == "passed" and gate["fly"]["required"] is False and "semantic" not in gate, gate
-    reset([[old_other, old_same, decoy], [newer_other, decoy, ours, old_other, old_same]],
+    reset([[old_other, old_same, decoy], [newer_other, twin, decoy, ours, old_other, old_same]],
           [view("queued", None, 1, []), view("in_progress", None, 1, running_jobs), view("completed", "success", 1, all_success)])
     ran = run_semantic(state, "--frontend-url", "https://preview.roselabs.ai", "--backend-url", "https://api.roselabs.ai")
     assert ran.returncode == 0, ran.stdout
     lines = call_lines()
+    dispatch_id = receipt_of(state)["semantic"]["dispatch"]["inputs"]["dispatch_id"]
+    assert re.fullmatch(r"[0-9a-f]{32}", dispatch_id), dispatch_id
     assert lines[0] == ("workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha=" + merged +
-                        " -f frontend_url=https://preview.roselabs.ai -f backend_url=https://api.roselabs.ai"), lines
+                        " -f frontend_url=https://preview.roselabs.ai -f backend_url=https://api.roselabs.ai"
+                        " -f dispatch_id=" + dispatch_id), lines
     list_calls = [line for line in lines if line.startswith("run list")]
     assert len(list_calls) == 2 and "--workflow chat-lifecycle-ratchet.yml" in list_calls[0], list_calls
     assert "--event workflow_dispatch" in list_calls[0] and "--branch main" in list_calls[0], list_calls
     view_calls = [line for line in lines if line.startswith("run view")]
     assert len(view_calls) == 3 and all(line.startswith("run view 200 --json") for line in view_calls), lines
-    assert not any(f" {decoy_id} " in f" {line} " for line in lines for decoy_id in (100, 101, 300, 400)), lines
+    assert not any(f" {decoy_id} " in f" {line} " for line in lines for decoy_id in (100, 101, 250, 300, 400)), lines
     assert not any(line.startswith("run rerun") for line in lines), lines
     assert "SEMANTIC_RUN_ID=200" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
     assert ran.stdout.index("SEMANTIC_RUN_ID=200") < ran.stdout.index("SEMANTIC_LANE_END"), ran.stdout
@@ -3528,12 +3569,13 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     entry = receipt["semantic"]
     assert entry["outcome"] == "passed" and entry["run_id"] == "200" and entry["url"] == ours["url"], entry
     assert entry["head_sha"] == other_head and entry["source_sha"] == merged, entry
-    assert entry["display_title"] == ours["displayTitle"] and entry["created_at"] == future, entry
+    assert entry["display_title"] == ours["displayTitle"].replace("__DISPATCH__", dispatch_id), entry
+    assert entry["created_at"] == future, entry
     assert entry["completed_at"] == later and entry["conclusion"] == "success" and entry["attempt"] == 1, entry
     assert entry["status"] == "completed" and entry["retry"] is None, entry
     assert entry["dispatch"]["ref"] == "main" and entry["dispatch"]["at"], entry["dispatch"]
     assert entry["dispatch"]["inputs"] == {"source_sha": merged, "frontend_url": "https://preview.roselabs.ai",
-                                           "backend_url": "https://api.roselabs.ai"}, entry["dispatch"]
+                                           "backend_url": "https://api.roselabs.ai", "dispatch_id": dispatch_id}, entry["dispatch"]
     assert [(j["name"], j["conclusion"]) for j in entry["jobs"]] == [(j["name"], "success") for j in all_success], entry["jobs"]
     waits = semantic_waits(receipt)
     assert [w["kind"] for w in waits] == ["run-start", "run-complete"], waits
@@ -3545,7 +3587,8 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     reset([[ours, old_same]], [view("completed", "failure", 1, semantic_failed)])
     ran = run_semantic(state)
     assert ran.returncode == 1, ran.stdout
-    assert call_lines()[0].endswith("-f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"), call_lines()
+    assert "-f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com -f dispatch_id=" in call_lines()[0], call_lines()
+    assert receipt_of(state)["semantic"]["dispatch"]["inputs"]["dispatch_id"] != dispatch_id, "every dispatch gets a fresh id"
     assert "PIPELINE_SEMANTIC status=failed exit=1 run=200" in ran.stdout and "conclusion=failure" in ran.stdout, ran.stdout
     assert "Semantic frontend flows=failure" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
     assert 'retry=available (--retry-failed-once "<justification>")' in ran.stdout, ran.stdout
@@ -3755,7 +3798,9 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     entry = receipt_of(state13)["semantic"]
     assert entry["status"] == "dispatched" and entry["run_id"] is None and entry["outcome"] == "failed", entry
     assert entry["dispatch"]["at"] and entry["dispatch"]["inputs"] == {
-        "source_sha": merged, "frontend_url": "https://www.roselabs.ai", "backend_url": "https://navi-j9a9.onrender.com"}, entry
+        "source_sha": merged, "frontend_url": "https://www.roselabs.ai", "backend_url": "https://navi-j9a9.onrender.com",
+        "dispatch_id": entry["dispatch"]["inputs"]["dispatch_id"]}, entry
+    assert call_lines()[0].endswith(" -f dispatch_id=" + entry["dispatch"]["inputs"]["dispatch_id"]), call_lines()
     dispatch13 = entry["dispatch"]
     reset([[ours]], [view("completed", "success", 1, all_success)])
     ran = run_semantic(state13)
@@ -3883,6 +3928,169 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     assert ran.returncode == 0 and "token pool picked no member" in ran.stdout, ran.stdout
     assert {row[2] for row in token_lines()} == {"primary"}, token_lines()
 
+    # 16. Spec/live skew (2026-11-15, run 43681354141): the live frontend
+    #     already served a strict descendant of the merge whose PR changed the
+    #     UI and its spec (PR #2097 removed the 'Integration team sharing'
+    #     region), so the merge's own spec failed against intended live UI.
+    #     The lane binds the spec to the commit the live frontend serves: a
+    #     strict descendant is dispatched as source_sha and recorded
+    #     verified-by-descendant; the merge's own build stays an exact binding;
+    #     an ancestor build with an identical front-end/ (Vercel has not
+    #     promoted the merge yet) is source-equivalent and dispatches the
+    #     merge; an ancestor whose front-end/ differs is waited out and then
+    #     refused; an unrelated build or an unreadable /version.json
+    #     dispatches nothing.
+    def commit_tree(parent: str | None, files: dict[str, str], message: str) -> str:
+        """A commit on no branch (HEAD stays the merge the Fly gate binds)."""
+        index = fake / "fixture.index"
+        index.unlink(missing_ok=True)
+        git_env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        subprocess.run([*git, "read-tree", merged], check=True, env=git_env)
+        for relative, content in files.items():
+            blob = subprocess.run([*git, "hash-object", "-w", "--stdin"], input=content, check=True,
+                                  stdout=subprocess.PIPE, text=True).stdout.strip()
+            subprocess.run([*git, "update-index", "--add", "--cacheinfo", f"100644,{blob},{relative}"], check=True,
+                           env=git_env)
+        tree = subprocess.run([*git, "write-tree"], check=True, env=git_env, stdout=subprocess.PIPE,
+                              text=True).stdout.strip()
+        return subprocess.run([*git, "commit-tree", tree, *(["-p", parent] if parent else []), "-m", message],
+                              check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    descendant = commit_tree(merged, {"front-end/src/teams.tsx": "no team-sharing region\n"}, "descendant UI change")
+    unrelated = commit_tree(None, {"front-end/src/teams.tsx": "unrelated\n"}, "unrelated root")
+    ancestor = subprocess.run([*git, "rev-parse", f"{merged}^"], check=True, stdout=subprocess.PIPE,
+                              text=True).stdout.strip()
+    ours_descendant = row(500, future, descendant, other_head)
+
+    def serve_build(build_id: str, *sequence: str) -> None:
+        """Serve ``sequence`` on the first reads, then ``build_id``."""
+        version_body.write_text(json.dumps({"buildId": build_id}))
+        for stale in [fake / "version-requests.log", fake / "version-count", *fake.glob("version-[0-9]*.json")]:
+            stale.unlink(missing_ok=True)
+        for index, step in enumerate(sequence, start=1):
+            (fake / f"version-{index}.json").write_text(json.dumps({"buildId": step}))
+
+    def view_of(source: str, run_id: int) -> dict:
+        return {**view("completed", "success", 1, all_success), "displayTitle": f"Production semantic gate source_sha={source}",
+                "url": f"https://github.com/acme/rose/actions/runs/{run_id}"}
+
+    state16 = tmp / "semantic-state-16"
+    run_gate(state16)
+    serve_build(f"{descendant[:12]}-mwhfbf5c")
+    # The merge's own run title is listed too: it is never adopted for a descendant dispatch.
+    reset([[ours, ours_descendant, old_same]], [view_of(descendant, 500)])
+    ran = run_semantic(state16)
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines[0] == ("workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha=" + descendant +
+                        " -f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"
+                        " -f dispatch_id=" + receipt_of(state16)["semantic"]["dispatch"]["inputs"]["dispatch_id"]), lines
+    assert [line for line in lines if line.startswith("run view")] and all(
+        line.startswith("run view 500 ") for line in lines if line.startswith("run view")), lines
+    requests = (fake / "version-requests.log").read_text().splitlines()
+    assert requests == ["/version.json no-cache"], requests
+    assert (f"PIPELINE_SEMANTIC binding=verified-by-descendant merged_sha={merged} live_frontend={descendant}"
+            in ran.stdout), ran.stdout
+    assert f"PIPELINE_SEMANTIC status=passed exit=0 run=500 attempt=1 source_sha={descendant} " in ran.stdout, ran.stdout
+    entry = receipt_of(state16)["semantic"]
+    assert entry["merged_sha"] == merged and entry["source_sha"] == descendant and entry["run_id"] == "500", entry
+    assert entry["dispatch"]["inputs"]["source_sha"] == descendant, entry["dispatch"]
+    binding = entry["binding"]
+    assert binding["kind"] == "verified-by-descendant" and binding["live_frontend_commit"] == descendant, binding
+    assert binding["build_id"] == f"{descendant[:12]}-mwhfbf5c" and binding["version_url"] == sem_env[
+        "DEPLOY_SEMANTIC_VERSION_URL"] and binding["observed_at"], binding
+    assert receipt_of(state16)["status"] == "passed", "the Fly gate decision must not be rewritten"
+    # A confirmed descendant dispatch whose run was never adopted resumes by its own source title.
+    state16p = tmp / "semantic-state-16p"
+    run_gate(state16p)
+    reset([[ours_descendant]], [view_of(descendant, 500)])
+    (fake / "list-fail").touch()
+    assert run_semantic(state16p).returncode == 1
+    (fake / "list-fail").unlink()
+    serve_build(f"{merged[:12]}-later")  # the resumed lookup never re-binds
+    reset([[ours, ours_descendant]], [view_of(descendant, 500)])
+    ran = run_semantic(state16p)
+    assert ran.returncode == 0 and "SEMANTIC_RUN_ID=500" in ran.stdout, ran.stdout
+    assert not any(line.startswith("workflow run") for line in call_lines()), call_lines()
+    assert not (fake / "version-requests.log").exists(), "a resumed dispatch keeps its recorded binding"
+    assert receipt_of(state16p)["semantic"]["binding"]["kind"] == "verified-by-descendant", receipt_of(state16p)["semantic"]
+
+    # Negative control: the merge's own build is the exact binding, as before.
+    state16e = tmp / "semantic-state-16e"
+    run_gate(state16e)
+    serve_build(f"{merged[:12]}-mwexact")
+    reset([[ours_descendant, ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state16e)
+    assert ran.returncode == 0 and call_lines()[0].startswith(f"workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha={merged} "), (ran.stdout, call_lines())
+    entry = receipt_of(state16e)["semantic"]
+    assert entry["source_sha"] == merged and entry["run_id"] == "200" and entry["binding"]["kind"] == "exact", entry
+    assert entry["binding"]["live_frontend_commit"] == merged, entry["binding"]
+
+    # The merge's build is not promoted yet: the live ancestor has the same
+    # front-end/, so the merge's specs describe the live UI (source-equivalent).
+    state16a = tmp / "semantic-state-16a"
+    run_gate(state16a)
+    serve_build(f"{ancestor[:12]}-mwparent")
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state16a)
+    assert ran.returncode == 0 and call_lines()[0].startswith(f"workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha={merged} "), (ran.stdout, call_lines())
+    assert f"PIPELINE_SEMANTIC binding=source-equivalent merged_sha={merged} live_frontend={ancestor}" in ran.stdout, ran.stdout
+    entry = receipt_of(state16a)["semantic"]
+    assert entry["source_sha"] == merged and entry["binding"]["kind"] == "source-equivalent", entry
+    assert entry["binding"]["live_frontend_commit"] == ancestor and entry["binding"]["frontend_paths"] == ["front-end/"], entry
+
+    # A merge whose parent changed front-end/ while that parent's build is not
+    # live yet: the ancestor build is re-read until the merge goes live (exact),
+    # and refused when it never does within --live-timeout.
+    frontend_parent = commit_tree(merged, {"front-end/src/teams.tsx": "new team UI\n"}, "frontend change")
+    frontend_merge = commit_tree(frontend_parent, {"front-end/src/teams.tsx": "new team UI\n", "scripts/x.sh": "y\n"},
+                                 "scripts-only merge after a frontend change")
+    ours_frontend_merge = row(600, future, frontend_merge, other_head)
+
+    def run_frontend_merge(state: Path, *extra: str) -> subprocess.CompletedProcess:
+        write_gate(state, frontend_merge, "passed")
+        return subprocess.run(
+            [sys.executable, str(driver), "production-semantic", "--merged-sha", frontend_merge, "--state-dir",
+             str(state), "--poll-seconds", "0.05", "--start-timeout", "0.5", *extra],
+            env=sem_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    serve_build(f"{frontend_merge[:12]}-mwlive", f"{merged[:12]}-mwold", f"{merged[:12]}-mwold")
+    reset([[ours, ours_frontend_merge]], [view_of(frontend_merge, 600)])
+    ran = run_frontend_merge(tmp / "semantic-state-16w")
+    assert ran.returncode == 0 and ran.stdout.count(f"PIPELINE_SEMANTIC waiting live_frontend={merged[:12]}") == 2, ran.stdout
+    assert call_lines()[0].startswith(f"workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha={frontend_merge} "), call_lines()
+    entry = receipt_of(tmp / "semantic-state-16w")["semantic"]
+    assert entry["binding"]["kind"] == "exact" and entry["binding"]["polls"] == 3 and entry["run_id"] == "600", entry
+    serve_build(f"{merged[:12]}-mwold")
+    reset([[ours, ours_frontend_merge]], [view_of(frontend_merge, 600)])
+    ran = run_frontend_merge(tmp / "semantic-state-16t", "--live-timeout", "0.2")
+    assert ran.returncode == 1 and f"live frontend {merged[:12]} is not {frontend_merge[:12]} or a strict descendant of it: it is an ancestor" in ran.stdout, ran.stdout
+    assert "front-end/ differs in 1 path(s)" in ran.stdout and call_lines() == [], (ran.stdout, call_lines())
+    assert receipt_of(tmp / "semantic-state-16t")["semantic"]["dispatch"]["at"] is None
+
+    # Refusals: an unrelated build fails closed without dispatching; an
+    # unreadable /version.json or a build id with no commit is a tooling error
+    # (exit 2), never a guess.
+    for label, build_id, code, text in (
+            ("unrelated", f"{unrelated[:12]}-mwx", 1, f"live frontend {unrelated[:12]} is not {merged[:12]} or a strict descendant of it"),
+            ("local", "local-mwdev", 2, "names no commit"),
+            ("unknown", f"{'e' * 12}-mwgone", 2, f"cannot resolve the live frontend commit {'e' * 12}"),
+            ("outage", None, 2, "HTTP 503")):
+        state_r = tmp / f"semantic-state-16-{label}"
+        run_gate(state_r)
+        reset([[ours, ours_descendant]], [view("completed", "success", 1, all_success)])
+        if build_id is None:
+            (fake / "version-fail").touch()
+        else:
+            serve_build(build_id)
+        ran = run_semantic(state_r)
+        (fake / "version-fail").unlink(missing_ok=True)
+        assert ran.returncode == code and text in ran.stdout, (label, ran.stdout)
+        assert call_lines() == [], (label, call_lines())
+        entry = receipt_of(state_r)["semantic"]
+        assert entry["run_id"] is None and entry["dispatch"]["at"] is None and entry["outcome"] in ("failed", "error"), (label, entry)
+    serve_build(f"{merged[:12]}-mwfixture")
+
     # Selection rule in-process: newest matching only, by createdAt then id.
     pipeline = load_module("pipeline_semantic_select", DRIVER)
     # A pending dispatch is exactly: this SHA, status dispatched, no run, a dispatch clock.
@@ -3910,6 +4118,19 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     assert pipeline.semantic_select_run(rows[:2], merged, dispatched)["databaseId"] == 2
     assert pipeline.semantic_select_run(rows[:1] + rows[2:4] + rows[7:], merged, dispatched) is None
     assert pipeline.semantic_select_run(None, merged, dispatched) is None
+    # With a dispatch id, only the run whose title echoes that id matches (the
+    # newer twin of the same source from another dispatch never does); an
+    # entry recorded before ids existed (None) keeps the source-only rule.
+    mine, other = "a" * 32, "b" * 32
+    titled = [
+        {"databaseId": 11, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged} dispatch={mine}"},
+        {"databaseId": 12, "createdAt": "2026-10-31T12:00:09Z", "displayTitle": f"x source_sha={merged} dispatch={other}"},
+        {"databaseId": 13, "createdAt": "2026-10-31T12:00:10Z", "displayTitle": f"x source_sha={merged} dispatch={mine}x"},
+        {"databaseId": 14, "createdAt": "2026-10-31T12:00:11Z", "displayTitle": f"x source_sha={merged}"},
+    ]
+    assert pipeline.semantic_select_run(titled, merged, dispatched, mine)["databaseId"] == 11
+    assert pipeline.semantic_select_run(titled[1:], merged, dispatched, mine) is None
+    assert pipeline.semantic_select_run(titled, merged, dispatched)["databaseId"] == 14
     print("production semantic: ok")
 
 
@@ -3932,11 +4153,17 @@ def check_semantic_workflow_source_sha() -> None:
     inputs = triggers["workflow_dispatch"]["inputs"]
     assert "source_sha" in inputs and inputs["source_sha"].get("required") is False, inputs
     assert inputs["source_sha"].get("default", "") == "", "source_sha must default to the dispatched ref's head"
+    assert "dispatch_id" in inputs and inputs["dispatch_id"].get("required") is False, inputs
+    assert inputs["dispatch_id"].get("default", "") == "", "an undispatched or legacy run names no dispatch id"
     run_name = workflow["run-name"]
     assert "github.event_name == 'workflow_dispatch'" in run_name, "deployment runs must not claim a source_sha"
     marker = re.search(r"format\('([a-z_]+=)\{0\}', inputs\.source_sha \|\| github\.sha\)", run_name)
     assert marker, f"run-name must format the source commit marker from inputs.source_sha || github.sha: {run_name}"
+    suffix = "${{ inputs.dispatch_id && format(' dispatch={0}', inputs.dispatch_id) || '' }}"
+    assert run_name.endswith(suffix), f"run-name must end with the dispatch id marker {suffix}: {run_name}"
     pipeline = load_module("pipeline_semantic_marker", DRIVER)
+    sample = "Production semantic gate source_sha=" + "1" * 40 + " dispatch=" + "c" * 32
+    assert pipeline.SEMANTIC_DISPATCH_PATTERN.search(sample).group(1) == "c" * 32, pipeline.SEMANTIC_DISPATCH_PATTERN.pattern
     assert pipeline.SEMANTIC_TITLE_PATTERN.pattern == marker.group(1) + "([0-9a-f]{40})", (
         f"CLI marker {pipeline.SEMANTIC_TITLE_PATTERN.pattern!r} must match the workflow run-name marker {marker.group(1)!r}")
     jobs = workflow["jobs"]

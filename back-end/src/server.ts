@@ -25,6 +25,10 @@ import sendSmsRouter from './domains/send-sms/routes';
 import vapiRouter from './domains/vapi/routes';
 import { attachHoldStreamServer } from './domains/vapi/holdListenerService';
 import { HOLD_STREAM_PATH } from './domains/vapi/config';
+import {
+  BLACKBOX_FAKE_PHONE_UPSTREAM_PATH,
+  createBlackboxFakePhoneUpstreamRouter,
+} from './domains/vapi/routesBlackboxFakeUpstream';
 import localDevicesRouter from './domains/local-devices/routes';
 import { attachLocalDeviceServer } from './domains/local-devices/service';
 import voicesRouter from './domains/voices/routes';
@@ -34,6 +38,7 @@ import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
 import { createCliIntegrationRoutes } from './domains/integrations/routes.cli';
 import { createMcpIntegrationRoutes } from './domains/integrations/routes.mcp';
+import { createIntegrationRequestRoutes } from './domains/integrations/routes.requests';
 import { createAgent as createCliSetupAgent } from './domains/agents/agentLifecycleService';
 import { createAgentSchema as cliSetupAgentSchema } from './domains/agents/types';
 import authRouter from './domains/auth/routes';
@@ -66,6 +71,7 @@ import {
   createSupervisorFixtureTestRouter,
 } from './providers/smsSupervisor/testRoutes';
 import vcardRouter from './domains/vcard/routes';
+import agentPreviewRouter from './domains/agent-preview/routes';
 import uploadRouter from './domains/upload/routes';
 import feedbackRouter from './domains/feedback/routes';
 import adminHealthRouter from './domains/admin-health/routes';
@@ -277,6 +283,8 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 
   app.use('/api/test/sms-supervisor-fixture', createSupervisorFixtureTestRouter());
   app.use('/api/test/proactive-sms', createProactiveSmsTestRouter());
+  // Runners point Vapi/Twilio REST here so blackbox calls never dial a real number.
+  app.use(BLACKBOX_FAKE_PHONE_UPSTREAM_PATH, createBlackboxFakePhoneUpstreamRouter());
 
   // Signals the in-memory blackbox Temporal fake recorded for one workflow, so
   // HTTP route contracts can assert which signal (if any) a route delivered.
@@ -425,6 +433,7 @@ app.use('/api/tools', toolsRouter); // Tools list is public read
 app.use('/api/benchmarks', benchmarksRouter); // Benchmark tasks are public
 app.use('/api/webhooks/slack/auto-rca', slackAutoRcaRouter);
 app.use('/api/vcard', vcardRouter); // vCard for contact card (public for Twilio MMS)
+app.use('/api/agent-preview', agentPreviewRouter); // public link-preview facts (title/state)
 
 // x402 Payment Routes Setup
 const x402ReceivingWallet = process.env.X402_RECEIVING_WALLET;
@@ -547,6 +556,7 @@ app.use(
   })
 );
 app.use('/api/integrations/mcp', createMcpIntegrationRoutes());
+app.use('/api/integrations/requests', createIntegrationRequestRoutes());
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/compute-accounts', computeGrantsRouter);
 app.use('/api/billing', billingRouter);

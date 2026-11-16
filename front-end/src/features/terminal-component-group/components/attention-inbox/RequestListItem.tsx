@@ -7,6 +7,7 @@
  * [GENERIC_ACTIONS] -- Accept/Skip/Reject --> parent action handler
  *
  * [NATIVE AUTH] -> exact request/task locator; authenticated fullscreen resolves authority.
+ * [NATIVE AUTH] --Resend code--> typed resend completion; agent re-raises a new request.
  * [AUTH_ASSISTANCE]
  *   | Open Live Browser selects the agent and fullscreen-opens the browser task
  *   v
@@ -28,6 +29,7 @@ import {
   type AttentionRequest,
 } from './types';
 import { hasIMessageBridge } from './macAppBridge';
+import { PhoneResendCodeButton } from '../browser-status-bar/phone/PhoneResendCodeButton';
 
 interface RequestListItemProps {
   request: AttentionRequest;
@@ -138,6 +140,8 @@ function GenericRequestBody({
           authRealm={authAssistance.authRealm}
           liveViewUrl={authAssistance.liveViewUrl}
           target={authAssistance.target}
+          agentId={request.agent_id}
+          requestId={request.id}
           loading={loading}
           isCompleting={actionRequestId === request.id}
           onOpenLiveView={() => {
@@ -219,6 +223,8 @@ interface AuthAssistanceBlockProps {
   authRealm?: string;
   liveViewUrl?: string | null;
   target?: PhoneAttentionTarget;
+  agentId: string;
+  requestId: string;
   loading: boolean;
   isCompleting: boolean;
   onOpenLiveView: () => void;
@@ -228,6 +234,8 @@ function AuthAssistanceBlock({
   authRealm,
   liveViewUrl,
   target,
+  agentId,
+  requestId,
   loading,
   isCompleting,
   onOpenLiveView,
@@ -248,6 +256,15 @@ function AuthAssistanceBlock({
           <Maximize2 className="mr-2 h-4 w-4" />
           {target ? 'Open phone' : 'Open Live Browser'}
         </Button>
+        {target && (
+          <PhoneResendCodeButton
+            agentId={agentId}
+            taskId={target.browserTaskId}
+            pendingRequestId={requestId}
+            disabled={loading || isCompleting}
+            className="inline-flex h-9 items-center gap-1 rounded-md border border-input px-3 text-sm disabled:opacity-50"
+          />
+        )}
       </div>
     </div>
   );

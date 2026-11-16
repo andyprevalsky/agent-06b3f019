@@ -9,6 +9,7 @@ This module provides:
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import json
 import logging
@@ -171,6 +172,48 @@ def drop_browser_use_serial_dom_probes() -> None:
     from browser_use.dom.service import DomService
 
     DomService._get_all_trees = _get_all_trees_without_serial_probes
+
+
+def _dom_build_timing_ms(timing_info: Any) -> Optional[Dict[str, int]]:
+    if not isinstance(timing_info, dict):
+        return None
+    return {
+        key: int(round(value))
+        for key, value in timing_info.items()
+        if isinstance(value, (int, float)) and value >= 1.0
+    }
+
+
+_DOM_BUILD_TIMING_WRAPPERS: set = set()
+
+
+def record_browser_use_dom_build_timing() -> None:
+    """Keep browser-use's per-build DOM timing breakdown instead of debug-logging it.
+
+    ``DomService.get_serialized_dom_tree`` already measures the CDP trees,
+    cross-origin iframe recursion (inside ``construct_enhanced_tree_ms``) and
+    serialization. The breakdown is stored on the browser session so
+    ``DOMService`` can report it in ``browser.step.phases`` (H-61: 26s
+    observe_state phases had no sub-phase evidence).
+    """
+    from browser_use.dom.service import DomService
+
+    build = DomService.get_serialized_dom_tree
+    if build in _DOM_BUILD_TIMING_WRAPPERS:
+        return
+
+    @functools.wraps(build)
+    async def get_serialized_dom_tree(self: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await build(self, *args, **kwargs)
+        # Telemetry is best-effort: a changed return shape or a rejected attribute must not fail the build.
+        try:
+            self.browser_session._rose_dom_build_timing_ms = _dom_build_timing_ms(result[2])
+        except Exception:
+            logger.debug("DOM build timing unavailable", exc_info=True)
+        return result
+
+    _DOM_BUILD_TIMING_WRAPPERS.add(get_serialized_dom_tree)
+    DomService.get_serialized_dom_tree = get_serialized_dom_tree
 
 
 VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS = 10.0
@@ -688,7 +731,7 @@ class ActionHistory:
                 value = entry[key]
                 if key == "result" and entry.get("action") == "read_browser_state" and isinstance(value, dict) and isinstance(value.get("formatted_state"), str):
                     safe_entry[key] = dom_service.model_visible_value({k: v for k, v in value.items() if k != "formatted_state"})
-                    safe_entry[key]["formatted_state"] = dom_service.model_visible_value(value["formatted_state"])
+                    safe_entry[key]["formatted_state"] = dom_service.model_visible_observation(value["formatted_state"])
                 elif key == "result" and entry.get("action") == "request_payment_card" and callable(getattr(dom_service, "model_visible_action_result", None)):
                     safe_entry[key] = dom_service.model_visible_action_result(entry.get("action", ""), value)
                 else:
@@ -709,6 +752,11 @@ class ActionHistory:
         for key in ("step", "action", "index", "coordinates"):
             if key in entry:
                 safe_entry[key] = entry[key]
+        result, safe_result = entry.get("result"), safe_entry.get("result")
+        context = result.get("screenshot_context") if isinstance(result, dict) else None
+        if (isinstance(context, dict) and type(context.get("step")) is int and isinstance(safe_result, dict)
+                and isinstance(safe_result.get("screenshot_context"), dict)):
+            safe_result["screenshot_context"]["step"] = context["step"]
         return safe_entry
 
 
@@ -838,6 +886,8 @@ class ActionHistory:
         context.setdefault("session_id", session_id)
         entry.screenshot = screenshot
         entry.result["screenshot_context"] = self.model_visible_value(context)
+        # The capture's step is harness bookkeeping, not a page readback.
+        entry.result["screenshot_context"]["step"] = context["step"]
 
     def screenshot_evidence(self, session_id: str = "", task_id: str = "") -> List[Dict[str, Any]]:
         """Return captured tool results already in this history, without task-proof gating."""
@@ -980,6 +1030,8 @@ class DOMService:
         self.viewport_height = viewport_height
         self.downloads_path = downloads_path or browser_downloads_path_for_provider()
         self._session = None
+        # browser-use DOM build breakdown of the latest state read (browser.step.phases).
+        self.last_dom_build_timing_ms: Optional[Dict[str, int]] = None
         self._selector_map: Dict[int, Any] = {}
         self._runtime_current_url = ""
         # Image URLs rendered by any page this browser activity observed, oldest
@@ -1078,14 +1130,27 @@ class DOMService:
         from helpers.screenshot_history import redact_with_screenshots
         return redact_with_screenshots(value, lambda item: mask_secret_values(item, self._secret_redaction_refs))
 
+    def model_visible_observation(self, value: Any) -> Any:
+        """Redact a browser-state observation or model-authored content.
+
+        A short card value is masked where the page holds it as a value, never
+        in prose or numbers; long secrets stay masked everywhere. Raw readbacks
+        use ``model_visible_value``.
+        """
+        from helpers.screenshot_history import redact_with_screenshots
+        return redact_with_screenshots(
+            value, lambda item: mask_secret_values(item, self._secret_redaction_refs, value_scoped=True)
+        )
+
     def model_visible_action_result(self, action_name: str, result: Any) -> Any:
         """Redact page payloads while preserving trusted action bookkeeping."""
-        safe = self.model_visible_value(result)
+        from browser_tools.result_projection import preserve_output_protocol, project_result, retain_model_preview
+        observe = self.model_visible_observation
+        safe = project_result(result, action_name, self.model_visible_value, observe)
         if not isinstance(result, dict) or not isinstance(safe, dict):
             return safe
-        from browser_tools.result_projection import preserve_output_protocol, retain_model_preview
-        safe = preserve_output_protocol(result, safe, action_name, self.model_visible_value)
-        safe = retain_model_preview(result, safe, action_name, self.model_visible_value)
+        safe = preserve_output_protocol(result, safe, action_name, self.model_visible_value, scoped_redact=observe)
+        safe = retain_model_preview(result, safe, action_name, self.model_visible_value, scoped_redact=observe)
         if "credential_ref" in result:
             safe["credential_ref"] = result["credential_ref"]
         if action_name == "request_payment_card":
@@ -1106,7 +1171,7 @@ class DOMService:
         if isinstance(result.get("tabs"), list):
             safe["tabs"] = []
             for tab in result["tabs"]:
-                visible_tab = self.model_visible_value(tab)
+                visible_tab = observe(tab)
                 if isinstance(tab, dict) and "id" in tab:
                     visible_tab["id"] = tab["id"]
                 safe["tabs"].append(visible_tab)
@@ -1133,6 +1198,7 @@ class DOMService:
 
             disable_browser_use_pending_request_probe()
             drop_browser_use_serial_dom_probes()
+            record_browser_use_dom_build_timing()
 
             # Create profile with CDP URL for remote browser.
             # downloads_path must match the provider's session-file root:
@@ -1272,24 +1338,6 @@ class DOMService:
     async def set_captcha_auto_solve_active(self, solving: bool) -> None:
         """Back-compat: map boolean solving onto chip phase."""
         await self.set_captcha_indicator_phase("solving" if solving else "idle")
-
-    async def probe_captcha_widgets_present(self) -> bool:
-        """Kernel has no in-flight solver flag — probe challenge widgets via CDP."""
-        try:
-            from browser_tools.captcha_solve_indicator import CAPTCHA_WIDGET_PRESENT_SCRIPT
-
-            target_id = self._session.agent_focus_target_id if self._session else None
-            if not target_id:
-                return False
-            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
-            result = await cdp_session.cdp_client.send.Runtime.evaluate(
-                params={"expression": CAPTCHA_WIDGET_PRESENT_SCRIPT, "returnByValue": True},
-                session_id=cdp_session.session_id,
-            )
-            value = (result or {}).get("result", {}).get("value")
-            return value is True
-        except Exception:
-            return False
 
     def start_captcha_telemetry_indicator(
         self,
@@ -2599,12 +2647,17 @@ class DOMService:
         through browser-use's own reconnect and retries once.
         """
         session = self._session
+        # Set by record_browser_use_dom_build_timing() only when this read builds a DOM.
+        session._rose_dom_build_timing_ms = None
+        self.last_dom_build_timing_ms = None
         try:
-            return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+            state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
         except Exception:
             if session.is_cdp_connected or not await self._restore_cdp_connection(session):
                 raise
-        return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+            state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
+        self.last_dom_build_timing_ms = session._rose_dom_build_timing_ms
+        return state
 
     async def _restore_cdp_connection(self, session: Any) -> bool:
         """Wait for or start browser-use's reconnect; True once the socket is open.
@@ -2619,6 +2672,7 @@ class DOMService:
             f"reconnect_pending={session._reconnect_pending}"
         )
         started_here = False
+        ended_stale_reader = False
         deadline = time.monotonic() + session.RECONNECT_WAIT_TIMEOUT
         while not session.is_cdp_connected and time.monotonic() < deadline:
             if session.is_reconnecting:
@@ -2631,8 +2685,26 @@ class DOMService:
                 await asyncio.sleep(0.05)
             if session.is_cdp_connected or session.is_reconnecting:
                 continue
+            reader = getattr(session._cdp_client_root, "_message_handler_task", None)
+            if not ended_stale_reader and reader is not None and not reader.done():
+                # The closed client's reader is still running (a backlog under loop lag),
+                # so browser-use's drop callback has not fired. browser-use's reconnect
+                # would cancel this reader inside its reconnect window, where that
+                # callback records a pending reconnect; every later cycle then stops
+                # the next healthy client the same way (H-47: 470 reconnects). Ending
+                # the reader first lets the callback start browser-use's one reconnect.
+                ended_stale_reader = True
+                logger.warning(f"CDP socket is down but its reader is still running ({flags}); ending it")
+                reader.cancel()
+                await asyncio.wait({reader}, timeout=max(0.0, deadline - time.monotonic()))
+                continue
             if started_here:
                 break
+            # A reader that finished just now has its drop callback queued but not run;
+            # starting a reconnect first would let that callback re-arm a pending one.
+            await asyncio.sleep(0)
+            if session.is_cdp_connected or session.is_reconnecting or session._reconnect_pending:
+                continue
             started_here = True
             logger.warning(f"CDP socket is down and no reconnect is running ({flags}); starting browser-use reconnect")
             await session._auto_reconnect()
@@ -2715,6 +2787,9 @@ class DOMService:
             result["screenshot_context"] = {"captured_at": capture_started_at, "url": result["url"]}
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
         safe_result = self.model_visible_value(result)
+        # The rendered page itself is an observation, not a script readback.
+        for key in ("url", "title", "dom_tree", "tabs"):
+            safe_result[key] = self.model_visible_observation(result[key])
         if screenshot_to_use:
             # PNG base64 is binary transport, not page text. A short CVV can
             # coincidentally occur in it; textual substitution corrupts pixels.
@@ -2994,6 +3069,81 @@ class DOMService:
                 return candidates[0]
         return None
 
+    @staticmethod
+    def _frame_owner_chain(element: Any) -> List[Any]:
+        """Return the iframe/frame elements that own ``element``, innermost first."""
+        owners: List[Any] = []
+        child, node = element, getattr(element, "parent_node", None)
+        while node is not None:
+            if (
+                str(getattr(node, "node_name", "")).upper() in ("IFRAME", "FRAME")
+                and getattr(node, "content_document", None) is child
+            ):
+                owners.append(node)
+            child, node = node, getattr(node, "parent_node", None)
+        return owners
+
+    async def _rect_in_top_viewport(self, element: Any, rect: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Translate a frame-local viewport rect into top-level viewport coordinates.
+
+        ``getBoundingClientRect()`` runs in the element's own frame, but the
+        humanizer dispatches mouse input on the top page. Each owning iframe's
+        content-box origin is added, and the rect is clipped to every ancestor
+        viewport, so a control inside an offset (cross-origin) iframe is clicked
+        where it is drawn. Returns None when no part of it is visible on top.
+        """
+        owners = self._frame_owner_chain(element)
+        if not owners:
+            return rect
+        x, y = float(rect["x"]), float(rect["y"])
+        right, bottom = x + float(rect["width"]), y + float(rect["height"])
+        viewport_width, viewport_height = rect.get("viewportWidth"), rect.get("viewportHeight")
+        for owner in owners:
+            cdp_session = await self._session.cdp_client_for_node(owner)
+            resolved = await cdp_session.cdp_client.send.DOM.resolveNode(
+                params={"backendNodeId": owner.backend_node_id},
+                session_id=cdp_session.session_id,
+            )
+            object_id = resolved.get("object", {}).get("objectId")
+            if not object_id:
+                return None
+            js_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+                params={
+                    "objectId": object_id,
+                    "functionDeclaration": """
+                    function() {
+                        const rect = this.getBoundingClientRect();
+                        const style = window.getComputedStyle(this);
+                        return {
+                            x: rect.left + this.clientLeft + (Number.parseFloat(style.paddingLeft) || 0),
+                            y: rect.top + this.clientTop + (Number.parseFloat(style.paddingTop) || 0),
+                            viewportWidth: window.innerWidth || document.documentElement.clientWidth || 0,
+                            viewportHeight: window.innerHeight || document.documentElement.clientHeight || 0
+                        };
+                    }
+                    """,
+                    "returnByValue": True,
+                },
+                session_id=cdp_session.session_id,
+            )
+            box = js_result.get("result", {}).get("value")
+            if not box:
+                return None
+            viewport_width, viewport_height = box["viewportWidth"], box["viewportHeight"]
+            x, right = max(0.0, x + box["x"]), min(float(viewport_width), right + box["x"])
+            y, bottom = max(0.0, y + box["y"]), min(float(viewport_height), bottom + box["y"])
+            if right <= x or bottom <= y:
+                return None
+        return {
+            **rect,
+            "x": x,
+            "y": y,
+            "width": right - x,
+            "height": bottom - y,
+            "viewportWidth": viewport_width,
+            "viewportHeight": viewport_height,
+        }
+
     async def get_element_rect(
         self,
         index: int,
@@ -3165,6 +3315,15 @@ class DOMService:
                     extra={"index": index, "rect": rect_data},
                 )
                 return None
+
+            top_rect = await self._rect_in_top_viewport(element, rect_data)
+            if top_rect is None:
+                logger.warning(
+                    "Iframe element has no visible top-level viewport intersection",
+                    extra={"index": index, "frame_rect": rect_data},
+                )
+                return None
+            rect_data = top_rect
 
             viewport_width = rect_data.get("viewportWidth") or self.viewport_width
             viewport_height = rect_data.get("viewportHeight") or self.viewport_height

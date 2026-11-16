@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
+import sys
 import tempfile
 import subprocess
 import time
@@ -14,6 +16,8 @@ import unittest
 from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
 MODULE=ROOT/'scripts/cloudbench-cohort-reconcile.py'
 loader=importlib.machinery.SourceFileLoader('ticket_fixture',str(ROOT/'scripts/tests/cloudbench-cleanup-admission-tickets.test.py'))
 spec=importlib.util.spec_from_loader(loader.name,loader)
@@ -85,6 +89,8 @@ reap_orphaned_fleet_proxies(){
 }
 campaign_inventory_capture(){ inventory_index_healthy; }
 inventory_refresh_wait_tick(){
+ [ -z "${PUBLISH_HOST_DELAY:-}" ] || sleep "$PUBLISH_HOST_DELAY"
+ if [ "${NO_PUBLISH:-0}" = 1 ];then SECONDS=$((SECONDS+1));echo "$SECONDS" >> "$CASE/logical-ticks";return 0;fi
  echo tick >> "$CASE/refresh-ticks"
  mkdir -p "$INVENTORY_INDEX/.generation-after"
  date +%s > "$INVENTORY_INDEX/.generation-after/published_at"
@@ -94,6 +100,11 @@ inventory_refresh_wait_tick(){
 }
 read -r ready
 FLEET_OWNER_PID_START="$(cat "$CASE/birth-$$")"
+if [ -n "${EXIT_HOLD_MB:-}" ];then
+ # Its pages are freed during exit after the lock fd's flock is released.
+ exec {exit_hold}<>"/dev/shm/cohort-exit-hold-$$" && rm -f "/dev/shm/cohort-exit-hold-$$" || exit 1
+ head -c "${EXIT_HOLD_MB}M" /dev/zero >&"$exit_hold" || exit 1
+fi
 __STARTUP_CALLSITE__
 status=0
 printf 'status=%s mutated=%s\n' "$status" "${FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED:-unset}"
@@ -109,12 +120,17 @@ exit "$status"
         if current.is_symlink():current.unlink()
         current.symlink_to(name)
 
-    def spawn(self,index,sealed=True):
+    def spawn(self,index,sealed=True,extra=None):
         env=dict(self.ticket.env,CASE=str(self.root),BARRIER=str(int(self.barrier)),APP='fixture',FLEET_OWNER_HOST='fixture',FLEET_OWNERSHIP_ROOT=str(self.ownership),FLEET_REGISTRY_DIR=str(self.ownership/('current-'+str(index))),POOL_REUSE_ONLY='0',ROOT_DIR=str(ROOT),CLOUDBENCH_SCRIPT_SNAPSHOT=os.environ.get('CLOUDBENCH_TEST_RECONCILE_HELPER_DIR',str(ROOT/'scripts')),RUN_BENCH_CLEANUP_COHORT_DIR=str(self.ticket.cohort)if sealed else '',RUN_BENCH_CLEANUP_COHORT_ID='c001'if sealed else '',RUN_BENCH_CLEANUP_JOB=self.ticket.jobs[index]if sealed else '',RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(self.ticket.cohort)if sealed else '',RUN_BENCH_CAMPAIGN_COHORT='c001'if sealed else '',RUN_BENCH_CAMPAIGN_JOB_ID=self.ticket.jobs[index]if sealed else '',RUN_BENCH_CAMPAIGN_JOB_GENERATION='1')
         if self.campaign:
             env.update(CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=str(self.index),INVENTORY_INDEX=str(self.index),SNAPSHOT_LOOP_TOKEN='publisher',SNAPSHOT_LOOP_PID=str(os.getpid()),INVENTORY_PUBLISHER_BORROWED='1',INVENTORY_CAMPAIGN_PARENT_PID=str(os.getpid()),INVENTORY_CAMPAIGN_PARENT_START='test',INVENTORY_CLOCK_EPOCH=str(int(time.time())),INVENTORY_CLOCK_SECONDS='0',SNAPSHOT_REFRESH_TIMEOUT='1',CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS='1',CAPACITY_ADMISSION_DEADLINE='10',FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED='0')
-            self_body='inventory_pid_matches_start(){ return 0; }\n'+self.body
+            # The fixture publisher is immediate, so the 1 s borrowed wait must not
+            # be spent by the host: as in cloudbench_campaign_inventory_test.py,
+            # unsetting SECONDS removes bash's whole-second wall-clock binding (a
+            # SECONDS+1 deadline can expire microseconds after it is set).
+            self_body='inventory_pid_matches_start(){ return 0; }\nunset SECONDS; SECONDS=0\n'+self.body
         else:self_body=self.body
+        env.update(extra or {})
         child=subprocess.Popen(['bash','-c',self.functions+self_body],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
         self.children.append(child);self.ticket.children.append(child)
         (self.root/('birth-'+str(child.pid))).write_text(tickets.birth(child.pid))
@@ -133,6 +149,21 @@ exit "$status"
             if len(list(self.root.glob('entered-*')))>=count:return
             time.sleep(.01)
         self.case.fail('actual full scanner did not reach fixture metadata boundary')
+
+    def kill_group_children(self,leader):
+        def stat(pid):
+            try:return Path('/proc',pid,'stat').read_text().rsplit(') ',1)[1].split()
+            except FileNotFoundError:return None
+        members=[pid for pid in os.listdir('/proc') if pid.isdigit() and int(pid)!=leader and (stat(pid) or ['','','0'])[2]==str(leader)]
+        for pid in members:
+            try:os.kill(int(pid),signal.SIGKILL)
+            except ProcessLookupError:pass
+        wait_until(lambda:all((stat(pid) or ['Z'])[0]=='Z' for pid in members),timeout=4,description='winner children exited')
+
+    def wait_lock_waiter(self):
+        # /proc/locks lists a blocked flock() waiter as '<n>: -> FLOCK ... <maj>:<min>:<inode> ...'.
+        inode=':'+str((self.ticket.cohort/'stale-reconcile.lock').stat().st_ino)+' '
+        wait_until(lambda:any('->' in line and inode in line for line in Path('/proc/locks').read_text().splitlines()),timeout=4,description='successor blocked on the reconciliation lock')
 
     def release(self):
         (self.root/'release-scan').touch()
@@ -308,6 +339,26 @@ class CohortReconciliation(unittest.TestCase):
                 else:self.assertIsNone(receipt['inventory'])
                 f.assert_records_preserved()
 
+    def test_campaign_wait_is_spent_by_the_logical_clock_not_host_time(self):
+        # Host delay before publication does not consume the 1-tick borrowed wait.
+        f=ReconciliationFixture(self,width=3,campaign=True,mutated=True)
+        code,out,err=f.join(f.spawn(0,extra={'PUBLISH_HOST_DELAY':'1.05'}));self.assertEqual(code,0,out+err)
+        self.assertIn('mutated=1',out)
+        self.assertEqual(len((f.root/'refresh-ticks').read_text().splitlines()),1)
+        receipt=json.loads((f.ticket.cohort/'stale-reconcile.completed.json').read_text())
+        self.assertEqual((receipt['may_have_mutated'],receipt['inventory']['generation']),(1,'.generation-after'))
+        f.assert_records_preserved()
+        # Negative control: the logical clock still expires an unpublished wait, fail closed.
+        f=ReconciliationFixture(self,width=3,campaign=True,mutated=True)
+        code,out,err=f.join(f.spawn(0,extra={'NO_PUBLISH':'1'}));self.assertNotEqual(code,0,out+err)
+        self.assertIn('timed out waiting for a new healthy parent inventory generation',err)
+        self.assertFalse((f.root/'refresh-ticks').exists())
+        # One tick reaches the local 1 s deadline; the caller cap (10) never fires.
+        self.assertEqual((f.root/'logical-ticks').read_text().splitlines(),['1'])
+        self.assertFalse((f.ticket.cohort/'stale-reconcile.completed.json').exists())
+        self.assertNotEqual(json.loads((f.ticket.cohort/'stale-reconcile.failed.json').read_bytes())['status'],0)
+        f.assert_records_preserved()
+
     def test_dead_winner_without_completion_is_recovered_by_successor(self):
         f=ReconciliationFixture(self,barrier=True)
         first=f.spawn(0);f.wait_entered()
@@ -329,6 +380,48 @@ class CohortReconciliation(unittest.TestCase):
         third=f.spawn(2);code,out,err=f.join(third);self.assertEqual(code,0,out+err)
         self.assertEqual(len(f.metadata()),13)
         f.assert_records_preserved()
+
+    def test_dead_winner_observed_mid_exit_is_recovered_by_successor(self):
+        # do_exit() drops the killed winner's flock while it closes files, before
+        # exit_notify() makes it a zombie. Freeing a large unlinked tmpfs file after
+        # the lock's release holds that window open: the successor sees state 'R'.
+        self.assertGreater(shutil.disk_usage('/dev/shm').free,1<<30,'exit-hold fixture needs 1 GiB free on /dev/shm tmpfs')
+        f=ReconciliationFixture(self,barrier=True)
+        first=f.spawn(0,extra={'EXIT_HOLD_MB':'512'});f.wait_entered()
+        second=f.spawn(1);f.wait_lock_waiter()
+        # The winner itself is the last lock holder: stop it, retire its scan
+        # children (they also inherit the lock fd), then kill it.
+        os.kill(first.pid,signal.SIGSTOP)
+        f.kill_group_children(first.pid)
+        os.kill(first.pid,signal.SIGKILL)
+        f.wait_entered(2)
+        self.assertEqual(len(f.metadata()),2)
+        f.release()
+        code,out,err=f.join(second);self.assertEqual(code,0,out+err)
+        first.wait(timeout=3)
+        self.assertTrue((f.ticket.cohort/'stale-reconcile.completed.json').exists())
+        # Negative control: a live winner that left the lock without a terminal stays refused.
+        lease=f.ticket.cohort/'stale-reconcile.owner.json'
+        (f.ticket.cohort/'stale-reconcile.completed.json').unlink()
+        lease.write_text(json.dumps(dict(json.loads(lease.read_bytes()),owner_pid=os.getpid(),owner_start=tickets.birth(os.getpid()))))
+        code,out,err=f.join(f.spawn(2));self.assertNotEqual(code,0,out+err)
+        self.assertIn('live reconciliation winner lost lock',err)
+        self.assertEqual(len(f.metadata()),13,'refused successor rescanned historical registries')
+        f.assert_records_preserved()
+
+    def test_winner_reaped_after_the_state_read_is_retired(self):
+        # The final birth check runs after the stat read; a winner reaped in
+        # between has no birth (or a reused PID's other birth) and is gone.
+        loader=importlib.machinery.SourceFileLoader('cohort_reconcile_helper',str(MODULE))
+        helper=importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name,loader));loader.exec_module(helper)
+        expected=tickets.birth(os.getpid())
+        def births(*values):
+            seen=iter(values)
+            return type('T',(),{'birth':staticmethod(lambda pid:next(seen))})
+        self.assertTrue(helper.retired(births(expected,''),os.getpid(),expected))
+        self.assertTrue(helper.retired(births(expected,'reused'),os.getpid(),expected))
+        # Negative control: the same live (running, not exiting) process is not retired.
+        self.assertFalse(helper.retired(births(expected,expected),os.getpid(),expected))
 
     def test_completed_failure_is_not_cached_as_success_or_rescanned(self):
         f=ReconciliationFixture(self,kind='failure')

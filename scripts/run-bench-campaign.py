@@ -706,6 +706,25 @@ def stress_default_environment(requirements: dict[str, object], environment: dic
     return result
 
 
+def controller_identity() -> dict | None:
+    """This campaign controller's PID and birth, in the form cloudbench-scorecard's process_birth reads.
+
+    The shared-inventory owner file records them only when that inventory runs (concurrency > 1),
+    so summary.json carries them too; a concurrency-1 campaign can then prove liveness.
+    """
+    pid = os.getpid()
+    try:
+        if Path("/proc/self/stat").exists():
+            fields = Path("/proc", str(pid), "stat").read_text().rsplit(") ", 1)[1].split()
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            return {"pid": pid, "birth": f"proc-start:{boot}:{fields[19]}"}
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True,
+                                timeout=10, check=False)
+        return {"pid": pid, "birth": result.stdout.strip()} if result.returncode == 0 and result.stdout.strip() else None
+    except (OSError, IndexError, subprocess.TimeoutExpired):
+        return None
+
+
 def cleanup_ticket_module(root: Path) -> ModuleType:
     """Bind and execute the exact immutable helper once in the campaign parent."""
     cached = getattr(cleanup_ticket_module, "_checked", None)
@@ -839,25 +858,24 @@ def task_verdict(task: dict) -> dict[str, object]:
                 "SKIPPED"}}
 
 
-def attempt_verdict(root: Path, job: dict[str, object]) -> dict[str, object]:
-    """The exited attempt's recorded verdict; empty (unknown) when no run record exists."""
-    try:
-        found = terminal_task(root, job)
-        return {} if found is None else task_verdict(found[2])
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
+def unverified_reason(error: Exception) -> str:
+    """Why a recorded result or release seal could not be verified (bounded)."""
+    return f"terminal result or release remains unverified ({type(error).__name__}: {error})"[:240]
 
 
 def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
-    """Read the existing physical result and full-release seal, without regrading."""
+    """Read the existing physical result and full-release seal, without regrading.
+
+    Any unreadable, looping or malformed receipt is an unverified release, never a
+    campaign failure: every exited attempt runs this check, including healthy peers'."""
     try:
         found = terminal_task(root, job)
         if found is None:
             return {"resources_released": False, "retry_blocked": "physical run handle unavailable"}
         fleet, record, task = found
         verdict = task_verdict(task)
-    except (OSError, ValueError, KeyError, TypeError):
-        return {"resources_released": False, "retry_blocked": "terminal result or release remains unverified"}
+    except Exception as error:
+        return {"resources_released": False, "retry_blocked": unverified_reason(error)}
     try:
         run_id = fleet.name
         lifecycle = json.loads((fleet / "_batch/lifecycle.json").read_text())
@@ -888,10 +906,9 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
                 **verdict, "resources_released": closed,
                 "lifecycle_verified": closed and lifecycle.get("status") == "verified",
                 "released_at_epoch": float(epoch_bytes) if closed else None}
-    except (OSError, ValueError, KeyError, TypeError):
+    except Exception as error:
         # The recorded verdict stands; only release remains unverified.
-        return {**verdict, "resources_released": False,
-                "retry_blocked": "terminal result or release remains unverified"}
+        return {**verdict, "resources_released": False, "retry_blocked": unverified_reason(error)}
 
 
 def infra_stop_policy() -> str:
@@ -1117,8 +1134,13 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     stalls both tunnels (descend-full69-20261023: lost guest /shutdown replies,
     retained Machines). The claim is an open file lock, so a dead holder releases
     it; the caller hands it to the agent's bootstrap so it ends with that agent.
+
+    flyctl keeps its config, agent socket and wire_guard_state in FLY_CONFIG_DIR
+    (default ~/.fly), so the peer and this claim belong to that directory: a
+    campaign launched with its own FLY_CONFIG_DIR gets its own peer and can run
+    beside another campaign in the same HOME.
     """
-    directory = Path(os.environ.get('HOME') or Path.home()) / '.fly'
+    directory = Path(os.environ.get('FLY_CONFIG_DIR') or Path(os.environ.get('HOME') or Path.home()) / '.fly')
     directory.mkdir(mode=0o700, exist_ok=True)
     path = directory / 'rose-campaign-wireguard-peer.lock'
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -1127,9 +1149,10 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     except BlockingIOError:
         holder = os.read(descriptor, 4096).decode(errors='replace').strip() or 'unknown holder'
         os.close(descriptor)
-        raise ValueError(f'another campaign already owns this HOME\'s Fly WireGuard peer ({holder}); '
+        raise ValueError(f'another campaign already owns this Fly config dir\'s WireGuard peer ({holder}); '
                          'a second Fly agent on that peer stalls both tunnels. Run these tasks in that '
-                         'campaign, wait for it to finish, or use a sharded campaign') from None
+                         'campaign, wait for it to finish, launch with its own FLY_CONFIG_DIR, or use a '
+                         'sharded campaign') from None
     except BaseException:
         os.close(descriptor)
         raise
@@ -1511,17 +1534,131 @@ def campaign_simultaneous_benches(concurrency: int, job_count: int, group_total:
     return max(min(concurrency, job_count), group_total or 0)
 
 
-def provider_capacity_refusal(benches: int) -> int:
+def provider_capacity_refusal(benches: int, tasks: list[str] | None = None) -> int:
     """0 when the provider rate-limit cap admits `benches`; else its refusal exit code.
 
     The helper and its reviewed registry ship beside this control script, so a
-    separate task workspace cannot substitute other limits.
+    separate task workspace cannot substitute other limits. `tasks` selects a
+    measured demand profile only when every task is in its catalog group.
     """
     capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
     try:
-        return capacity["check"](benches)
+        return capacity["check"](benches, tasks=tasks)
     except capacity["RegistryError"] as error:
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
+
+
+def delegating_ceiling_refusal(benches: int, tasks: list[str] | None = None) -> int:
+    """0 when the app delegating-guest ceiling can admit `benches` simultaneous REAL/SIM copies.
+
+    Fleet admission refuses live REAL/SIM primaries + requested above
+    CLOUDBENCH_DELEGATING_PRIMARY_CEILING after its admission wait, recording
+    INFRA; a campaign (or sharded group) wider than the ceiling can never fit.
+    """
+    capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
+    try:
+        return capacity["delegating_check"](benches, tasks=tasks)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
+
+
+CLEANUP_RESERVE_DISK_REFUSED = 78  # EX_CONFIG, like the provider-capacity refusals.
+
+
+def cleanup_reserve_disk_refusal(root: Path, width: int, *, environ: Mapping[str, str] = os.environ,
+                                 stream=None, free_bytes: int | None = None) -> int:
+    """0 unless free disk cannot hold even one standalone fleet teardown reserve.
+
+    A rolling campaign (more jobs than --concurrency) gives every live fleet its
+    own CLOUDBENCH_CLEANUP_DISK_RESERVE_MB reserve plus
+    CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB headroom under the git common dir. A
+    fleet that cannot hold them waits for peers to release theirs, so a width
+    above free disk only narrows effective concurrency: warn with actions.
+    """
+    stream = stream or sys.stderr
+    reserve = environ.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512")
+    headroom = environ.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256")
+    wait = environ.get("CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS", "1800")
+    if not (reserve.isdigit() and headroom.isdigit()) or width < 1:
+        return 0  # The fleet validates its own storage policy before any mutation.
+    per_mb = int(reserve) + int(headroom)
+    location = root
+    if free_bytes is None:
+        try:
+            common = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                    capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+            location = Path(common) if common else root
+        except (OSError, subprocess.SubprocessError):
+            location = root
+        observed = os.statvfs(location)
+        free_bytes = observed.f_bavail * observed.f_frsize
+    free_mb = free_bytes // 1048576
+    fits = free_mb // per_mb if per_mb else width
+    if fits >= width:
+        return 0
+    need = f"{width} controllers x ({reserve}MB reserve + {headroom}MB headroom) = {width * per_mb / 1024:.1f} GiB"
+    if fits < 1:
+        print(f"❌ cleanup reserve disk preflight: {free_mb}MB free on {location} cannot hold even one fleet's "
+              f"{per_mb}MB emergency teardown reserve and headroom ({need}). Free disk (retire finished "
+              "worktrees, .context run directories) or wait for other campaigns to finish; "
+              "no campaign controller admitted.", file=stream, flush=True)
+        return CLEANUP_RESERVE_DISK_REFUSED
+    print(f"⚠️  cleanup reserve disk preflight: {need} exceeds {free_mb / 1024:.1f} GiB free on {location}. "
+          f"About {fits} fleets can hold reserves at once; the rest WAIT up to {wait}s each "
+          "(CLOUDBENCH_CLEANUP_RESERVE_WAIT_SECONDS) for peers to release theirs, then record CAPACITY_DEFERRED "
+          f"(not INFRA_ERROR). For full width free {(width * per_mb - free_mb) / 1024:.1f} GiB more, or run with "
+          f"--concurrency {fits}.", file=stream, flush=True)
+    return 0
+
+
+# scripts/run-bench run_bench_secret_like_setting, re-applied here because a
+# recorded name list is untrusted input (parity regression in
+# cloudbench_campaign_inventory_test.py).
+SECRET_LIKE_SETTING_NAME = re.compile(
+    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|ACCESS_KEY|AUTH_HEADER|AUTH_CONFIG|AUTH_SOCK|AUTHORIZATION|COOKIE|CREDENTIAL|PRIVATE|OTP|SIGNATURE"
+    r"|(_KEY|_B64|_AUTH|_DSN|_PAT|_PASS|_PWD|_JWT|_PAN|_CVV|_CVC|_PIN|_EXPIRY)\Z"
+)
+SECRET_LIKE_SETTING_VALUE = re.compile(
+    r"://[^/]*@|://[^/]*:[^@]*@|Bearer |FlyV1 |-----BEGIN|ghp_|github_pat_|X-Amz-Signature"
+)
+SWITCH_VALUES = frozenset(("", "0", "1", "true", "false", "yes", "no", "on", "off"))
+ASCII_SPACE = " \t\n\v\f\r"
+OPERATOR_SETTING_VALUE_LIMIT = 1024
+
+
+def secret_like_setting(name: str, value: str) -> bool:
+    switch = value.strip(ASCII_SPACE)
+    if switch.isascii() and switch.lower() in SWITCH_VALUES:
+        return False  # read like _benchmark_env_bool: no secret in a switch
+    return bool(SECRET_LIKE_SETTING_NAME.search(name) or SECRET_LIKE_SETTING_VALUE.search(value))
+
+
+def bounded_setting_value(value: str) -> str:
+    if len(value) <= OPERATOR_SETTING_VALUE_LIMIT:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", "surrogateescape")).hexdigest()
+    return (value[:OPERATOR_SETTING_VALUE_LIMIT] + f"…[truncated: {OPERATOR_SETTING_VALUE_LIMIT} of "
+            f"{len(value)} characters recorded; sha256={digest}]")
+
+
+def banner_setting_value(value: str) -> str:
+    """One shell-quoted line: control characters cannot forge banner lines."""
+    return shlex.quote(re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\\\ud800-\udfff]",
+                              lambda match: match.group().encode("unicode_escape").decode("ascii"), value))
+
+
+def launch_operator_settings(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """Effective non-secret CLOUDBENCH_* settings at launch, or None when unrecorded.
+
+    scripts/run-bench names them with its one secret-like filter (the same one
+    its --durable unit forwarder applies); a direct launch has no such list.
+    """
+    names = environ.get("RUN_BENCH_OPERATOR_SETTING_NAMES")
+    if names is None:
+        return None
+    return {name: bounded_setting_value(environ[name]) for name in sorted(set(names.split()))
+            if name.startswith("CLOUDBENCH_") and name in environ
+            and not secret_like_setting(name, environ[name])}
 
 
 def scorecard_hooks() -> dict | None:
@@ -1599,7 +1736,17 @@ def main() -> int:
         # tasks (no browser) before provisioning; no live task-agent calls.
         print("🧊 provider rate-limit cap not applied: --demo-cache replay makes no live task-agent provider calls")
     else:
-        refused = provider_capacity_refusal(global_benches)
+        refused = provider_capacity_refusal(global_benches, args.task)
+        if refused:
+            return refused
+    refused = delegating_ceiling_refusal(global_benches, args.task)
+    if refused:
+        return refused
+    local_jobs = len(campaign_jobs(args.task, args.runs, shard["task_indexes"], shard["task_total"]))
+    if not strict_start and local_jobs > args.concurrency:
+        # Rolling campaigns allocate standalone per-fleet reserves (ticketed
+        # cohorts budget theirs up front when the cleanup tickets are prepared).
+        refused = cleanup_reserve_disk_refusal(root, min(args.concurrency, local_jobs))
         if refused:
             return refused
     controller_nice = os.environ.get("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE", "0")
@@ -1700,6 +1847,13 @@ def main() -> int:
         "e2e_timeout_seconds": args.e2e_timeout,
         "e2e_timeout_exceeded": False,
     }
+    identity = controller_identity()
+    if identity is not None:
+        state["controller"] = identity
+    operator_settings = launch_operator_settings(os.environ)
+    if operator_settings is not None:
+        # Unset names use source defaults; a successor relaunches with exactly these.
+        state["operator_settings"] = operator_settings
     for key in ("task_indexes", "group_total", "group_started_at"):
         if shard[key] is not None:
             state[key] = shard[key]
@@ -1763,6 +1917,12 @@ def main() -> int:
         f"jobs={len(jobs)} concurrency={args.concurrency}"
     )
     print(f"   summary: {summary_path}")
+    if operator_settings is None:
+        print("   operator settings: UNRECORDED (launched without scripts/run-bench)")
+    else:
+        print("   operator settings: " + (" ".join(
+            f"{name}={banner_setting_value(value)}" for name, value in operator_settings.items())
+            or "none set (source defaults)"))
     scorecard = scorecard_hooks()
     experiment_goal = os.environ.get("RUN_BENCH_GOAL") or "campaign:" + ",".join(sorted(set(args.task)))[:120]
     record_experiment(scorecard, "launch", campaign_dir, root, goal=experiment_goal, kind="campaign",
@@ -2675,13 +2835,15 @@ def main() -> int:
                     time.monotonic() - float(job.pop("_started_monotonic")), 3
                 )
                 active.pop(process_id)
+                # Every exited attempt records its verdict and release seal from the same
+                # physical receipts; the scorecard and retries read them with or without retries.
+                disposition = released_attempt(workspace, job)
+                for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
+                            "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
+                            "released_at_epoch", "retry_blocked"):
+                    job.pop(key, None)
+                job.update(disposition)
                 if args.retry_infra:
-                    disposition = released_attempt(workspace, job)
-                    for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
-                                "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
-                                "released_at_epoch", "retry_blocked"):
-                        job.pop(key, None)
-                    job.update(disposition)
                     job["attempts"].append({key: job.get(key) for key in (
                         "attempt", "log", "controller_pid", "started_at", "finished_at", "wall_clock_seconds",
                         "controller_exit_code", "status", "run_id", "fleet_dir", "fleet_owner_token", "task_status",
@@ -2706,8 +2868,6 @@ def main() -> int:
                         first_failure = first_failure or exit_code or 1
                 elif exit_code and not first_failure:
                     first_failure = exit_code
-                if not args.retry_infra:
-                    job.update(attempt_verdict(workspace, job))
                 if "infra_stop" not in state and not stop_signal:
                     breach = infra_stop_receipt(jobs, infra_scheduled_total, infra_policy, infra_reached)
                     if breach is not None:
