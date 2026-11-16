@@ -546,7 +546,12 @@ cap is `floor(limit × 0.8 / per-bench peak)`, minimum across enforced providers
 (`python3 scripts/cloudbench-provider-capacity.py cap`, `cap --json` for the
 table). `run-original600-controller.py` (including `--check`), campaigns (whole
 sharded group), fleets and `--local` refuse a wider global simultaneous width
-with exit 78 before any credential or provider call. Do not retry, split or
+with exit 78 before any credential or provider call. A `demand_profiles` entry
+records a lighter measured peak for one catalog task group; campaigns and
+fleets pass their tasks (`--task`), and the profile applies only when every
+task is in that group (polar-bench: Parallel 3.25 requests/min per bench, so a
+Polar-only selection caps at 135, where Kernel binds). Mixed, unknown or
+uncatalogued selections keep the global peaks (70). Do not retry, split or
 work around a refusal: ask the user to raise the provider limits (then record
 them in the registry in a reviewed change) or rerun at or below the cap.
 Task-free `--infra-probe` fleets and validated `--demo-cache` replays are exempt.

@@ -316,34 +316,37 @@ def test_campaign_start_barrier_bounds_and_releases_each_complete_cohort(tmp_pat
 def test_campaign_start_barrier_original_polar_jobs_use_tilion_cap_in_two_strict_cohorts(tmp_path):
     """Offline scheduling qualification only; mock workers earn no benchmark credit.
 
-    Four more original polar jobs than the real Tilion fleet cap run as one
-    cap-wide strict cohort and a second four-job cohort.
+    Four more original polar jobs than the real Tilion fleet cap for a Polar-only
+    selection run as one cap-wide strict cohort and a second four-job cohort.
     """
     from collections import Counter
 
+    polar = [task["name"] for task in json.loads((ROOT / "agents/benchmarks/polar_tasks.json").read_text())]
     env = dict(os.environ, CLOUDBENCH_BROWSER_PROVIDER="tilion")
     env.pop("CLOUDBENCH_PROVIDER_LIMITS_FILE", None)
     cap = subprocess.run(
         [sys.executable, str(ROOT / "scripts/cloudbench-provider-capacity.py"),
-         "cap", "--browser-provider", "tilion"],
+         "cap", "--browser-provider", "tilion", *[f"--task={task}" for task in polar]],
         env=env, capture_output=True, text=True, check=True,
     )
-    # Tilion's own row admits 200 (250 browsers, 20% production reserve); Parallel binds at 70.
-    assert cap.stdout.strip() == "70", cap.stdout + cap.stderr
+    # Tilion's own row admits 200 (250 browsers, 20% production reserve). Polar's
+    # measured demand profile lifts Parallel to 147, so the unscoped Kernel row binds at 135.
+    assert cap.stdout.strip() == "135", cap.stdout + cap.stderr
     width = int(cap.stdout.strip())
-    tasks = [f"polar-bu-{index:03d}" for index in range(1, (width + 4) // 2 + 1)]
+    tasks = polar[: width + 4]
+    runs = 1
     result, summary, events = run_campaign(
-        tmp_path, tasks=tasks, runs=2, concurrency=width,
+        tmp_path, tasks=tasks, runs=runs, concurrency=width,
         extra_env={"CLOUDBENCH_BROWSER_PROVIDER": "tilion",
                    "CLOUDBENCH_PROVIDER_LIMITS_FILE": str(ROOT / "scripts/cloudbench-provider-limits.json")},
     )
     assert result.returncode == 0, result.stdout + result.stderr
     jobs = summary["jobs"]
     expected = [(f"r{run:03d}-j{(run - 1) * len(tasks) + offset:04d}", task, run)
-                for run in (1, 2) for offset, task in enumerate(tasks, 1)]
+                for run in range(1, runs + 1) for offset, task in enumerate(tasks, 1)]
     assert len(expected) == width + 4
     assert [(job["job_id"], job["task"], job["run"]) for job in jobs] == expected
-    assert Counter(job["task"] for job in jobs) == Counter({task: 2 for task in tasks})
+    assert Counter(job["task"] for job in jobs) == Counter({task: runs for task in tasks})
     assert summary["peak_concurrency"] == width
     assert all(job["status"] == "passed" and job["finished_at"] for job in jobs)
     cohorts = summary["startup_cohorts"]

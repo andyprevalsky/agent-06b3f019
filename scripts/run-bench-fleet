@@ -1761,8 +1761,11 @@ fi
 # the reviewed provider cap (scripts/cloudbench-provider-limits.json) before
 # credentials, detaching, locks or any Fly call. A campaign child counts its
 # whole campaign or sharded group, never only itself; the inherited widths can
-# only raise the counted width. Only task-free infra probes and validated
-# read-only DEMO replays make no live task-agent provider calls.
+# only raise the counted width. Its own tasks select a measured demand profile
+# only when every one is in that profile's catalog group (a profile can only
+# lower demand; sibling fleets with other tasks keep the global peaks). Only
+# task-free infra probes and validated read-only DEMO replays make no live
+# task-agent provider calls.
 provider_capacity_simultaneous_benches() {
     local width="${#BENCHES[@]}" name value
     for name in CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES; do
@@ -1783,9 +1786,14 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ] && [ "$INFRA_PRO
         echo "🧊 provider rate-limit cap not applied: validated DEMO replay makes no live task-agent provider calls"
     else
         provider_capacity_width="$(provider_capacity_simultaneous_benches)" || exit 2
+        provider_capacity_tasks=()
+        for provider_capacity_task in "${BENCHES[@]}"; do
+            provider_capacity_tasks+=(--task "$provider_capacity_task")
+        done
         provider_capacity_status=0
         python3 -I -S -B "$ROOT_DIR/scripts/cloudbench-provider-capacity.py" \
-            check --benches "$provider_capacity_width" || provider_capacity_status=$?
+            check --benches "$provider_capacity_width" ${provider_capacity_tasks[@]+"${provider_capacity_tasks[@]}"} \
+            || provider_capacity_status=$?
         [ "$provider_capacity_status" -eq 0 ] || exit "$provider_capacity_status"
     fi
 fi

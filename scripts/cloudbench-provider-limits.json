@@ -91,5 +91,17 @@
       "demand_source": "run600c peak ~1.53 requests/min per bench.",
       "fallback": "overflow falls back to Parallel Extract"
     }
+  ],
+  "demand_profiles": [
+    {
+      "id": "polar-bench",
+      "task_group": "polar-bench",
+      "date": "2026-11-16",
+      "per_bench_peak": {
+        "parallel-search-extract": 3.25
+      },
+      "demand_measurement": "polar-bench census 2026-11-16, 1.5x margin",
+      "demand_source": "24 Polar cloud runs 2026-11-15/16 (20 distinct polar-bu/polar-odysseys tasks, 463 bench-minutes; .context/fleet/runs/*/polar-*/run.json). Explore sub-agents run inside the root workflow, so root messages and each bench's worker log cover the tree. Worker logs: 43 Parallel Search requests (one per web_search call, 0 provider retries) and 0 Parallel Extract fallbacks (all 26 web_fetch calls served by Firecrawl). Conservative count = every web_search + every web_fetch call (71, by toolCallId) aligned at a synchronized start: peak 52 requests in 60 s over 24 benches = 2.17 requests/min per bench (polar-bu only 2.64; steady state 0.15). Recorded 3.25 = 1.5x margin over 2.17."
+    }
   ]
 }
