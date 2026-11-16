@@ -12577,6 +12577,27 @@ else:
     provenance = json.loads(provenance_path.read_text())
     assert not contract['validate_task_matrix_binding'](provenance, matrix)
     assert [{'name': task['name'], 'world_model_mode': 'simulate' if task['mode'] == 'SIM' else 'real'} for task in tasks] == matrix['tasks']
+def probe_without_runtime_evidence(out, run_id):
+    """Durable fleet signature of a child that skipped its autoscaler (probe/skip mode).
+
+    The fleet writes exactly these three markers instead of starting an
+    autoscaler, whose own path always leaves autoscaler.pid and autoscaler.log.
+    Any runtime-evidence ownership, worker, or missing guest ACK keeps the
+    ordinary validation.
+    """
+    def exact(name, content):
+        path = out / name
+        return path.is_file() and not path.is_symlink() and path.stat().st_size <= 4096 \
+            and path.read_bytes() == content
+    absent = ('runtime-evidence.owner.json', 'runtime-evidence.pending', 'autoscaler.pid',
+              'autoscaler.log', 'autoscaler.acceptance-failed', 'worker-runtime-evidence',
+              'remote-logs/runtime-evidence')
+    workers = out / 'worker-clones.ids'
+    return (exact('autoscaler.ready', b'') and exact('autoscaler.completed-after-child', b'')
+            and exact('desired-worker-count', b'0\n')
+            and exact('guest-shutdown.confirmed', (run_id + '\n').encode())
+            and not any(os.path.lexists(out / name) for name in absent)
+            and (not os.path.lexists(workers) or exact('worker-clones.ids', b'')))
 for index, task in enumerate(tasks):
     name = task['name']
     assert re.fullmatch(r'[A-Za-z0-9._-]+', name) and name not in ('.', '..')
@@ -12607,6 +12628,12 @@ for index, task in enumerate(tasks):
     admitted = (out / 'runtime-evidence.owner.json').exists() or (out / 'post-config-start.accepted').exists()
     if not admitted:
         assert not (out / 'worker-runtime-evidence').exists()
+        continue
+    if probe_without_runtime_evidence(out, meta['run_id']):
+        # An --infra-probe / --skip-autoscaler child never owns runtime
+        # evidence (run-bench-cloud cloudbench_skip_held_driver_teardown_race),
+        # exactly as the normal final check exempts it. Its acknowledged guest
+        # cleanup is the only obligation; there is no bundle to retain.
         continue
     identity = out / '.cid'
     assert identity.is_file() and not identity.is_symlink()
