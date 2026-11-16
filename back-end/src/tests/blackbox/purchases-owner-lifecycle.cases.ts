@@ -111,10 +111,11 @@ export async function assertOwnerLifecycleBilling(deps: OwnerLifecycleDeps): Pro
         (error: unknown) => (error as { statusCode?: number }).statusCode === 409
       );
       assert.equal(await prisma.purchaseSpend.count({ where: { id: probe.id } }), 1);
-      await prisma.purchaseSpend.update({ where: { id: probe.id }, data: { status: 'REFUNDED' } });
+      // A completed purchase probe: cleared, funding consumed by the card spend (2026-11-16).
+      await prisma.purchaseSpend.update({ where: { id: probe.id }, data: { status: 'CLEARED' } });
       await prisma.purchaseWalletFunding.updateMany({
         where: { purchaseId: probe.id },
-        data: { status: 'RECLAIMED' },
+        data: { status: 'CONSUMED' },
       });
       const purged = await purgeOwnerLifecycleProbeRecords(benchmarkAgent);
       assert.ok(purged.purged >= 1);
