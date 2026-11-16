@@ -16,10 +16,11 @@ tags:
   - navigation
   - frontend
 sources:
+  - commit 562cc8c49008708918d15ee9844ab1c8c333062c
   - agent 147bb3eb-415a-475d-9f2f-289220bdcd12
   - commit 780ec1dc547dcca4cf9aabd09634c9c4a4c4ac7e
 repro: front-end/src/tests/blackbox/rose-code-agent-view.blackbox.tsx (keeps the owner breadcrumb)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -71,8 +72,7 @@ Before implementation edits, all other running project conversations were read
 for actual current repair scope and evidence, alongside open PRs, historical
 code-session failure evidence, Bug Report and literal symptom searches. No
 existing owner covered this navigation boundary. Independent review confirmed this first bad boundary and cleared the final
-implementation after the corrections below. This case remains open pending
-landing and production verification.
+implementation after the corrections below. PR2411 is merged and production verification is complete as described below.
 
 ## Solution
 
@@ -117,3 +117,43 @@ before editing, and required completion through /deploy.
 ## Reusable lesson
 
 Preserve owner navigation when replacing a conversation with an independently selectable coding session.
+
+## PR2411 delivery evidence
+
+PR #2411 merged as `562cc8c49008708918d15ee9844ab1c8c333062c`.
+The original failures and reproduction assertions above remain unchanged
+historical evidence. Frozen source `4a9d224abd5bf5ab1770237f2a8097762938a876`,
+digest `882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0`,
+passed all 17 selected native deploy gates. The original cycle and report
+are preserved under `.context/rca-147bb3eb/validated-4a9/` and
+`validated-4a9-report.log`; the report command exited 0.
+
+The first production attempt failed semantic workflow dispatch with HTTP401
+at 20:22:58 UTC before creating any workflow run. Its original FAIL and null
+run identity remain in `.context/rca-147bb3eb/production-first-attempt/` and
+the final production receipt's semantic_history. Render, Vercel, backend probes
+and Mac release passed. The credential CLI repair was separately validated
+and pushed as operations commit `6e2496487add55f3416737566873573528474fd3`;
+its 91-test `/push` is not PR2411's 17-gate full deploy.
+
+The normal semantic-only retry exited 0 at 2026-11-16T20:48:30Z. Run
+[43951508861](https://github.com/Rose-Ai-Labs/rose/actions/runs/43951508861)
+completed all five jobs successfully. It is **PASS-verified-by-descendant**,
+not an exact-source PASS: target product merge is562cc8, effective live frontend
+and tested specification source is `1ec28940191764ecf435ffc38b345006269bc95b`,
+and workflow execution head is6e2496487add55f3416737566873573528474fd3.
+The final `.context/deploy-pipeline/production-lanes.json` records all
+applicable lanes satisfied: exact562cc8 Render/Vercel, backend probes, Mac
+run43946926015 (v1.1.355), and descendant-verified semantic. Fly, WMH,
+workflow migration and AgentCard remain SKIPPED-not-applicable, never PASS.
+The native finish command exited0 at20:49:05Z. This resolves this repaired
+boundary's delivery; it does not certify unrelated runtime repairs, original
+paused-session recovery, marker release or whole-workspace deletion readiness.
+
+
+The breadcrumb repair shipped in PR2411 with the independent navigation,
+resolved-title and no-extra-owner-fetch assertions retained above. The
+`fe-independent-reviewed-snapshot.json`, `fe-stability-receipt.json` and
+`fe-independent-first-boundary.txt` records under `.context/rca-147bb3eb`
+qualify the UI repair separately from Codex image selection. Vercel success
+alone does not certify every interactive production navigation assertion.

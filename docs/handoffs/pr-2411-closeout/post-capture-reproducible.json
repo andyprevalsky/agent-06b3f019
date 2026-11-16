@@ -1,0 +1,13 @@
+{
+  "scope": "Only public reporting derivatives created after the terminal guard; no new credentials, raw run evidence, private configuration, repair data or provider resources",
+  "paths": {
+    ".context/deploy-scorecard-latest.json": "Disposable display pointer reconstructed from this repository delivery records and the final published scorecard URL retained in boxes.dev thread history",
+    ".context/rca-147bb3eb/latest-scorecard.json": "Disposable display pointer; original snapshots are privately archived, later fields derive from committed receipts and public visual link",
+    ".context/rca-147bb3eb/preservation-terminal/runs/20261116T2059Z-terminal-retry/": "Snapshot/restored copies and finalization outputs reconstruct from terminal data, controls, supplemental archives and committed final receipt"
+  },
+  "later_review_and_readiness": "Written directly to tracked records; no private post-capture log is introduced",
+  "original_failures_preserved": [
+    "NameError before upload",
+    "ClosedFailure for slash mismatch after verified archives; original exit1 unchanged"
+  ]
+}

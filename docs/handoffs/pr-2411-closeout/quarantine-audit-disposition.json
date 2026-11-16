@@ -1,0 +1,15 @@
+{
+  "status": "OPEN/evidence-only",
+  "no_marker_release": true,
+  "no_delegated_repair_or_waiver": true,
+  "audit_sha256": "d092f7fe9ba9c730bfe745710b86edff5e3ab85a59ab7554726debddfddd0b91",
+  "counter_task": {
+    "thread": "ph7dn43e3sm23v3mp7eh95fcxx8jat9z",
+    "status": "cancelled; delegated goal paused; source clean; no tests/providers/deploy",
+    "reason": "native report exit0 and newly added audit assertion do not qualify independent repair under controlling policy"
+  },
+  "runtime_owners_open": [
+    "ph7dks458a5md98rqzhab8wafn8jaypb",
+    "ph77fvbp3fna54x71mn0523e2d8jaxc1"
+  ]
+}

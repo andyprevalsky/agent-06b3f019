@@ -19,6 +19,7 @@ tags:
   - merge
   - smoke
 sources:
+  - commit 562cc8c49008708918d15ee9844ab1c8c333062c
   - PR #2411
   - PR #2289
   - PR #2279
@@ -27,7 +28,7 @@ sources:
   - commit c04bacf96b8293782ec8810fed66561448f6a289
   - commit 3b77f392d0d26a6340d795689bfa5a90bd948110
 repro: scripts/tests/deploy-test-quarantine.test.py (RepositoryCatalogQuarantine.test_repository_catalog_is_strict_and_quarantines_validate)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -106,7 +107,7 @@ allocation. No new serialization, parser fallback, last-wins behavior or
 exception to test outcomes is added. At10,000 agents there is no runtime agent
 path change; catalog validation is deploy/controller work. Golden reference:
 not applicable (operational metadata and validation, no model-visible change).
-Production deployment remains pending.
+PR2411 is merged and all applicable production lanes are verified below.
 
 ## Human feedback
 
@@ -117,3 +118,49 @@ prompts, evaluators, budgets or timeouts; those remain unchanged.
 ## Reusable lesson
 
 Validate the complete merged catalog with its strict production reader while preserving all quarantine incident metadata.
+
+## PR2411 delivery evidence
+
+PR #2411 merged as `562cc8c49008708918d15ee9844ab1c8c333062c`.
+The original failures and reproduction assertions above remain unchanged
+historical evidence. Frozen source `4a9d224abd5bf5ab1770237f2a8097762938a876`,
+digest `882008a4bc15beb817e758c96fd6fcabb8c9fddfcfd52454d9877be30fab17c0`,
+passed all 17 selected native deploy gates. The original cycle and report
+are preserved under `.context/rca-147bb3eb/validated-4a9/` and
+`validated-4a9-report.log`; the report command exited 0.
+
+The first production attempt failed semantic workflow dispatch with HTTP401
+at 20:22:58 UTC before creating any workflow run. Its original FAIL and null
+run identity remain in `.context/rca-147bb3eb/production-first-attempt/` and
+the final production receipt's semantic_history. Render, Vercel, backend probes
+and Mac release passed. The credential CLI repair was separately validated
+and pushed as operations commit `6e2496487add55f3416737566873573528474fd3`;
+its 91-test `/push` is not PR2411's 17-gate full deploy.
+
+The normal semantic-only retry exited 0 at 2026-11-16T20:48:30Z. Run
+[43951508861](https://github.com/Rose-Ai-Labs/rose/actions/runs/43951508861)
+completed all five jobs successfully. It is **PASS-verified-by-descendant**,
+not an exact-source PASS: target product merge is562cc8, effective live frontend
+and tested specification source is `1ec28940191764ecf435ffc38b345006269bc95b`,
+and workflow execution head is6e2496487add55f3416737566873573528474fd3.
+The final `.context/deploy-pipeline/production-lanes.json` records all
+applicable lanes satisfied: exact562cc8 Render/Vercel, backend probes, Mac
+run43946926015 (v1.1.355), and descendant-verified semantic. Fly, WMH,
+workflow migration and AgentCard remain SKIPPED-not-applicable, never PASS.
+The native finish command exited0 at20:49:05Z. This resolves this repaired
+boundary's delivery; it does not certify unrelated runtime repairs, original
+paused-session recovery, marker release or whole-workspace deletion readiness.
+
+
+The metadata/strict-reader and capture-specific custody repairs shipped in
+PR2411; neither fixes the underlying browser-biometrics-webdecoy runtime.
+COST occurrence de7a09b9a72047a4a25d7502027d2245 remains OPEN with owner
+ph7dks458a5md98rqzhab8wafn8jaypb. Timeout occurrence
+dde1843d76714899ba2cff244c0a6541 remains OPEN with owner
+ph77fvbp3fna54x71mn0523e2d8jaxc1. Preserve both errors, owners and evidence
+in the active marker. `.context/rca-147bb3eb/quarantine-release-audit.md`
+disproves interpreting raw reported streaks as release readiness: provider
+identity conflation, historical-incident/branch mixing, missing failure
+observations and a treasury mid-run SKIP counted as QUARANTINED_PASS prevent
+that inference. No marker release is authorized or recorded here. Native17/17
+is a separate gate outcome and does not close either runtime RCA.
