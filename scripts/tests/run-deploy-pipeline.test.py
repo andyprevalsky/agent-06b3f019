@@ -2704,7 +2704,10 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         '  *worker-deployment-queue.ts*) args="$*"; id="${args##*--job-id }"; id="${id%% *}"\n'
         '    f="$FAKE_GH_DIR/job-$id.json"\n'
         '    [ -f "$f" ] || f="$FAKE_GH_DIR/job.json"; cat "$f" ;;\n'
-        '  *monitor-cooperative-cutover.ts*) exit "${FAKE_MONITOR_EXIT:-0}" ;;\n'
+        '  *monitor-cooperative-cutover.ts*--json*) args="$*"; id="${args##*--job-id }"; id="${id%% *}"\n'
+        '    f="$FAKE_GH_DIR/monitor-$id.json"; [ -f "$f" ] && cat "$f"; exit 0 ;;\n'
+        '  *monitor-cooperative-cutover.ts*) case "$*" in *"${FAKE_MONITOR_FAIL_JOB:-none}"*) exit 1 ;; esac\n'
+        '    exit "${FAKE_MONITOR_EXIT:-0}" ;;\n'
         '  *) echo "unexpected node $*" >&2; exit 1 ;;\n'
         "esac\n")
     for name in ("gh", "node"):
@@ -2717,7 +2720,7 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     def reset(list_rows: list[dict], views: list[dict], log: str = "") -> None:
         for stale in fake.glob("view-*"):
             stale.unlink()
-        for stale in (calls, fake / "node-calls.log", *fake.glob("job-*.json")):
+        for stale in (calls, fake / "node-calls.log", *fake.glob("job-*.json"), *fake.glob("monitor-*.json")):
             stale.unlink(missing_ok=True)
         (fake / "list.json").write_text(json.dumps(list_rows))
         for index, view in enumerate(views, start=1):
@@ -2730,12 +2733,12 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         (fake / "job.json").write_text(json.dumps({"stage": stage, "identity": {"sourceCommit": source,
                                                                                "attempt": attempt}}))
 
-    def run_production(merged: str, state: Path, *extra: str) -> subprocess.CompletedProcess:
+    def run_production(merged: str, state: Path, *extra: str, env: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(driver), "production", "--merged-sha", merged, "--state-dir", str(state),
              "--poll-seconds", "0.05", "--expected-hash", "feedface", *extra,
              "--", "bash", "-c", f'echo dispatch >> "{calls}"'],
-            env=prod_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+            env=env or prod_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
 
     def call_lines() -> list[str]:
         return calls.read_text().splitlines() if calls.exists() else []
@@ -2903,6 +2906,46 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         assert ran.returncode == 1 and expected in ran.stdout, (expected, ran.stdout)
         assert "dispatch" not in call_lines(), call_lines()
         assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text(), "no monitor before proof"
+    # 7b. That descendant's own generation was itself replaced by a later cutover
+    #     before this gate ran (production 11-15: 7e8af6d1 superseded by the live
+    #     a556f348): its monitor can never pass on the moved pointer. The gate opens
+    #     only on the live pointer's own job, SUCCEEDED, same app and a descendant of
+    #     the merge, with its monitor --verify; anything else stays blocked.
+    live_id = "e" * 64
+    newest = subprocess.run([*git, "commit-tree", tree, "-p", later, "-m", "newest main merge"], check=True,
+                            stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    def write_replaced(live_stage: str, live_source: str) -> None:
+        write_superseded("SUCCEEDED", later)
+        (fake / f"monitor-{descendant_id}.json").write_text(json.dumps({
+            "phase": "managed_deployment_pending", "pointerMatchesExpected": False,
+            "livePointer": {"surfaceHash": "beef", "updatedBy": live_id}}) + "\n")
+        (fake / f"job-{live_id}.json").write_text(json.dumps({
+            "jobId": live_id, "stage": live_stage,
+            "identity": {"app": "app", "sourceCommit": live_source, "attempt": "140-1", "surfaceHash": "beef"}}))
+
+    replaced_env = {**prod_env, "FAKE_MONITOR_FAIL_JOB": descendant_id}
+    reset([running], [done], log)
+    write_replaced("SUCCEEDED", newest)
+    ran = run_production(runtime, tmp / "production-state-7b", env=replaced_env)
+    assert ran.returncode == 0, ran.stdout
+    assert call_lines()[-1] == "dispatch", call_lines()
+    assert f"verified_by=live-successor-cutover live={live_id}" in ran.stdout, ran.stdout
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert node_calls[-2].endswith(f"read --job-id {live_id}"), node_calls
+    assert node_calls[-1].endswith(f"monitor-cooperative-cutover.ts --job-id {live_id} --verify"), node_calls
+    verified = json.loads((tmp / "production-state-7b" / "production.json").read_text())["cutover_verify"]
+    assert verified["verified_by"] == "live-successor-cutover" and verified["live_job_id"] == live_id, verified
+    assert verified["replaced_job_id"] == descendant_id and verified["live_source_commit"] == newest, verified
+    for stage, source, expected in (
+            ("SUCCEEDED", tests_only, f"live job {live_id} commit {tests_only} is not a descendant of {runtime}"),
+            ("PREPARING", newest, f"replaced by live job {live_id}, which is PREPARING, not SUCCEEDED")):
+        reset([running], [done], log)
+        write_replaced(stage, source)
+        ran = run_production(runtime, tmp / f"production-state-7b-{stage}-{source[:4]}", env=replaced_env)
+        assert ran.returncode == 1 and expected in ran.stdout, (expected, ran.stdout)
+        assert "dispatch" not in call_lines(), call_lines()
+        assert f"--job-id {live_id} --verify" not in (fake / "node-calls.log").read_text(), "no live verify before proof"
     assert subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
                           text=True).stdout.strip() == head, "the descendant fixture must not move HEAD"
     # 8. The queue refused an older/diverged release instead of rolling the live one
