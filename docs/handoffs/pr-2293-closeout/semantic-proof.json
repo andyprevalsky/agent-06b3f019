@@ -1,0 +1,21 @@
+{
+  "source": {
+    "digest": "69eb15243368430aa8955a69894530fa819ee6c979f1760b3bd609c66b5793f4",
+    "head": "34b9ec25439dc6fd8cb7ea77d272ab444b096ab1"
+  },
+  "gate": "semantic-stack",
+  "complete": true,
+  "cleanup_complete": true,
+  "native_case_count": 76,
+  "browser_chip_cases": {
+    "playwright:[\"ui\",\"chromium\",\"browser-chip-count.spec.ts\",[\"browser-chip-count.spec.ts\",\"browser-chip-count\",\"visible browser chips always equal active browser agents\"]]": "PASS",
+    "playwright:[\"ui\",\"chromium\",\"browser-chip-count.spec.ts\",[\"browser-chip-count.spec.ts\",\"browser-chip-count\",\"recovers a successor browser start whose realtime INSERT is lost\"]]": "PASS"
+  },
+  "native_flaky": [],
+  "result_sha256": "a098bc8de69ba0c21e605f54fb021733621899c66c024ad1e5ab84d44921b7d2",
+  "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43832253183",
+  "native_command": [
+    "bash",
+    "scripts/run-deploy-semantic-stack.sh"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/rca204/reference-terminal-20261116T173950Z.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "70b1dde6398c7eb6a382fbfbc5a930519adae134446d07ca2642b4e7fe873328",
+  "gzip_sha256": "7b5f25fe74f68a538542942c0545e52089b155bab367daf7a212526e6787bd50",
+  "stored_bytes": 153878,
+  "frames": 1,
+  "files": 21,
+  "original_bytes": 466459,
+  "manifest_sha256": "635793ec05c59377a70104e4f1e4032c450469b37672baa0639b4841e3c2187c",
+  "full_readback_verified": true
+}

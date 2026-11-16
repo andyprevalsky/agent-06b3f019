@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/rca204/immutable-base-20261116T170115Z.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "8809dc165beabf2d783e18fdf937a71b36ac43d581ddcd8ea5a94e8e7d9cf1c6",
+  "gzip_sha256": "a15735e6b7f24d04506c7d74eda636cb6f71ea12825718f80920a2977baf0f16",
+  "stored_bytes": 1576725947,
+  "frames": 188,
+  "files": 3753,
+  "original_bytes": 2342278622,
+  "manifest_sha256": "a2c859984b6133e2fa3a183c3ab673b9004198bd8025e7bf2cce01a4fef6dfac",
+  "full_readback_verified": true
+}

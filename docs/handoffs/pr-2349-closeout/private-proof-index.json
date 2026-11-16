@@ -1,0 +1,49 @@
+[
+  {
+    "role": "coverage.json",
+    "archive_key": "devbox-closeout-private/rca204/final-20261116T173056Z.tar.gz.aesgcm",
+    "member": "rose/.context/rca204-preservation/final-20261116T173056Z/stage/coverage.json",
+    "size": 76138618,
+    "sha256": "e01976e6e5a722f7733123588e2711a694bddef80c7b43b5a4e596297fc2ac37"
+  },
+  {
+    "role": "selected.json",
+    "archive_key": "devbox-closeout-private/rca204/final-20261116T173056Z.tar.gz.aesgcm",
+    "member": "rose/.context/rca204-preservation/final-20261116T173056Z/stage/selected.json",
+    "size": 18527730,
+    "sha256": "9760f79a66eeb3b6564a2962259d5148158e5b2bcb46b42f5cf194875db36e53"
+  },
+  {
+    "role": "capture-guards-complete.json",
+    "archive_key": "devbox-closeout-private/rca204/final-20261116T173056Z.tar.gz.aesgcm",
+    "member": "rose/.context/rca204-preservation/final-20261116T173056Z/stage/capture-guards-complete.json",
+    "size": 255,
+    "sha256": "4ed410e577d60744f772fc0799f86fdd0d4880a3524df3ca4b30ec555f061c10"
+  },
+  {
+    "role": "refs-before.txt",
+    "archive_key": "devbox-closeout-private/rca204/final-20261116T173056Z.tar.gz.aesgcm",
+    "member": "rose/.context/rca204-preservation/final-20261116T173056Z/stage/home/boxes/rose/.context/rca204-preservation/final-20261116T173056Z/refs-before.txt",
+    "size": 2903396,
+    "sha256": "8c87334f7a8eb91fb41a974e4e6a9521dea69739ab79896d280f65c5967343ef"
+  },
+  {
+    "role": "reflog.txt",
+    "archive_key": "devbox-closeout-private/rca204/final-20261116T173056Z.tar.gz.aesgcm",
+    "member": "rose/.context/rca204-preservation/final-20261116T173056Z/stage/home/boxes/rose/.context/rca204-preservation/final-20261116T173056Z/reflog.txt",
+    "size": 153828,
+    "sha256": "526d3bd416ebca09b3f7a36721dbd686777e5a12a43719abe43871aeca53068e"
+  },
+  {
+    "role": "final-delta.bundle",
+    "archive_key": "devbox-closeout-private/rca204/final-20261116T173056Z.tar.gz.aesgcm",
+    "member": "rose/.context/rca204-preservation/final-20261116T173056Z/stage/home/boxes/rose/.context/rca204-preservation/final-20261116T173056Z/final-delta.bundle",
+    "size": 1154456,
+    "sha256": "cdf9005507903fc84f272990c11a395dd9a8e8c957ad093b41cb56b94e5a23ac"
+  },
+  {
+    "role": "cited-reference-map",
+    "archive_key": "devbox-closeout-private/rca204/reference-terminal-20261116T173950Z.tar.gz.aesgcm",
+    "member": "rose/.context/rca204-preservation/reference-terminal-20261116T173950Z/stage/reference-map.json"
+  }
+]

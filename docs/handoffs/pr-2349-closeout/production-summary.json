@@ -1,0 +1,74 @@
+{
+  "pr": 2349,
+  "merged_sha": "457cc757d706bad1360fe89876a1b4a79b820d3a",
+  "status": "PASS",
+  "started_at": "2026-11-16T16:57:31Z",
+  "finished_at": "2026-11-16T17:24:57Z",
+  "lanes": {
+    "fly": {
+      "status": "PASS",
+      "reason": "deploy-agents run 43913102171 attempt 1 job c6d0be4b47474127dc35536c9384096abcc1de9c04cf4682323e395bdac2c321 SUCCEEDED + monitor --verify",
+      "started_at": "2026-11-16T16:57:31Z",
+      "finished_at": "2026-11-16T17:15:46Z",
+      "exit_code": 0
+    },
+    "workflow-migration": {
+      "status": "PASS",
+      "reason": "every migration row PASS",
+      "started_at": "2026-11-16T17:15:46Z",
+      "finished_at": "2026-11-16T17:22:07Z",
+      "exit_code": 0
+    },
+    "semantic": {
+      "status": "PASS-verified-by-descendant",
+      "reason": "verified by descendant f9cf97a6f8ad8bdeba6c85bb4ba73247e5c38373: chat-lifecycle-ratchet run 43916514611 success with the specs of live frontend f9cf97a6f8ad (a descendant of 457cc757d706)",
+      "started_at": "2026-11-16T17:15:46Z",
+      "finished_at": "2026-11-16T17:24:57Z",
+      "exit_code": 0
+    }
+  },
+  "fly": {
+    "attempt": "1",
+    "conclusion": "success",
+    "deployment_token": "43913102171-1",
+    "job_id": "c6d0be4b47474127dc35536c9384096abcc1de9c04cf4682323e395bdac2c321",
+    "job_stage": "SUCCEEDED",
+    "required": true,
+    "run_id": "43913102171",
+    "status": "completed",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43913102171"
+  },
+  "cutover_verify": {
+    "attempt": "43913102171-1",
+    "expected_hash": "844092b2a6c8",
+    "job_id": "c6d0be4b47474127dc35536c9384096abcc1de9c04cf4682323e395bdac2c321",
+    "job_stage": "SUCCEEDED",
+    "monitor_verify_exit": 0,
+    "queue_read": "ok",
+    "source_commit": "457cc757d706bad1360fe89876a1b4a79b820d3a"
+  },
+  "semantic": {
+    "attempt": 1,
+    "binding": {
+      "build_id": "f9cf97a6f8ad-mwjirywp",
+      "kind": "verified-by-descendant",
+      "live_frontend_commit": "f9cf97a6f8ad8bdeba6c85bb4ba73247e5c38373",
+      "observed_at": "2026-11-16T17:15:48Z",
+      "polls": 1,
+      "version_url": "https://www.roselabs.ai/version.json"
+    },
+    "conclusion": "success",
+    "run_id": "43916514611",
+    "source_sha": "f9cf97a6f8ad8bdeba6c85bb4ba73247e5c38373",
+    "status": "completed",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43916514611"
+  },
+  "selected_gates_verified": 17,
+  "smoke_tasks_passed": 8,
+  "smoke_cleanup_complete": true,
+  "phone_acceptance": "No live phone operation or acquisition; logs/read-only states/offline synthetic regression only.",
+  "semantic_setup_checker": "OPEN; no causal prompt repair demonstrated or claimed.",
+  "clock_gap": "Observed09:34\u219216:49UTC; original local controllers resumed; no monitoring/active-work credit claimed for gap.",
+  "review": "GROUNDED scoped handler approval; independent code/flakiness reviews CLEAN; CodeRabbit organization spending cap skipped, merged unreviewed.",
+  "native_evidence": "Complete original and final native receipts retained in private preservation archives; no raw traces committed."
+}
