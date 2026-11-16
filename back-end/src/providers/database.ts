@@ -142,8 +142,14 @@ export async function retryOnTransientTransactionStart<T>(
  * raised mid-body (run 43785616839: a cutover ownership check died on its
  * database connection while ownership itself held). Errors the body throws
  * itself (plain `Error`s such as a lost lease) are decisions, not transport
- * failures, and are never retried. Defaults keep the worst case (5 x (3 s
- * wait + 5 s body) + 3.75 s backoff, about 44 s) inside a 60 s caller budget.
+ * failures, and are never retried. The body keeps runTransactionWithRetry's
+ * 10 s budget: a 5 s budget timed out every attempt (P2028) of a healthy
+ * ownership check during a slow-DB window (run 43822297504, one query 5987 ms).
+ * Default configured waits, body timeouts and backoff total 45.75 s
+ * (3 x (5 s + 10 s) + 0.25 s + 0.5 s). This is budget accounting, not a
+ * wall-clock guarantee: an in-flight query or advisory-lock wait can outlast
+ * Prisma's callback timeout. The cutover controller's 60 s subprocess timeout
+ * also covers other work; assert-mutable runs a second transaction.
  */
 export async function runReadOnlyTransactionWithRetry<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
@@ -156,10 +162,10 @@ export async function runReadOnlyTransactionWithRetry<T>(
           await tx.$executeRaw`SET TRANSACTION READ ONLY`;
           return fn(tx);
         },
-        { maxWait: 3_000, timeout: 5_000 }
+        { maxWait: 5_000, timeout: 10_000 }
       ),
     {
-      maxRetries: normalizeMaxRetries(options.maxRetries ?? 5),
+      maxRetries: normalizeMaxRetries(options.maxRetries ?? 3),
       initialBackoffMs: options.initialBackoffMs ?? 250,
       isRetryable: isPrismaDatabaseError,
       component: 'PrismaReadOnlyTx',
