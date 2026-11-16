@@ -2665,6 +2665,9 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
                  "classify-agent-runtime-changes.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    # The merge's own deploy-agents.yml push filter decides the cutover.
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    shutil.copyfile(ROOT / ".github" / "workflows" / "deploy-agents.yml", repo / ".github" / "workflows" / "deploy-agents.yml")
     git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
 
@@ -2680,6 +2683,18 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     commit("base", {"README": "base\n"})
     tests_only = commit("agents tests + backend", {"agents/tests/new_case.py": "x\n", "back-end/src/x.ts": "y\n"})
     runtime = commit("agents runtime", {"agents/worker_patch.py": "z\n"})
+    # 2026-11-16 (#2147): a controller-only merge starts deploy-agents.yml through its push paths.
+    controller = commit("cutover controller", {"scripts/worker_pool_cutover.py": "c\n"})
+    sys.path.insert(0, str(scripts))
+    try:
+        fixture_pipeline = load_module("production_fixture_pipeline", scripts / "run_deploy_pipeline.py")
+    finally:
+        sys.path.remove(str(scripts))
+    assert fixture_pipeline.agent_cutover_required(["scripts/worker_pool_cutover.py"], repo, controller) == {
+        "required": True, "runtime_files": [], "workflow_changed": False,
+        "trigger_files": ["scripts/worker_pool_cutover.py"]}
+    assert fixture_pipeline.agent_cutover_required(["agents/tests/new_case.py", "back-end/src/x.ts"], repo,
+                                                   tests_only)["required"] is False
     fake = tmp / "production-fake"
     fake.mkdir()
     bin_dir = fake / "bin"
@@ -2766,7 +2781,7 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     receipt = json.loads((state / "production.json").read_text())
     assert receipt["status"] == "passed" and receipt["merged_sha"] == runtime, receipt
     assert receipt["agent_cutover"] == {"required": True, "runtime_files": ["agents/worker_patch.py"],
-                                        "workflow_changed": False}, receipt["agent_cutover"]
+                                        "workflow_changed": False, "trigger_files": []}, receipt["agent_cutover"]
     fly = receipt["fly"]
     assert fly["run_id"] == "123" and fly["attempt"] == "1" and fly["job_id"] == job_id, fly
     assert fly["conclusion"] == "success" and fly["job_stage"] == "SUCCEEDED" and fly["deployment_token"] == "123-1", fly
@@ -2785,7 +2800,8 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     assert ran.returncode == 0, ran.stdout
     assert call_lines() == ["dispatch"], call_lines()
     receipt = json.loads((tmp / "production-state-2" / "production.json").read_text())
-    assert receipt["fly"] == {"required": False, "reason": "no agent runtime or deploy-agents.yml change in the merge"}
+    assert receipt["fly"] == {"required": False,
+                              "reason": "no agent runtime or deploy-agents.yml push-path change in the merge"}
     assert receipt["agent_cutover"]["required"] is False and receipt["github_waits"] == [], receipt
     assert not (fake / "node-calls.log").exists(), "no cutover verification without a Fly lane"
 
@@ -3003,6 +3019,9 @@ def check_production_render(tmp: Path, env: dict[str, str]) -> None:
                  "classify-agent-runtime-changes.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    # The merge's own deploy-agents.yml push filter decides the cutover.
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    shutil.copyfile(ROOT / ".github" / "workflows" / "deploy-agents.yml", repo / ".github" / "workflows" / "deploy-agents.yml")
     git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
 
@@ -3382,6 +3401,9 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
                  "classify-agent-runtime-changes.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    # The merge's own deploy-agents.yml push filter decides the cutover.
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    shutil.copyfile(ROOT / ".github" / "workflows" / "deploy-agents.yml", repo / ".github" / "workflows" / "deploy-agents.yml")
     git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     for message, files in (("base", {"README": "base\n"}), ("backend only", {"back-end/src/x.ts": "y\n"})):
