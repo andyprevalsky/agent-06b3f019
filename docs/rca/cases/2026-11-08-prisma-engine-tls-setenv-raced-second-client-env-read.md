@@ -12,6 +12,7 @@ symptoms:
   - "1/373 unit test file(s) failed."
   - "Backend test phase failed (blackbox exit 0, unit exit 1)"
   - "Program terminated with signal SIGSEGV, Segmentation fault. __GI_getenv"
+  - "RERUN: send-sms failed (2422ms); rerunning once"
 tags:
   - prisma
   - native-crash
@@ -19,11 +20,13 @@ tags:
   - unit-runner
   - deploy-gate
   - observability
+  - blackbox-runner
 sources:
   - PR #1811
   - PR #1775
   - commit cc3642ae2 (failed source)
-repro: run the unchanged test file on a private database in a loop with core dumps on (1 SIGSEGV in 1,500 runs here), or a script that does new PrismaClient twice then a first query (3 SIGSEGV in about 2,850 runs); inspect the core with gdb
+  - PR #2104 (recurrence, FLAKY fe640f0e, failed source 64ea62ef9b)
+repro: back-end/src/tests/blackbox/send-sms.blackbox.ts case 'only the app client exists before the first query' (red at 2 clients pre-fix); originally, run the unchanged test file on a private database in a loop with core dumps on (1 SIGSEGV in 1,500 runs here), or a script that does new PrismaClient twice then a first query (3 SIGSEGV in about 2,850 runs); inspect the core with gdb
 status: fixed
 ---
 
@@ -34,6 +37,10 @@ an empty per-file log and no assertion output. The handoff reported 59.7 GB of m
 runs. The unit runner recorded neither the child's exit code nor its signal: a signalled child became a bare 128,
 so the failure could not be classified. That means the CI failure's signal was never observed; SIGSEGV below is
 what the same test does when reproduced locally.
+
+Recurrence, 2026-11-15 (PR #2104 deploy, FLAKY `fe640f0e71f84ed0b3a7c9857f01ce76`): the `send-sms` blackbox domain
+died on attempt 1 with `RERUN: send-sms failed (2422ms); rerunning once`, 0 bytes of output, before its first stdout
+line and without its own catch output; attempt 2 passed. The runner at that source recorded no exit code or signal.
 
 ## Diagnosis
 
@@ -60,6 +67,19 @@ Earlier notes attribute the 2026-10-09 and 2026-11-07 seed-local crashes to the 
 re-examined here. `connectThenOpen`, which applies the same ordering to `seed-local`, merged through PR #1783
 shortly before this fix.
 
+Recurrence diagnosis (send-sms, 2026-11-15). `send-sms.support.ts` constructed its own `new PrismaClient()` at import,
+after its `notificationLlm` import (`../rose` → `computeCredentials`) had already loaded `providers/database.ts` and
+constructed the app client; Prisma 5.22's
+`LibraryEngine` constructor starts `instantiateLibrary()` at once, so both engines load asynchronously while
+`createTestUser()` runs the first connect. A loop of the domain's exact startup (every module `send-sms.blackbox.ts`
+imports, in order, then the fixture create/cleanup and disconnect) on the unchanged source crashed natively once in
+1,094 runs: rc 139, 0 bytes, 2986 ms. The core's main thread is in `__GI_getenv(name="PRISMA_QUERY_ENGINE_LIBRARY")`
+under `node::RealEnvStore::Get`. The writer was not caught (no thread was inside `setenv`), and a heap `__environ` alone
+does not prove the engine's write because `dotenv.config()` also adds variables, so the writer is inferred from the
+signature, the precondition below and the fix's result. A construction-counting child confirmed the precondition deterministically: 2 clients before the first
+query (`providers/database.ts:312`, `send-sms.support.ts:25`). This is the "multi-client blackbox process" exposure
+named below; the 2026-11-13 `demo-cache-offload` case was its first blackbox instance, fixed per file.
+
 ## Solution
 
 Connect one client before creating the next, so the one-time write finishes before any other client reads the
@@ -83,6 +103,23 @@ head never ran its tests because of a GitHub 504).
 
 Still exposed, not changed here: any other process that starts two Prisma clients, namely the backend's own
 startup (`providers/database.ts` plus `demoCacheStore.ts`) and multi-client blackbox processes.
+
+Recurrence fix (send-sms): the support file re-exports the app's `prisma` from `providers/database` instead of building
+a second client, so the process holds one client before its first query (deleting the redundant client rather than
+ordering two). Regression in the same domain: case `only the app client exists before the first query` spawns
+`tests/fixtures/send-sms-prisma-clients.child.ts`, which loads every module the domain imports with construction
+counted and must report exactly the `providers/database.ts` client; its control mode builds one extra client and must
+count it. Red on the pre-fix source (2 clients), green after (1). The `fe640f0e` quarantine marker was removed after
+5 consecutive passes of `bash scripts/run-blackbox-tests.sh send-sms`. The same startup loop on the fixed source:
+0 crashes in 3,006 runs (1 in 1,094 before; at that rate 3,006 clean runs alone would
+occur about 6% of the time unfixed, so the deterministic count carries the proof). The new case passed 5 consecutive
+runs alone and 8 concurrent runs at full CPU load (about 3.7 s against its 120 s limit), and fails on the pre-fix
+support file. Still exposed, not changed here: an independent review found five sibling domains that load
+`providers/database.ts` and build their own client at import: `send-sms-whatsapp-mirroring.blackbox.ts:20`,
+`proactive-sms.blackbox.ts:32`, `sms-webhook.blackbox.ts:55`, `sms-supervisor.blackbox.ts:65` and
+`whatsapp-webhook.blackbox.ts:58`. None has an observed failure, the assigned repair is scoped to send-sms, and each
+switch changes that suite's client semantics (query retry) and needs its own domain validation; the fixture child's
+construction count extends to them. 10k-agent behavior: none, test-only.
 
 ## Human feedback
 

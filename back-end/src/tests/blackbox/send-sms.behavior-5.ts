@@ -1,3 +1,6 @@
+import { execFile } from 'node:child_process';
+import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 import {
   captureToken,
   createNotifyAgent,
@@ -288,5 +291,36 @@ export async function testBoundary_directUnknownUserNoOutbound() {
   assert(
     surgeCalls.length === 0,
     `Expected 0 Surge calls for unknown user, got ` + `${surgeCalls.length}`
+  );
+}
+
+const PRISMA_CLIENTS_CHILD = resolve(__dirname, '../fixtures/send-sms-prisma-clients.child.ts');
+
+/** Where each PrismaClient was constructed while loading this domain's whole import graph. */
+async function domainPrismaClientSites(mode: 'domain' | 'control'): Promise<string[]> {
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    ['--import', 'tsx', PRISMA_CLIENTS_CHILD, mode],
+    { encoding: 'utf8', timeout: 120_000 }
+  );
+  return (JSON.parse(stdout.trim().split('\n').pop() ?? '') as { sites: string[] }).sites;
+}
+
+/**
+ * This process died after 2.4 s with no output (PR #2104 FLAKY fe640f0e): the support file built
+ * a second PrismaClient beside the app's, and its first connect's engine setenv() raced the other
+ * client's process.env reads (SIGSEGV in getenv). The domain must start with the app client only.
+ */
+export async function testStartup_onlyTheAppPrismaClientBeforeFirstQuery() {
+  // One child at a time: each cold-loads the domain's whole import graph beside the other cases.
+  const sites = await domainPrismaClientSites('domain');
+  const control = await domainPrismaClientSites('control');
+  assert(
+    control.length === sites.length + 1,
+    `control: the counter must see an extra client, got ${JSON.stringify(control)}`
+  );
+  assert(
+    sites.length === 1 && sites[0].includes('/src/providers/database.ts:'),
+    `send-sms must construct only the app's Prisma client, got ${JSON.stringify(sites)}`
   );
 }
