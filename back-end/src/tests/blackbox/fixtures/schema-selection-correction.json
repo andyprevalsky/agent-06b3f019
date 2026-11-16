@@ -1,0 +1,5 @@
+{
+  "content": "{\n  \"reasoning\": \"The goal asks for a single concrete number: Tokyo's population. One int field with a specific name is sufficient.\",\n  \"presentation\": { \"version\": 1, \"mode\": \"value\", \"field\": \"tokyo_population\", \"encoding\": \"text\" },\n  \"fields\": [\n    { \"name\": \"tokyo_population\", \"type\": \"int\", \"required\": true, \"properties\": [], \"constraints\": [] }\n  ]\n}",
+  "source": "Captured real OpenRouter continuation after the original native malformed completion and validator feedback; 2026-11-16T16:08:12Z",
+  "transport_sha256": "017db2400cc66f49d26885360cf7d47ad46df291f5e2a9a67d2004be00a80e57"
+}

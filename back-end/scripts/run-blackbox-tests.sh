@@ -509,7 +509,10 @@ BACKEND_PID=""
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 source "$ROOT_DIR/scripts/lib/port-probe.sh"
 cleanup() {
-  local result=$? cleaned=1
+  local result=$? cleaned=1 sandbox_receipt=''
+  if [[ "${BLACKBOX_SMOKE:-0}" == 1 && -n "${ARTIFACT_DIR:-}" ]]; then
+    sandbox_receipt="$ARTIFACT_DIR/sandbox-cleanup.json"
+  fi
   trap - EXIT INT TERM
   if [[ -n "$BACKEND_PID" ]]; then
     if cloudbench_terminate_tree_and_wait 5 "$BACKEND_PID"; then
@@ -527,7 +530,19 @@ cleanup() {
   # Only a backend this runner launched can have created stack-tagged sandboxes.
   # Self-contained under set -u: the trap must not depend on later setup.
   if [[ -n "$BACKEND_PID" && -n "${SANDBOX_STACK_ID:-}" ]]; then
-    (cd "$BACKEND_DIR" && ROSE_SANDBOX_STACK_ID="$SANDBOX_STACK_ID" timeout 60 npx tsx scripts/kill-stack-sandboxes.ts) || true
+    (cd "$BACKEND_DIR" && ROSE_SANDBOX_STACK_ID="$SANDBOX_STACK_ID" BLACKBOX_SANDBOX_CLEANUP_RECEIPT="$sandbox_receipt" timeout 60 npx tsx scripts/kill-stack-sandboxes.ts) || true
+  fi
+  if [[ -n "${ARTIFACT_DIR:-}" && -n "${RUN_ID:-}" ]]; then
+    python3 - "$ARTIFACT_DIR" "$RUN_ID" "$cleaned" <<'PY'
+import json, pathlib, sys
+directory, run_id, cleaned = sys.argv[1:]
+directory = pathlib.Path(directory)
+try:
+    sandbox = json.loads((directory / 'sandbox-cleanup.json').read_text())
+except (OSError, ValueError):
+    sandbox = None
+(directory / 'cleanup.json').write_text(json.dumps(dict(runId=run_id, backendTreeCleaned=cleaned == '1', sandbox=sandbox)))
+PY
   fi
   exit "$result"
 }

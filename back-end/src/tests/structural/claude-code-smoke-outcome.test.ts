@@ -1,7 +1,9 @@
 import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
+import { verifyStackSandboxes } from '../../../scripts/verify-stack-sandboxes';
 
 import {
   ClaudeSmokeUserActionSkip,
@@ -102,6 +104,68 @@ function blackboxUsesTheContract(): void {
 async function main(): Promise<void> {
   await userActionBlockIsSkipNeverPass();
   blackboxUsesTheContract();
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'e2b-completion-'));
+  const keys = [
+    'BLACKBOX_TEST_ARTIFACT_DIR',
+    'BLACKBOX_TEST_DOMAIN',
+    'BLACKBOX_SMOKE',
+    'BLACKBOX_TEST_RUN_ID',
+  ];
+  const previous = keys.map((key) => process.env[key]);
+  try {
+    process.env.BLACKBOX_TEST_ARTIFACT_DIR = directory;
+    process.env.BLACKBOX_TEST_DOMAIN = 'claude-code';
+    process.env.BLACKBOX_SMOKE = '1';
+    process.env.BLACKBOX_TEST_RUN_ID = 'fixture';
+    const results = [
+      { name: 'actual failure', passed: false, error: 'original error', duration: 5 },
+    ];
+    summarizeResults(results);
+    const file = path.join(directory, `claude-code-completion-${process.pid}.json`);
+    const completion = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepStrictEqual(completion.results, results);
+    assert.strictEqual(completion.runId, 'fixture');
+    assert.deepStrictEqual(completion.summary, { passed: 0, failed: 1, skipped: 0, exitCode: 1 });
+    assert.throws(() => summarizeResults(results), /EEXIST/);
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+    fs.rmSync(directory, { recursive: true });
+  }
+  assert.deepStrictEqual(
+    await verifyStackSandboxes('fixture', async () => ({ items: [], nextCursor: null })),
+    { roseStack: 'fixture', verified: true, remaining: [] }
+  );
+  assert.deepStrictEqual(
+    await verifyStackSandboxes('fixture', async () => ({
+      items: [
+        {
+          sandboxId: 'owned',
+          metadata: { roseStack: 'fixture' },
+          state: 'running',
+          startedAt: new Date(0),
+        },
+      ],
+      nextCursor: null,
+    })),
+    { roseStack: 'fixture', verified: false, remaining: ['owned'] }
+  );
+  await assert.rejects(
+    () =>
+      verifyStackSandboxes('fixture', async () => {
+        throw new Error('provider unavailable');
+      }),
+    /provider unavailable/
+  );
+  let pages = 0;
+  const incomplete = await verifyStackSandboxes('fixture', async () => {
+    pages += 1;
+    return { items: [], nextCursor: 'unseen-tail' };
+  });
+  assert.strictEqual(incomplete.verified, false);
+  assert.strictEqual(pages, 10);
   console.log('PASS  claude-code smoke outcome: user-action SKIP is never a PASS');
 }
 

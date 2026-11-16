@@ -198,6 +198,12 @@ def report_case(name: str, row: dict, folder: Path) -> None:
 
 def run_step(name: str, spec: dict, root: Path, folder: Path) -> dict:
     from run_deploy_pipeline import LANE_TOKEN_ENV
+    import deploy_test_e2b as e2b
+    collect_e2b = (name == 'e2b-smoke' and spec.get('command') == e2b.COMMAND
+                   and spec.get('cwd', '.') == '.' and spec.get('aggregate') is True)
+    before = e2b.artifacts(root) if collect_e2b else set()
+    progress_file = Path(progress_path(folder))
+    progress_before = progress_file.read_bytes() if collect_e2b and progress_file.is_file() else b''
     log = folder / (hashlib.sha256(name.encode()).hexdigest() + '.log')
     env = {**os.environ, **spec.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1',
            # Test runners append per-unit rows here as they finish (deploy_gate_progress).
@@ -212,8 +218,14 @@ def run_step(name: str, spec: dict, root: Path, folder: Path) -> dict:
     status = 'PASS' if code == 0 else 'FAIL'
     if code not in (0, 1) or timeout or cancelled or lingering or (code and spec.get('aggregate')):
         status = 'UNVERIFIED'
+    completion = None
+    if collect_e2b and code == 1 and not (timeout or cancelled or lingering):
+        completion = e2b.completed_failure(root, before, progress_file, progress_before, started, time.time())
+        if completion is not None:
+            status = 'FAIL'
     raw = log.read_bytes()
     return {'status': status, 'native_exit': code, 'command': spec['command'],
+            **({'aggregate_completion': completion} if completion is not None else {}),
             'started_at': started, 'finished_at': time.time(), 'timed_out': timeout,
             'cancelled': cancelled, 'lingering_group': lingering, 'log': str(log),
             'sha256': hashlib.sha256(raw).hexdigest(), 'tail': raw[-65536:].decode(errors='replace')}

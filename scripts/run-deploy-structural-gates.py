@@ -438,6 +438,8 @@ GATES = (
     Gate("deploy-test-user-omission", ("python3", "scripts/tests/deploy-test-user-omission.test.py")),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
+    Gate("deploy-test-e2b-completion", ("python3", "scripts/tests/deploy-test-e2b-completion.test.py")),
+    Gate("deploy-e2b-termination-producer", ("node", "scripts/tests/deploy-e2b-termination-producer.test.cjs")),
     Gate("deploy-test-semantic", ("python3", "scripts/tests/deploy-test-semantic.test.py")),
     Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
     Gate("deploy-cli", ("python3", "scripts/tests/deploy-cli.test.py")),

@@ -1,0 +1,23 @@
+{
+  "runId": "1794849502-4724-22082",
+  "requested": [
+    "claude-code"
+  ],
+  "domainConcurrency": 1,
+  "caseConcurrency": 30,
+  "exclusiveDomains": [],
+  "timeoutMs": 900000,
+  "passed": 0,
+  "failed": 1,
+  "results": [
+    {
+      "domain": "claude-code",
+      "passed": false,
+      "aborted": false,
+      "flaky": false,
+      "attempts": 2,
+      "duration": 109499,
+      "logPath": "/home/runner/_work/rose/rose/.context/deploy-e2b-smoke/20261116T171822Z-4664/claude-code.log"
+    }
+  ]
+}

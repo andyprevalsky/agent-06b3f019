@@ -13,6 +13,8 @@
  * scripts/devbox-teardown.sh uses both to tear down exactly one devbox's sandboxes.
  */
 import 'dotenv/config';
+import { writeFileSync } from 'node:fs';
+import { verifyStackSandboxes } from './verify-stack-sandboxes';
 import { roseSandboxIdentity } from '../src/providers/e2bSandboxCreate';
 import {
   defaultSandboxReaperDeps,
@@ -53,6 +55,14 @@ async function main(): Promise<void> {
   console.log(
     `kill-stack-sandboxes: ${dryRun ? 'would kill' : 'killed'} ${killed} sandbox(es) of ${roseStack}`
   );
+  const receipt = process.env.BLACKBOX_SANDBOX_CLEANUP_RECEIPT;
+  if (receipt && !dryRun) {
+    writeFileSync(
+      receipt,
+      JSON.stringify(await verifyStackSandboxes(roseStack, defaultSandboxReaperDeps.list)),
+      { flag: 'wx' }
+    );
+  }
 }
 
 main()
