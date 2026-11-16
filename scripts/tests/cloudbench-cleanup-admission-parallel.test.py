@@ -14,6 +14,8 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import WaitTimeout, wait_until
 SOURCE = Path(os.environ.get('CLEANUP_PARALLEL_SOURCE', ROOT / 'scripts/run-bench-fleet'))
 MB = 1048576
 SITE = r'''
@@ -41,6 +43,15 @@ if sys.argv[0]=='-' and len(sys.argv)>=9:
                 if time.monotonic()>until:raise TimeoutError('fixture commit barrier expired')
                 time.sleep(.01)
     os.fsync=fsync
+    native_sleep=time.sleep;backoffs=0
+    def sleep(seconds):
+        # Record the allocator's own busy backoff (retry_pause) so tests observe a re-evaluation.
+        global backoffs
+        if sys._getframe(1).f_code.co_name=='retry_pause':
+            backoffs+=1
+            (root/'events'/('backoff-'+str(os.getpid())+'-'+str(backoffs)+'.json')).write_text(json.dumps(dict(pid=os.getpid())))
+        native_sleep(seconds)
+    time.sleep=sleep
     def allocate(fd,offset,size):
         global attempts,allocation_fd
         attempts+=1;info=os.fstat(fd)
@@ -99,6 +110,7 @@ class Fixture:
         self.admission = Path('/tmp') / ('rose-cloudbench-cleanup-admission-' + str(os.getuid())) / str(self.device)
         self.state = self.admission / 'state.json'
         self.children = []
+        self.stderr_paths = {}
         self.lock = None
         self.budget = budget
         (self.root/'budget').write_text(str(budget))
@@ -138,30 +150,47 @@ class Fixture:
         if self.cohort:
             env.update(RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(self.cohort_path),
                        RUN_BENCH_CAMPAIGN_JOB_ID=f'r001-j{index:04}', RUN_BENCH_CAMPAIGN_COHORT='c001')
-        process = subprocess.Popen(['bash','-c',self.command,'fixture',str(parent/'cleanup-disk-reserve')],
-                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                   start_new_session=True)
+        # stderr goes to a file so a test can observe the controller's progress while it runs.
+        stderr_path = self.root / ('stderr-' + str(len(self.children)) + '.log')
+        with stderr_path.open('w') as stderr:
+            process = subprocess.Popen(['bash','-c',self.command,'fixture',str(parent/'cleanup-disk-reserve')],
+                                       env=env, stdout=subprocess.PIPE, stderr=stderr, text=True,
+                                       start_new_session=True)
+        self.stderr_paths[process] = stderr_path
         self.children.append(process)
         return process
+
+    def stderr(self, p):
+        return self.stderr_paths[p].read_text()
+
+    def wait_capacity_retries(self, p, count=2, timeout=20):
+        # Each capacity-wait retry prints one ⏳ line before its retry sleep; an
+        # exit (refusal) ends the wait early so the caller's assertion reports it.
+        # Count bytes: a read racing a write must not decode half of a multi-byte ⏳.
+        wait_until(lambda: p.poll() is not None or self.stderr_paths[p].read_bytes().count('⏳'.encode()) >= count,
+                   timeout=timeout, description=str(count) + ' capacity-wait retries or an exit')
 
     def entries(self):
         return [json.loads(p.read_text())for p in (self.root/'events').glob('entry-*.json')]
 
+    def backoff_pids(self):
+        # The pid is in the name, so a backoff file that is still being written is never parsed.
+        return [int(p.name.split('-')[1]) for p in (self.root/'events').glob('backoff-*.json')]
+
     def wait_entries(self, count, timeout=4):
-        until = time.monotonic()+timeout
-        while time.monotonic()<until:
+        def enough():
             rows=self.entries()
-            if len({r['pid'] for r in rows})>=count:return rows
-            time.sleep(.01)
-        return self.entries()
+            return rows if len({r['pid'] for r in rows})>=count else None
+        try:return wait_until(enough,timeout=timeout,description=str(count)+' allocator entries')
+        except WaitTimeout:return self.entries()
 
     def release(self):
         (self.root/'release').touch()
         (self.root/'commit-release').touch()
 
     def result(self,p):
-        out,err=p.communicate(timeout=15)
-        return p.returncode,out,err
+        out,_=p.communicate(timeout=15)
+        return p.returncode,out,self.stderr(p)
 
     def close(self):
         self.release()
@@ -199,9 +228,8 @@ class ParallelReservations(unittest.TestCase):
     def test_allocated_pending_bytes_do_not_force_an_artificial_wave(self):
         f=Fixture(self,budget=6)
         peers=[f.spawn(i,'postallocate')for i in range(3)]
-        until=time.monotonic()+4
-        while len(list((f.root/'events').glob('allocated-*')))<3 and time.monotonic()<until:
-            time.sleep(.01)
+        wait_until(lambda:len(list((f.root/'events').glob('allocated-*')))>=3,timeout=4,
+                   description='three physical allocations before commit')
         self.assertEqual(len(list((f.root/'events').glob('allocated-*'))),3)
         self.assertEqual(sum((f.root/f'job{i}/cleanup-disk-reserve').stat().st_blocks*512 for i in range(3)),3*MB)
         self.assertEqual(len(json.loads(f.state.read_text())['inflight']),3)
@@ -223,7 +251,11 @@ class ParallelReservations(unittest.TestCase):
         children=[f.spawn(i,'barrier')for i in range(3)]
         rows=f.wait_entries(2)
         self.assertEqual(len({r['pid']for r in rows}),2)
-        time.sleep(.15)
+        # The third allocator decides while both peers still hold the allocation barrier:
+        # it re-evaluates against the pending liability twice (busy backoff) or refuses.
+        held={r['pid']for r in rows}
+        wait_until(lambda:sum(pid not in held for pid in f.backoff_pids())>=2 or any(p.poll() is not None for p in children),
+                   timeout=10,description='the third allocator to back off twice against pending liability or refuse')
         self.assertEqual(len({r['pid']for r in f.entries()}),2,'third allocator overspent pending physical liability')
         f.release()
         results=[f.result(p)for p in children]
@@ -339,10 +371,8 @@ class ParallelReservations(unittest.TestCase):
     def test_headroom_consumed_after_allocation_rolls_back_and_waits_instead_of_failing(self):
         f=Fixture(self,budget=2)
         waiter=f.spawn(0,'consume-after-allocate',wait=30,headroom=1)
-        until=time.monotonic()+8
-        while not(f.root/'consumed').exists() and time.monotonic()<until:time.sleep(.02)
-        self.assertTrue((f.root/'consumed').exists(),'fixture never reached physical allocation')
-        time.sleep(2.5)
+        wait_until(lambda:(f.root/'consumed').exists(),timeout=8,description='fixture reaching physical allocation')
+        f.wait_capacity_retries(waiter)
         self.assertIsNone(waiter.poll(),'reserve shortage after allocation failed the controller instead of waiting')
         self.assertFalse((f.root/'job0/cleanup-disk-reserve').exists(),'rolled-back reserve still holds blocks while waiting')
         self.assertFalse(json.loads(f.state.read_text())['inflight'])
@@ -360,7 +390,7 @@ class ParallelReservations(unittest.TestCase):
         holder=f.spawn(0);code,out,err=f.result(holder);self.assertEqual(code,0,out+err)
         held=f.root/'job0/cleanup-disk-reserve';self.assertEqual(held.stat().st_blocks*512,MB)
         waiter=f.spawn(1,wait=30)
-        time.sleep(2.5)
+        f.wait_capacity_retries(waiter)
         self.assertIsNone(waiter.poll(),'standalone reserve shortage refused instead of waiting for peers')
         self.assertFalse((f.root/'job1/cleanup-disk-reserve').exists())
         held.unlink()  # the peer fleet's finalizer releases its exact reserve
