@@ -1702,7 +1702,7 @@ def test_output_validation_feedback_is_private_nonexecuted_runtime_context():
         assert "No action was executed" in wire
 
 
-async def test_max_steps_return_declares_best_effort_and_final_verifier():
+async def test_max_steps_return_declares_best_effort_and_final_verifier(_release_status="RELEASED", _provider_state=None, _foreign=False):
     """Execute max-step exit: final verifier evidence and partial text reach caller."""
     import ast
     import copy
@@ -1751,6 +1751,7 @@ async def test_max_steps_return_declares_best_effort_and_final_verifier():
                                     "approval_type": "manual_pause",
                                     "task_id": "task-1",
                                     "reasoning_messages": ["Partial heading evidence"],
+                                    "phone_cleanup_leases": [{"user_id": "foreign-user" if _foreign else "user-1", "task_id": "task-1", "lease_id": "cap-lease"}],
                                 }
                             ),
                             mode="eval",
@@ -1773,7 +1774,15 @@ async def test_max_steps_return_declares_best_effort_and_final_verifier():
         attempts.append(True)
         raise AssertionError("unexpected max-step fixture network")
 
-    setup_mock({"/api/browser-session/close": {"status": 500, "json": {}}})
+    from _test_utils import setup_mock_fn
+    wire_paths = []
+    def cap_backend(request):
+        wire_paths.append(request.url.path)
+        if request.url.path == "/api/iphone/leases/cap-lease/release":
+            return httpx.Response(200, json={"lease": {"id": "cap-lease", "status": _release_status}, **({"phone": {"state": _provider_state}} if _provider_state else {})})
+        return httpx.Response(500, json={})
+    import httpx
+    setup_mock_fn(cap_backend)
     try:
         with patch.object(socket.socket, "connect", forbid), patch.object(handler, "MAX_ITERATIONS", 0):
             result = await namespace[fixture.name]()
@@ -1787,6 +1796,14 @@ async def test_max_steps_return_declares_best_effort_and_final_verifier():
             assert context.await_args.kwargs["browser_state"]["url"] == "https://example.com/login"
             model.assert_not_awaited()
             close.assert_awaited_once()
+            assert wire_paths.count('/api/iphone/leases/cap-lease/release') == (0 if _foreign else 1), 'Real cap epilogue retained phone lease'
+            if _foreign:
+                assert 'phone' not in result.get('browser_cleanup', {})
+                return
+            assert result['browser_cleanup']['phone'] == {
+                'lease_release': 'confirmed' if _release_status == 'RELEASED' else 'unconfirmed',
+                'provider_cleanup': 'pending' if _provider_state == 'cleanup_pending' else 'not_reported',
+            }, 'Caller lost terminal phone cleanup receipt'
     finally:
         assert not attempts, "unexpected network, including swallowed attempts"
 
@@ -28663,13 +28680,22 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
         "passwords": [],
     }
     save_mock = AsyncMock()
+    from domains.spawn_browser_agent_v3.phone import _retain_phone_lease
+    from domains.spawn_browser_agent_v3.handler import drain_background_browser_cleanups
+    from _test_utils import setup_mock_fn
+    release_paths = []
+    def response(request):
+        release_paths.append(request.url.path)
+        return httpx.Response(200, json={"lease": {"id": "error-lease", "status": "RELEASED"}})
+    import httpx
+    setup_mock_fn(response)
+    async def init_with_custody(*args, **kwargs):
+        _retain_phone_lease("user-1", "task-1", {"id": "error-lease", "browserTaskId": "task-1", "status": "ACTIVE"})
+        return session_data
     with (
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.init_browser_session",
-            AsyncMock(return_value=session_data),
-        ),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", init_with_custody),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
@@ -28692,6 +28718,8 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
         else:
             raise AssertionError("expected missing cdp_url to raise")
 
+    await drain_background_browser_cleanups()
+    assert release_paths.count("/api/iphone/leases/error-lease/release") == 1
     completions = [c for c in _completion_messages(save_mock) if c["title"] == "Task Failed"]
     assert len(completions) == 1, _completion_messages(save_mock)
     assert completions[0]["message"].startswith(
@@ -28753,7 +28781,7 @@ async def test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner(
     assert "- go to instacart instead" in failed[0]["message"], failed[0]["message"]
 
 
-async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_url="about:blank", require_trace=False, unconfirmed_disconnect=False, setup_failure=False):
+async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_url="about:blank", require_trace=False, unconfirmed_disconnect=False, setup_failure=False, phone_custody=False):
     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
 
     Agent 3efa7cae: a deploy stopped the worker machine while a browser task
@@ -28825,6 +28853,9 @@ async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_u
     executed_steps = []
 
     async def execute_step_while_deploy_lands(*args, **kwargs):
+        if phone_custody:
+            from domains.spawn_browser_agent_v3.phone import _retain_phone_lease
+            _retain_phone_lease("user-1", "task-1", {"id": "checkpoint-lease", "browserTaskId": "task-1", "status": "ACTIVE"})
         executed_steps.append(args[2] if len(args) > 2 else kwargs.get("unified_action"))
         env.worker_shutdown()
         return {"success": True, "message": "Scrolled down", "current_url": final_url}
@@ -28954,6 +28985,10 @@ async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_u
     assert result["session_id"] == "session-1" and result["cdp_url"] == "ws://live", result
     assert result["task_id"] == "task-1", result
     close_mock.assert_not_awaited()
+    if phone_custody:
+        assert result["phone_cleanup_leases"] == [{"user_id": "user-1", "task_id": "task-1", "lease_id": "checkpoint-lease"}]
+        assert "phone" not in result.get("browser_cleanup", {})
+        assert not any("/api/iphone/" in r["url"] for r in get_captured_requests())
     assert result["current_url"] == final_url, result
     assert final_url in result.get("visited_urls", []), result
     turn_tool_calls = [
@@ -28995,6 +29030,7 @@ async def test_pre_dom_multiplexer_failure_never_acknowledges_cleanup():
 
 async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
     await _exercise_first_step_shutdown()
+    await _exercise_first_step_shutdown(phone_custody=True)
 
 
 async def test_neutral_initialization_reaches_first_browser_step():
@@ -31526,7 +31562,7 @@ async def test_manager_preserves_business_outcome_and_cleanup_receipt():
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from tools.base import MessageStatus
 
-    receipt = {"status": "failed", "session_id": "session-1", "error": "owned close HTTP 500"}
+    receipt = {"status": "failed", "session_id": "session-1", "error": "owned close HTTP 500", "phone": {"lease_release": "unconfirmed", "provider_cleanup": "pending"}}
     for scenario in ("success", "refusal", "cancelled"):
         for failed in (False, True):
             result = {
@@ -31575,12 +31611,23 @@ async def test_manager_preserves_business_outcome_and_cleanup_receipt():
             assert final.metadata["task_id"] == "task-1"
             assert final.status == (MessageStatus.ERROR if scenario == "cancelled" else MessageStatus.FINISHED)
             if scenario != "cancelled":
-                assert final.message == result["message"]
+                assert final.message.startswith(result["message"])
                 assert final.metadata["success"] is (scenario == "success")
             if scenario == "refusal":
                 assert final.metadata["authAssistanceDeclined"] is True
             if failed:
                 assert final.metadata["browser_cleanup"] == receipt, (scenario, final.metadata)
+                assert "Phone cleanup receipt: lease release unconfirmed; provider cleanup pending." in serialized["message"]
+                from helpers.llm import convert_context_to_messages
+                context = [
+                    {"role": "ASSISTANT", "text": "", "timestamp": "2026-11-16T00:00:00Z", "metadata": {
+                        "tool_calls": [{"tool": "spawn_browser_agent", "tool_call_id": "tool-1", "arguments": {"goal": "Owned manager fixture"}}]}},
+                    {"role": "TOOL", "text": final.message, "timestamp": "2026-11-16T00:00:01Z", "metadata": {
+                        **final.metadata, "toolCallId": "tool-1", "toolStatus": final.status.value}},
+                ]
+                rendered = convert_context_to_messages(context, include_assistant=True)
+                assert any(row['role'] == 'tool' and 'lease release unconfirmed; provider cleanup pending' in row['content'] for row in rendered)
+
             else:
                 assert "browser_cleanup" not in final.metadata
 
@@ -38767,6 +38814,236 @@ async def test_playwright_focus_diagnostics_preserve_failure_and_cancellation():
         raise AssertionError("cancellation was swallowed")
 
 
+
+async def _exercise_terminal_phone_custody(*, terminal=True, local_only=False, paused=None, foreign=False, release_ok=True, provider_state=None):
+    """A capped child ends while its root and shared browser session remain live."""
+    import httpx
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3 import phone
+    from domains.spawn_browser_agent_v3.service_activity_queue import browser_cleanup_owners
+
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://fixture.invalid', api_key='fixture'))
+    calls = []
+    def transport(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith('/availability/task-owned'):
+            return httpx.Response(200, json={'enabled': True, 'source': 'ready'})
+        if request.url.path.endswith('/interactions/task-owned'):
+            return httpx.Response(200, json={'lease': {'id': 'lease-owned', 'agentId': 'agent-owned',
+                'browserTaskId': 'foreign-task' if foreign else 'task-owned', 'status': 'ACTIVE'}})
+        if request.url.path.endswith('/heartbeat'):
+            return httpx.Response(200, json={})
+        if request.url.path.endswith('/leases/lease-owned/release'):
+            return httpx.Response(200, json={'lease': {'id': 'lease-owned', 'status': 'RELEASED' if release_ok else 'ACTIVE'}, **({'phone': {'state': provider_state}} if provider_state else {})})
+        raise AssertionError(f'Unexpected request {request.method} {request.url.path}')
+
+    from _test_utils import setup_mock_fn
+    setup_mock_fn(transport)
+    async with httpx.AsyncClient() as client:
+        with browser_cleanup_owners(), \
+             patch.object(h, 'load_config', return_value=config), \
+             patch.object(h, 'save_browser_action_message', AsyncMock()) as saved, \
+             patch.object(h, 'acknowledge_browser_activity_cleanup', AsyncMock()):
+            await phone.observe_phone(config, 'user-owned', 'task-owned', client=client)
+            before = len(calls)
+            await h._schedule_browser_cleanup(agent_id='agent-owned', task_id='task-owned', user_id='user-owned',
+                browser_url='', browser_session_metadata={}, input_page=None, start_url='', cursor_streamer=None,
+                interaction_layer_task=None, humanizer=None, browser_network_recorder=None,
+                network_recorder_task=None, browser_recorder=None, dom_service=None, playwright_browser=None,
+                playwright_instance=None, playwright_driver_pid=None, emit_task_terminal=terminal,
+                local_only=local_only, paused_session_id=paused)
+            expected = [('POST', '/api/iphone/leases/lease-owned/release')] if terminal and not local_only and not paused and not foreign else []
+            assert calls[before:] == expected, 'Terminal browser cleanup left its recorded phone lease held'
+            if expected and not release_ok:
+                assert any(c.kwargs.get('extra_metadata', {}).get('browser_cleanup') ==
+                    {'phone': {'lease_release': 'unconfirmed', 'provider_cleanup': 'not_reported'}} for c in saved.await_args_list)
+            elif expected:
+                terminal_message = saved.await_args_list[-1].kwargs
+                assert terminal_message['status'].value == 'FINISHED'
+                assert terminal_message['title'] == 'Browser Session Closed'
+                assert terminal_message['extra_metadata']['browser_cleanup']['phone'] == {
+                    'lease_release': 'confirmed',
+                    'provider_cleanup': 'complete' if provider_state == 'cleanup_complete' else 'pending' if provider_state == 'cleanup_pending' else 'not_reported',
+                }
+                before = len(calls)
+                await phone.release_retained_phone_leases(config, 'user-owned', 'task-owned')
+                assert len(calls) == before, 'Confirmed release was submitted again'
+
+
+
+async def test_terminal_browser_cleanup_releases_only_recorded_phone_custody():
+    await _exercise_terminal_phone_custody()
+    await _exercise_terminal_phone_custody(provider_state="cleanup_complete")
+    await _exercise_terminal_phone_custody(provider_state="cleanup_pending")
+
+
+async def test_terminal_phone_cleanup_preserves_resumable_and_foreign_custody():
+    await _exercise_terminal_phone_custody(terminal=False)
+    await _exercise_terminal_phone_custody(local_only=True)
+    await _exercise_terminal_phone_custody(paused='resumable-session')
+    await _exercise_terminal_phone_custody(foreign=True)
+
+
+async def test_terminal_phone_cleanup_surfaces_unconfirmed_release():
+    await _exercise_terminal_phone_custody(release_ok=False)
+
+
+async def test_terminal_phone_cleanup_tracks_acquisition_before_failed_command():
+    import httpx
+    from _test_utils import setup_mock_fn
+    from domains.spawn_browser_agent_v3 import phone
+    from domains.spawn_browser_agent_v3.service_activity_queue import browser_cleanup_owners
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://fixture.invalid', api_key='fixture'))
+    calls = []
+    def transport(request):
+        calls.append((request.method, request.url.path))
+        path = request.url.path
+        if '/availability/' in path:
+            return httpx.Response(200, json={'enabled': True, 'source': 'ready'})
+        if path.endswith('/interactions/task-owned'):
+            return httpx.Response(200, json={'lease': {'id': 'new-lease', 'browserTaskId': 'task-owned', 'status': 'ACTIVE'}})
+        if path.endswith('/operations'):
+            return httpx.Response(200, json={'operation': {'status': 'FAILED'}})
+        if path.endswith('/release'):
+            return httpx.Response(200, json={'lease': {'id': 'new-lease', 'status': 'RELEASED'}})
+        raise AssertionError(path)
+    setup_mock_fn(transport)
+    with browser_cleanup_owners():
+        async with httpx.AsyncClient() as client:
+            result = await phone.execute_phone({'mode': 'operation', 'operation': 'screen.text', 'args': {}},
+                config=config, user_id='user-owned', agent_id='agent-owned', task_id='task-owned',
+                decision_id='decision', snapshot={'enabled': True, 'interaction': {}}, client=client)
+            assert result['success'] is False
+        before = len(calls)
+        await phone.release_retained_phone_leases(config, 'user-owned', 'task-owned')
+        assert calls[before:] == [('POST', '/api/iphone/leases/new-lease/release')]
+
+
+async def test_phone_custody_resume_keeps_exact_ids_without_model_projection():
+    from domains.spawn_browser_agent_v3 import handler as h, phone, resume_store
+    from domains.spawn_browser_agent_v3.service_activity_queue import browser_cleanup_owners
+    history = SimpleNamespace(get_entries=lambda: [])
+    with browser_cleanup_owners():
+        phone._retain_phone_lease('user', 'task', {'id': 'lease', 'browserTaskId': 'task', 'status': 'ACTIVE'})
+        state = h._browser_resume_continuity_state(action_history=history, visited_urls=[], verifier_checkpoints=[])
+        assert state['phone_cleanup_leases'] == [{'user_id': 'user', 'task_id': 'task', 'lease_id': 'lease'}]
+        restored = await resume_store.hydrate_resume_context(agent_id='agent', resume_state=state)
+        assert restored['phone_cleanup_leases'] == state['phone_cleanup_leases']
+        phone._retain_phone_lease('user', 'task', {'id': 'lease', 'browserTaskId': 'task', 'status': 'RELEASED'})
+        cleared = h._browser_resume_continuity_state(action_history=history, visited_urls=[], verifier_checkpoints=[])
+        assert 'phone_cleanup_leases' not in cleared
+
+
+async def test_actual_cap_reports_pending_and_unknown_phone_cleanup_to_parent():
+    await test_max_steps_return_declares_best_effort_and_final_verifier(_provider_state='cleanup_pending')
+    await test_max_steps_return_declares_best_effort_and_final_verifier(_release_status='ACTIVE')
+    await test_max_steps_return_declares_best_effort_and_final_verifier(_foreign=True)
+
+
+async def test_phone_custody_private_resume_preserves_exact_bindings():
+    import tempfile
+    from domains.spawn_browser_agent_v3 import handler as h, phone, resume_store
+    from domains.spawn_browser_agent_v3.service_activity_queue import browser_cleanup_owners
+    class History:
+        def get_entries(self): return []
+        def secret_redaction_state(self): return {'secret_redaction_refs': {'secret': 'lease-secret'}}
+        def model_visible_value(self, value):
+            return json.loads(json.dumps(value).replace('lease-secret', '[masked]'))
+    with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {
+        'TRACE_ARCHIVE_LOCAL_ROOT': root, 'TRACE_ARCHIVE_BACKEND': 'local',
+        'TRACE_ARCHIVE_ENCRYPTION_KEY_B64': base64.b64encode(b'0' * 32).decode(),
+    }):
+        with browser_cleanup_owners():
+            phone._retain_phone_lease('user', 'task', {'id': 'lease-secret', 'browserTaskId': 'task', 'status': 'ACTIVE'})
+            state = h._browser_resume_continuity_state(action_history=History(), visited_urls=[], verifier_checkpoints=[])
+            assert state['phone_cleanup_leases'][0]['lease_id'] == 'lease-secret'
+            carried = {}
+            h._copy_browser_resume_continuity_fields(state, carried)
+            assert carried['phone_cleanup_leases'] == state['phone_cleanup_leases']
+            pointer = await resume_store.persist_resume_context(agent_id='agent', task_id='task', state=carried, force_private=True)
+            assert 'phone_cleanup_leases' not in pointer
+        with browser_cleanup_owners():
+            restored = await resume_store.hydrate_resume_context(agent_id='agent', resume_state=pointer)
+            assert restored['phone_cleanup_leases'] == state['phone_cleanup_leases']
+            phone.restore_phone_cleanup_leases(restored, 'foreign-user', 'task')
+            phone.restore_phone_cleanup_leases(restored, 'user', 'foreign-task')
+            from domains.spawn_browser_agent_v3.service_activity_queue import get_browser_cleanup_owners
+            assert not get_browser_cleanup_owners().phone_leases
+            phone.restore_phone_cleanup_leases(restored, 'user', 'task')
+            assert get_browser_cleanup_owners().phone_leases == {('user', 'task'): {'lease-secret'}}
+
+
+async def test_actual_phone_custody_success_and_auth_pause():
+    from _test_utils import setup_mock_fn
+    from domains.spawn_browser_agent_v3 import handler
+    import httpx
+    paths = []
+    def backend(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith('/leases/lifecycle-lease/release'):
+            return httpx.Response(200, json={'lease': {'id': 'lifecycle-lease', 'status': 'RELEASED'},
+                'phone': {'state': 'cleanup_pending'}})
+        return httpx.Response(200, json={})
+    setup_mock_fn(backend)
+    binding = {'phone_cleanup_leases': [{'user_id': 'user-1', 'task_id': 'task-1', 'lease_id': 'lifecycle-lease'}]}
+    actor, _ = await _exercise_browser_resume_user_input(resume_overrides=binding)
+    assert paths.count('/api/iphone/leases/lifecycle-lease/release') == 1
+    assert actor.activity_result['browser_cleanup']['phone'] == {'lease_release': 'confirmed', 'provider_cleanup': 'pending'}
+    paths.clear()
+    result = await _exercise_browser_resume_user_input(native_auth=True, resume_overrides=binding)
+    assert result['status'] == 'awaiting_auth_assistance'
+    assert '/api/iphone/leases/lifecycle-lease/release' not in paths
+    assert result['phone_cleanup_leases'] == binding['phone_cleanup_leases']
+
+
+async def test_phone_cleanup_response_contract_and_no_pending_retry():
+    import httpx
+    from _test_utils import setup_mock_fn
+    from domains.spawn_browser_agent_v3 import phone
+    from domains.spawn_browser_agent_v3.service_activity_queue import browser_cleanup_owners, get_browser_cleanup_owners
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://fixture.invalid', api_key='fixture'))
+    for payload, code in [({}, 200), ({'lease': {'id': 'wrong', 'status': 'RELEASED'}}, 200),
+        ({'lease': {'id': 'lease', 'status': 'ACTIVE'}}, 200), ({}, 503),
+        ({'lease': {'id': 'lease', 'status': 'RELEASED'}, 'phone': {'state': 'cleanup_pending'}}, 200),
+        ({'lease': {'id': 'lease', 'status': 'RELEASED'}, 'phone': {'state': 'cleanup_complete'}}, 200)]:
+        calls = []
+        def response(request):
+            calls.append(request.url.path)
+            assert request.method == 'POST' and request.url.path == '/api/iphone/leases/lease/release'
+            return httpx.Response(code, json=payload)
+        setup_mock_fn(response)
+        with browser_cleanup_owners():
+            phone._retain_phone_lease('user', 'task', {'id': 'lease', 'status': 'ACTIVE', 'browserTaskId': 'task'})
+            good = code == 200 and payload.get('lease', {}).get('id') == 'lease' and payload['lease']['status'] == 'RELEASED'
+            if good:
+                await phone.release_retained_phone_leases(config, 'user', 'task')
+                await phone.release_retained_phone_leases(config, 'user', 'task')
+                assert calls == ['/api/iphone/leases/lease/release']
+            else:
+                with pytest.raises(RuntimeError, match='not confirmed'):
+                    await phone.release_retained_phone_leases(config, 'user', 'task')
+            receipt = get_browser_cleanup_owners().phone_cleanup[('user', 'task')]
+            assert receipt['lease_release'] == ('confirmed' if good else 'unconfirmed')
+            if good:
+                assert receipt['provider_cleanup'] == ('pending' if payload['phone']['state'] == 'cleanup_pending' else 'complete')
+                phone._retain_phone_lease('user', 'task', {'id': 'lease-B', 'status': 'ACTIVE', 'browserTaskId': 'task'})
+                owners = get_browser_cleanup_owners()
+                assert owners.phone_leases[('user', 'task')] == {'lease-B'}
+                assert ('user', 'task') not in owners.phone_cleanup, 'Prior lease release must not describe reacquired custody'
+                from domains.spawn_browser_agent_v3 import handler as h
+                with patch.object(h, 'save_browser_action_message', AsyncMock()), patch.object(h, 'acknowledge_browser_activity_cleanup', AsyncMock()):
+                    await h._schedule_browser_cleanup(agent_id='agent', task_id='task', user_id='user',
+                        browser_url='', browser_session_metadata={}, input_page=None, start_url='', cursor_streamer=None,
+                        interaction_layer_task=None, humanizer=None, browser_network_recorder=None,
+                        network_recorder_task=None, browser_recorder=None, dom_service=None, playwright_browser=None,
+                        playwright_instance=None, playwright_driver_pid=None, emit_task_terminal=False,
+                        paused_session_id='resumable-session')
+                assert calls == ['/api/iphone/leases/lease/release']
+                assert owners.phone_leases[('user', 'task')] == {'lease-B'}
+                assert ('user', 'task') not in owners.phone_cleanup
+
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     from browser_operational_projection_fixtures import (
@@ -38776,6 +39053,15 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    await r.record_async("phone_cleanup_response_contract", test_phone_cleanup_response_contract_and_no_pending_retry)
+    await r.record_async("actual_phone_success_auth", test_actual_phone_custody_success_and_auth_pause)
+    await r.record_async("actual_cap_phone_cleanup_receipts", test_actual_cap_reports_pending_and_unknown_phone_cleanup_to_parent)
+    await r.record_async("private_phone_resume", test_phone_custody_private_resume_preserves_exact_bindings)
+    await r.record_async("phone_custody_resume", test_phone_custody_resume_keeps_exact_ids_without_model_projection)
+    await r.record_async("terminal_phone_failed_command", test_terminal_phone_cleanup_tracks_acquisition_before_failed_command)
+    await r.record_async("terminal_browser_phone_custody", test_terminal_browser_cleanup_releases_only_recorded_phone_custody)
+    await r.record_async("terminal_phone_resumable_foreign", test_terminal_phone_cleanup_preserves_resumable_and_foreign_custody)
+    await r.record_async("terminal_phone_release_unconfirmed", test_terminal_phone_cleanup_surfaces_unconfirmed_release)
     await r.record_async("closed_page_waits_for_authoritative_focus_recovery", test_closed_page_waits_for_authoritative_focus_recovery)
     await r.record_async("playwright_focus_fallback_diagnostics", test_playwright_focus_fallback_diagnostics)
     r.record("playwright_focus_diagnostics_private_and_bounded", test_playwright_focus_diagnostics_private_and_bounded)

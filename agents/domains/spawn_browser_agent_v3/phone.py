@@ -398,6 +398,70 @@ async def fetch_phone_availability(config, user_id: str, task_id: str, *, client
     return denied
 
 
+def _retain_phone_lease(user_id: str, task_id: str, lease: dict) -> None:
+    """Retain only backend-attested task custody, including after reacquisition."""
+    from .service_activity_queue import get_browser_cleanup_owners
+    owners = get_browser_cleanup_owners()
+    if (owners is None or lease.get("browserTaskId") != task_id
+        or not isinstance(lease.get("id"), str) or not lease["id"]):
+        return
+    retained = owners.phone_leases.setdefault((user_id, task_id), set())
+    if lease.get("status") in {"ACTIVE", "WAITING"}:
+        retained.add(lease["id"])
+        owners.phone_cleanup.pop((user_id, task_id), None)
+    elif lease.get("status") in {"RELEASED", "CANCELLED", "EXPIRED"}:
+        retained.discard(lease["id"])
+
+
+def restore_phone_cleanup_leases(state: dict, user_id: str, task_id: str) -> None:
+    from .service_activity_queue import get_browser_cleanup_owners
+    owners = get_browser_cleanup_owners()
+    for binding in state.get("phone_cleanup_leases") or []:
+        if (owners is not None and isinstance(binding, dict)
+            and binding.get("user_id") == user_id and binding.get("task_id") == task_id
+            and isinstance(binding.get("lease_id"), str) and binding["lease_id"]):
+            owners.phone_leases.setdefault((user_id, task_id), set()).add(binding["lease_id"])
+            owners.phone_cleanup.pop((user_id, task_id), None)
+
+
+def _record_phone_release(user_id: str, task_id: str, lease_id: str, result: dict) -> bool:
+    from .service_activity_queue import get_browser_cleanup_owners
+    owners = get_browser_cleanup_owners()
+    if owners is None:
+        return False
+    lease = result.get("lease") or {}
+    confirmed = ("_httpStatus" not in result and lease.get("id") == lease_id
+                 and lease.get("status") in {"RELEASED", "CANCELLED", "EXPIRED"})
+    state = (result.get("phone") or {}).get("state")
+    owners.phone_cleanup[(user_id, task_id)] = {
+        "lease_release": "confirmed" if confirmed else "unconfirmed",
+        "provider_cleanup": "complete" if state == "cleanup_complete" else
+                            "pending" if state == "cleanup_pending" else "not_reported",
+    }
+    if confirmed:
+        owners.phone_leases.get((user_id, task_id), set()).discard(lease_id)
+    return confirmed
+
+
+async def release_retained_phone_leases(config, user_id: str, task_id: str) -> None:
+    """Release recorded IDs only; never discover, acquire, or operate the device."""
+    from .service_activity_queue import get_browser_cleanup_owners
+    owners = get_browser_cleanup_owners()
+    retained = owners.phone_leases.get((user_id, task_id), set()) if owners else set()
+    if not retained:
+        return
+    async with httpx.AsyncClient() as client:
+        for lease_id in sorted(retained.copy()):
+            try:
+                result = await _request(client, config, user_id, "POST",
+                                        f"leases/{quote(lease_id, safe='')}/release", {})
+            except BaseException:
+                _record_phone_release(user_id, task_id, lease_id, {})
+                raise
+            if not _record_phone_release(user_id, task_id, lease_id, result):
+                raise RuntimeError("Recorded phone lease release was not confirmed")
+
+
 async def observe_phone(config, user_id: str, task_id: str, *, client=None) -> dict:
     """A fresh owned observation before each decision; never use cached entitlement."""
     if client is None:
@@ -412,6 +476,7 @@ async def observe_phone(config, user_id: str, task_id: str, *, client=None) -> d
             return {"enabled": False}
         # Renew only an already active claim, never allocate from observation.
         lease = view.get("lease") or {}
+        _retain_phone_lease(user_id, task_id, lease)
         if lease.get("status") == "ACTIVE":
             renewal = await _request(
                 client, config, user_id, "POST", f"leases/{quote(lease['id'], safe='')}/heartbeat", {}
@@ -480,6 +545,7 @@ async def execute_phone(
         return {"success": False, "error": "Phone capability unavailable or revoked"}
     view = (snapshot or {}).get("interaction") or {}
     path = f"interactions/{quote(task_id, safe='')}"
+    _retain_phone_lease(user_id, task_id, view.get("lease") or {})
     if params["mode"] == "setup":
         return await _execute_setup(params, config=config, user_id=user_id, task_id=task_id,
                                     decision_id=decision_id, snapshot=snapshot, client=client)
@@ -496,6 +562,7 @@ async def execute_phone(
             result = await _request(
                 client, config, user_id, "POST", f"leases/{quote(lease['id'], safe='')}/release", {}
             )
+            _record_phone_release(user_id, task_id, lease["id"], result)
             return {"success": "_httpStatus" not in result, "phone": result}
         cursor = view.get("cursor", 0)
         if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
@@ -514,6 +581,7 @@ async def execute_phone(
             {"requestKey": _identity("acquire", task_id, (view.get("lease") or {}).get("id"), intent)},
         )
         lease = acquired.get("lease") or {}
+        _retain_phone_lease(user_id, task_id, lease)
         lease_id = lease.get("id")
         if lease.get("status") != "ACTIVE" or not lease_id:
             return {"success": False, "phone": acquired, "error": _busy_phone_error(acquired)}
