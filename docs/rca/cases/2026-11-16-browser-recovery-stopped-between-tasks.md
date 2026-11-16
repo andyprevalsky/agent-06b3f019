@@ -116,9 +116,10 @@ browser rounds then passed both the original case and transport-loss case with
 no retry. The native quarantine report showed `8/5`, ready to release (the
 explicit five-run proof is retained separately); the assigned marker is removed.
 Five further unchanged browser rounds with the marker absent passed both cases
-without retries. The fixed-source command has passed all 69 UI tests; its
-latency lane and immutable-source deployment gates are still running. Full semantic and
-deployment qualification remain pending.
+without retries. The fixed-source local command passed all 69 UI and five latency tests, with cleanup.
+The subsequent immutable Blacksmith command on `54d2f0a3cff845447a1ffd2e59a5d7d2f087a49f`
+also passed: 74 native cases, both browser-chip cases PASS, no native flake and cleanup
+complete (Actions run 43804959206). Merge and production qualification remain pending.
 
 ## Human feedback
 
@@ -143,8 +144,8 @@ stop after terminal recovery. The amendment preserves both recovered-terminal
 and single-reader assertions, explicitly asserts continued recovery within the
 lease, then checks that reads stop after the unchanged lease expires. The same
 four-case command passes (exit 0). No application code, semantic assertion or
-budget changed in this follow-up. Final load stability, full frontend coverage
-and immutable-source final gates remain required.
+budget changed in this follow-up. The amended four-case ownership suite passed five consecutive runs under eight
+CPU load slots. Full frontend coverage passed in the immutable `54d2f0a3` sweep.
 
 
 ### Qualification infrastructure and source preservation
@@ -182,3 +183,26 @@ credential only when Git requests it, keeping the hashed runtime environment
 stable. This changes neither job permissions nor checked-in authentication
 behavior. The failed control invocations and original receipts remain retained;
 only an exact-source full passing cycle will authorize merge.
+
+
+### Completed immutable sweep and upstream structural recovery
+
+The `54d2f0a3` sweep passed backend, frontend and agents coverage, controller,
+E2B smoke, new-test stability and the original semantic-stack command. All seven
+cloud smoke tasks passed and their native cleanup completed. The structural
+aggregate remained UNVERIFIED after two actual unittest errors: the stopped-inert
+producer pin still expected `527af394…`, while the current helper was `85363bbe…`.
+A fresh independent RCA compared the complete `scripts/` trees at this head and
+baseline `bcdd652f`; they are identical, and the same unchanged pair fails at both
+(exit 1, two errors). The predecessor passes and `b55e854061` fails. This is
+NOT_INTRODUCED by the browser-chip repair, not a complete passing gate.
+
+PR #2294 had already fixed that main regression. After all sweep consumers and
+smoke cleanup finished, this branch imported its exact one-file fix commit
+`670f0a3eb7` (with provenance), retaining the guard and existing permissions.
+The helper's current hash matches that verified upstream pin; `BILLING_GUEST`
+is unchanged. The existing `StoppedInertAllocationIsolation` class now passes
+all three local tests (exit 0). The controller records execution recovery, not
+a waiver: focused, complete failed-gate and final-source qualification remain
+required. The independent RCA and every original native failure are retained
+under `.context/browser-chip-repair/structural-rca/`.
