@@ -56,6 +56,7 @@ import {
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
 import { waitForCodexOutput } from './codex-ws-output.support';
+import { testSmoke_codexRestrictedCommandHandoff } from './codex-restricted-handoff.case';
 import {
   assertSmokeSettings,
   deleteSmokeParent,
@@ -447,6 +448,10 @@ async function runAll() {
     tests.push({
       name: 'smoke -- Codex completes task in real E2B sandbox',
       fn: testSmoke_codexCompletesE2bTask,
+    });
+    tests.push({
+      name: 'smoke -- restricted command native handoff',
+      fn: testSmoke_codexRestrictedCommandHandoff,
     });
   }
   tests.push(

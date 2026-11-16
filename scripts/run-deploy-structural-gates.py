@@ -431,6 +431,8 @@ def plan_gates(
 PROC_OBSERVATION = "proc-observation"
 
 GATES = (
+    Gate("codex-native-app-server", ("node", "--test", "e2b-templates/codex-code/app-server.test.mjs")),
+    Gate("claude-native-direct-chat", ("node", "--test", "e2b-templates/claude-code/direct-chat.test.mjs")),
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-focused10-settlement", ("python3", "scripts/tests/deploy-focused10-settlement.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-user-omission", ("python3", "scripts/tests/deploy-test-user-omission.test.py")),

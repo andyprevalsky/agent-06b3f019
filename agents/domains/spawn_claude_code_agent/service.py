@@ -2093,7 +2093,7 @@ def handoff_task_text(goal: str, output_schema: Optional[Dict[str, Any]]) -> str
     and starts the run as ``/goal <goal + end condition>``.
     """
     schema = json.dumps(handoff_json_schema(output_schema), sort_keys=True)
-    return f"{goal}\n\n{HANDOFF_END_CONDITION}\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n{schema}"
+    return f"{goal}\n\nResult handoff instructions:\n{HANDOFF_END_CONDITION}\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n{schema}"
 
 
 def handoff_standard_fields(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
