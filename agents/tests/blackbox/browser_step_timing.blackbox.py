@@ -1117,6 +1117,100 @@ async def test_per_step_backend_and_llm_calls_never_build_a_client():
     assert "/api/integrations/compute-code/gpt-key/cooldown" in seen
 
 
+_LIVE_MEDIA_PAGE = """<!doctype html><html><body><main id="feed"></main><script>
+// A video page keeps re-rendering a large DOM (player chrome, captions,
+// recommendations) while it plays; each per-step DOM build sees new nodes.
+let tick = 0;
+function render() {
+  tick += 1;
+  const feed = document.getElementById('feed');
+  const rows = [];
+  for (let i = 0; i < 1000; i++) {
+    rows.push(`<section class="card"><a href="/watch?v=${tick}-${i}">Lecture ${i} at ${tick}</a>`
+      + `<button aria-label="Save ${i}">Save</button><span>${tick % 60}:${i % 60}</span></section>`);
+  }
+  feed.innerHTML = rows.join('');
+}
+render();
+setInterval(render, 50);
+</script></body></html>"""
+
+
+def _bus_page_states(service) -> dict:
+    """Whole page states browser-use's event bus still holds after the reads."""
+    history = getattr(service._session.event_bus, "event_history", None) or {}
+    states = selectors = 0
+    for event in list(history.values()):
+        for result in (getattr(event, "event_results", None) or {}).values():
+            dom_state = getattr(getattr(result, "result", None), "dom_state", None)
+            if dom_state is not None:
+                states += 1
+                selectors += len(getattr(dom_state, "selector_map", None) or {})
+    return {"states": states, "selectors": selectors}
+
+
+async def test_per_step_dom_builds_do_not_accumulate_page_states():
+    """RCA 2026-11-16 (polar-odysseys-92cf5ed054aa, both arms): with browser
+    recordings on, every browser step builds the full DOM for the corpus
+    observation. browser-use keeps its last 50 bus events, and each
+    BrowserStateRequestEvent result holds a whole BrowserStateSummary, so a
+    playing YouTube page grew the worker by ~2 GB in 75 s and the 4 GB guest
+    livelocked. Repeated real reads of a large re-rendering page must leave at
+    most the latest page state on the bus."""
+    import socket as _socket
+
+    import httpx
+    from playwright.async_api import async_playwright
+
+    from browser_tools.dom_service import DOMService
+
+    async with async_playwright() as playwright:
+        with _socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
+        service = None
+        body = _LIVE_MEDIA_PAGE.encode()
+
+        async def serve(reader, writer):
+            await reader.readline()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n"
+                         + b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+            await writer.drain()
+            writer.close()
+
+        site = await asyncio.start_server(serve, "127.0.0.1", 0)
+        try:
+            page = await (await browser.new_context(viewport={"width": 1280, "height": 800})).new_page()
+            await page.goto(f"http://127.0.0.1:{site.sockets[0].getsockname()[1]}/watch")
+            async with httpx.AsyncClient(trust_env=False) as client:
+                endpoint = (await client.get(f"http://127.0.0.1:{port}/json/version")).json()["webSocketDebuggerUrl"]
+            service = DOMService(endpoint)
+            await service.connect()
+            latest = None
+            for _ in range(8):
+                latest = await service._browser_state_summary(include_screenshot=False)
+            held = _bus_page_states(service)
+            latest_selectors = len(latest.dom_state.selector_map)
+            print(f"BUS page states={held['states']} selectors={held['selectors']} latest={latest_selectors}")
+            assert latest_selectors >= 100, latest_selectors
+            assert held["states"] <= 1, held
+            assert held["selectors"] <= latest_selectors, (held, latest_selectors)
+            # The returned state stays intact for the caller.
+            assert latest.dom_state.selector_map, "the latest page state must remain usable"
+        finally:
+            if service is not None and service._session is not None:
+                if service._captcha_indicator_task is not None:
+                    service._captcha_indicator_task.cancel()
+                    await asyncio.gather(service._captcha_indicator_task, return_exceptions=True)
+                service._session._intentional_stop = True
+                if service._session._cdp_client_root is not None:
+                    await service._session._cdp_client_root.stop()
+                await service._session.event_bus.stop(timeout=0, clear=True)
+            site.close()
+            await browser.close()
+
+
 async def run_all_tests():
     print("browser-step-timing blackbox tests:")
     r = BlackboxResult()
@@ -1172,6 +1266,7 @@ async def run_all_tests():
         "recorder_transition_flushes_marks", test_recorder_transition_captures_queued_marks_on_outgoing_page
     )
     await r.record_async("step_calls_never_build_http_client", test_per_step_backend_and_llm_calls_never_build_a_client)
+    await r.record_async("per_step_dom_builds_release_page_states", test_per_step_dom_builds_do_not_accumulate_page_states)
     teardown_mock()
     return r.all_passed
 
