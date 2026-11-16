@@ -7,6 +7,8 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import time
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -398,6 +400,23 @@ async def fetch_phone_availability(config, user_id: str, task_id: str, *, client
     return denied
 
 
+# Agent leases last 120 s (LEASE_TIMEOUT_MS); every completed operation and the
+# 30 s model/action heartbeat renew them. Observation renews only a claim with
+# under 90 s left, so a busy loop stops paying one heartbeat round trip per step.
+_OBSERVE_RENEW_BELOW_S = 90.0
+
+
+def _renewal_due(lease: dict, now: float | None = None) -> bool:
+    raw = lease.get("leaseExpiresAt")
+    if not isinstance(raw, str):
+        return True
+    try:
+        expires = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return True
+    return expires - (time.time() if now is None else now) < _OBSERVE_RENEW_BELOW_S
+
+
 async def observe_phone(config, user_id: str, task_id: str, *, client=None) -> dict:
     """A fresh owned observation before each decision; never use cached entitlement."""
     if client is None:
@@ -412,7 +431,7 @@ async def observe_phone(config, user_id: str, task_id: str, *, client=None) -> d
             return {"enabled": False}
         # Renew only an already active claim, never allocate from observation.
         lease = view.get("lease") or {}
-        if lease.get("status") == "ACTIVE":
+        if lease.get("status") == "ACTIVE" and _renewal_due(lease):
             renewal = await _request(
                 client, config, user_id, "POST", f"leases/{quote(lease['id'], safe='')}/heartbeat", {}
             )
