@@ -49,6 +49,7 @@ import { resumeAgentWorkflow } from '../src/providers/agentResume';
 import { cleanupTerminalAgentWorkflowZombies } from '../src/providers/workflowTerminalCleanup';
 import {
   acquireWorkflowDeploymentLease,
+  WorkflowDeploymentLeaseBusyError,
   type WorkflowDeploymentLease,
 } from '../src/providers/workflowDeploymentLease';
 
@@ -95,22 +96,23 @@ async function withTimeout<T>(label: string, operation: Promise<T>, timeoutMs: n
 
 async function acquireProductionDeploymentLease(): Promise<WorkflowDeploymentLease> {
   const deadline = Date.now() + DEPLOYMENT_LEASE_WAIT_MS;
+  let lastHolder = 'no contention observed';
   do {
     try {
-      return await acquireWorkflowDeploymentLease();
+      return await acquireWorkflowDeploymentLease({ purpose: 'validate-prod-workflow-migration' });
     } catch (error) {
-      if (
-        !(error instanceof Error) ||
-        error.message !==
-          'Another Temporal workflow deployment currently owns the production cutover'
-      ) {
-        throw error;
+      if (!(error instanceof WorkflowDeploymentLeaseBusyError)) throw error;
+      if (error.holderDescription !== lastHolder) {
+        process.stderr.write(
+          `[WorkflowMigrationValidation] cutover lease busy: ${error.message}\n`
+        );
       }
+      lastHolder = error.holderDescription;
       await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
   } while (Date.now() < deadline);
   throw new Error(
-    `Timed out after ${DEPLOYMENT_LEASE_WAIT_MS}ms waiting for the production cutover lease`
+    `Timed out after ${DEPLOYMENT_LEASE_WAIT_MS}ms waiting for the production cutover lease; current holder: ${lastHolder}`
   );
 }
 
