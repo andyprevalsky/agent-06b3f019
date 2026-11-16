@@ -1242,8 +1242,8 @@ def _require_spawn_output_schema_key(schema: Dict[str, Any]) -> None:
 
 
 _GITHUB_REPO_REF_DESCRIPTION = (
-    "Normally a project id from # Available projects; 'gh:owner/repo' or a GitHub URL also "
-    "work. Code agents start in that project (repo checkout, env files and startup script); "
+    "Normally the project id or 'gh:owner/repo' ref shown in # Available projects; a GitHub URL "
+    "also works. Code agents start in that project (repo checkout, env files and startup script); "
     "spawned agents keep it as their project. Explicit selection wins over inherited references "
     "and over github_repo_link. Omit it to inherit. An unknown or unconnected ref fails with an "
     "error naming it; it never falls back to another repo. Not allowed with target='local'. "
@@ -1315,7 +1315,7 @@ class SpawnAgentTool(BaseModel):
             "Optional when type='code'. GitHub repository URL to clone and sync to. "
             "Ignored for every other type. Only provide this when the user supplied a real, "
             "accessible repository URL; do not invent placeholder repositories. Prefer "
-            "github_repo_ref with a project id from # Available projects. If omitted, uses "
+            "github_repo_ref with a ref from # Available projects. If omitted, uses "
             "github_repo_ref, else the project you inherited, otherwise a repo created for this "
             "agent tree."
         ),

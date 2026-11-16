@@ -616,11 +616,11 @@ def test_code_agent_repo_text_names_the_project_repo():
         description = model.model_fields["github_repo_link"].description
         assert "defaults to a repo automatically created for this agent tree" not in description
         assert "current project's repo" not in description, description
-        assert "Prefer github_repo_ref with a project id from # Available projects" in description, description
+        assert "Prefer github_repo_ref with a ref from # Available projects" in description, description
         assert "else the project you inherited, otherwise a repo created for this agent tree" in description
     for model in (SpawnAgentTool, SpawnAgentRoseDesktopTool, SpawnAgentToolNoGP):
         ref = model.model_fields["github_repo_ref"].description
-        assert "Normally a project id from # Available projects;" in ref, ref
+        assert "Normally the project id or 'gh:owner/repo' ref shown in # Available projects;" in ref, ref
         assert "the project's repo" not in ref and "your repo," not in ref, ref
         assert "repo checkout, env files and startup script" in ref, ref
     assert "initialized to this agent network" not in CODE_LINE
