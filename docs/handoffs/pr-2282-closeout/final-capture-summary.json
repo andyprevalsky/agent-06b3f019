@@ -1,0 +1,27 @@
+{
+  "files": 50143,
+  "bytes": 2670119090,
+  "excluded": [
+    {
+      "path": "/home/boxes/rose/.context/deploy-cloud/0d9f4586afddeb071dc498e7409f675b5a08784194fbef6f1f4dc38ca7bc7325/campaigns/deploy-0d9f4586afddeb071dc498e7409f675b5a08784194fbef6f1f4dc38ca7bc7325/shared-inventory/inventory/current",
+      "reason": "symlink recorded; no dereference",
+      "target": ".generation-u5qq4qqd",
+      "resolved_target": "/home/boxes/rose/.context/deploy-cloud/0d9f4586afddeb071dc498e7409f675b5a08784194fbef6f1f4dc38ca7bc7325/campaigns/deploy-0d9f4586afddeb071dc498e7409f675b5a08784194fbef6f1f4dc38ca7bc7325/shared-inventory/inventory/.generation-u5qq4qqd"
+    },
+    {
+      "path": "/home/boxes/rose/.context/deploy-cloud/4d74573ee7e81ba67777c3e7b0dff577f637398c5393ca2ecdd75d1db8d642bc/campaigns/deploy-4d74573ee7e81ba67777c3e7b0dff577f637398c5393ca2ecdd75d1db8d642bc/shared-inventory/inventory/current",
+      "reason": "symlink recorded; no dereference",
+      "target": ".generation-85m2k5no",
+      "resolved_target": "/home/boxes/rose/.context/deploy-cloud/4d74573ee7e81ba67777c3e7b0dff577f637398c5393ca2ecdd75d1db8d642bc/campaigns/deploy-4d74573ee7e81ba67777c3e7b0dff577f637398c5393ca2ecdd75d1db8d642bc/shared-inventory/inventory/.generation-85m2k5no"
+    },
+    {
+      "path": "/home/boxes/rose/.context/deploy-cloud/c819e83e58136f2e90bea17c0cafea270e4ed8e8293ce7fdac7d6e087e937b38/campaigns/deploy-c819e83e58136f2e90bea17c0cafea270e4ed8e8293ce7fdac7d6e087e937b38/shared-inventory/inventory/current",
+      "reason": "symlink recorded; no dereference",
+      "target": ".generation-lesu3vdy",
+      "resolved_target": "/home/boxes/rose/.context/deploy-cloud/c819e83e58136f2e90bea17c0cafea270e4ed8e8293ce7fdac7d6e087e937b38/campaigns/deploy-c819e83e58136f2e90bea17c0cafea270e4ed8e8293ce7fdac7d6e087e937b38/shared-inventory/inventory/.generation-lesu3vdy"
+    }
+  ],
+  "stage": "/home/boxes/rose/.context/b82-closeout-prep/final-staging",
+  "status": "captured immutable snapshot; encryption and separate complete authenticated readback PASS",
+  "verification": "archive-verification-summary.json"
+}

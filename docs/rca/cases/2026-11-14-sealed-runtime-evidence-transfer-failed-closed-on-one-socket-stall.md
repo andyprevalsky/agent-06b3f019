@@ -23,8 +23,10 @@ sources:
   - PR #2009 deploy smoke campaign deploy-0ce0cd032f77a126ce8823177091880044136d1e8bf45f6461bd7ecc469ce958, job r001-j0010 (browser-biometrics-webdecoy), fleet owner d270c87e672c4b4f8f6e0fd4cdb38608, Machine 8175d6a900e418, run 20261114-124343-1193817, failing source 3e59de84956ea8756719a0814834b641957f8169
   - commit 442f4b18bb (introduced the "once sealed, transfers fail closed" contract)
   - PR #2072 (merge commit a53c8d9e1950500a75261c9c9bcf764d47123824)
+  - fleet run 20261116-041436-1080717 (recurrence, polar-odysseys-73c63095aeed, guest 8193d9b9964548, build 1da1a94f95)
+  - fleet run 20261116-041436-1080699 (recurrence, polar-odysseys-156e2acc9536)
 repro: python3 scripts/tests/cloudbench-runtime-evidence-collector.test.py (cases transfer-stall, transfer-persistent-reset, transfer-corrupt on both the inline run-bench-cloud collector and the recovery collector; driver-log-stall on the recovery collector)
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -145,6 +147,68 @@ noise, not a classification change.
 only on a transport fault. No shared state and no fan-in.
 
 Shipped in PR #2072 (merged a53c8d9e19, 2026-11-14): deploy gates 16/16 PASS including smoke 11/11 with browser-biometrics-webdecoy PASS, production semantics PASS.
+
+### Recurrence 2026-11-16 (bounded retry did not hold)
+
+In the browser-perf baseline campaign (build 1da1a94f95, which includes the
+3-attempt sealed-read retry), two long Odysseys tasks failed with
+`sealed runtime evidence read logs/backend.log attempt 1/3 failed:
+TimeoutError('timed out')` (x2 to x3). The run then ended `complete terminal
+runtime evidence could not be verified -- infrastructure failure`. Every
+attempt timed out in `getresponse()` waiting for the status line, so the
+request was accepted but no response headers arrived within the 6 s socket
+timeout.
+
+The guest was not the cause. For 8193d9b9964548 between 04:51:30 and 04:57,
+Fly metrics show 99% idle CPU, no steal or iowait, and 3.3 GB MemAvailable.
+The controller-side path was unstable instead. The run's status proxy was
+re-leased 23 times; the 156e2acc9536 run re-leased 32 times. After the driver
+exited (04:50:28), the shared relay closed this guest's lease at 04:50:57,
+04:51:47, 04:52:20, 04:52:41, 04:53:34, 04:54:10, 04:54:32 and 04:54:48.
+
+Why so much traffic at task end: `scripts/cloudbench-run.sh` emits the whole
+run.json between `::CLOUDBENCH-RESULT-BEGIN::` and `::CLOUDBENCH-RESULT-END::`
+in bench.log (`cat "$CONTEXT_DIR/run.json"`). That made bench.log 55 MB
+(73c63095aeed, 37 MB of it JSON lines) and 77 MB (156e2acc9536). The
+controller streams bench.log in 256 KiB relay requests until the DONE token.
+That took from 04:50:21 to 04:55:58 for 73c63095aeed and from 05:07:44 to
+05:13:47 for 156e2acc9536. Collection then downloads run.json again
+(54–77 MB) as sealed evidence. In boot-launch fleets the controller never
+uses the inline copy: `run-bench-cloud` reads the terminal result from the
+sealed `remote-logs/runtime-evidence/run.json`, and keeps the marker path only
+for `cloudbench_skip_held_driver_teardown_race` (infra probe /
+skip-autoscaler). The duplicated transfer is therefore pure relay load at each
+long task's end. The concurrent campaign members do the same, which is the
+likely saturation of the shared relay. That relay saturation is inferred from
+lease churn on a healthy guest and is not yet reproduced. Status is reopened.
+
+A second contributor, also on the controller side: a stale default flyctl agent
+(pid 3239061, started 2026-11-15 16:53Z by an earlier fleet in another
+worktree) still ran on the same `~/.fly` WireGuard peer as the baseline
+campaign's agent. The campaign code already documents that two agents on one
+peer stall both tunnels. The treatment campaign had its own `FLY_CONFIG_DIR`
+and a single agent, and recorded 0 sealed-read timeouts against the baseline's
+2. The experiment owner stopped the stale agent. Follow-up, not built: the
+campaign's peer claim (`claim_home_wireguard_peer`) could refuse to start, or
+warn, while a foreign `flyctl agent run` process uses the same config dir.
+
+Fix (2026-11-16, branch andyprevalsky/cloudbench-bounded-result-line):
+`run-bench-cloud` now sends `CLOUDBENCH_INLINE_RUN_RESULT=0` to boot-launch
+members outside the held-driver paths (config env and the staged rb.sh). The
+choice comes from one helper, `cloudbench_inline_run_result`. With that value,
+`cloudbench-run.sh` writes `run_result: bytes=<n> sha256=<hex>` instead of the
+run record. The controller still takes the terminal record from the sealed
+`run.json`, which the sealed manifest hash already proves. The emitted
+identity is not compared: a watchdog-cancelled run legitimately rewrites
+run.json after the result block, and
+`test_watchdog_collects_cancelled_artifact_after_bounded_shutdown` pins that.
+Infra-probe, skip-autoscaler and SSH-launch paths keep the inline record, and
+so does any guest without the variable. No timeout changed. Regression:
+`agents/benchmarks/cloudbench_dependency_sync_test.py::test_boot_guest_result_streams_identity_not_the_run_record`
+runs the real guest emitter with a 50 MB run.json. Before the fix it wrote
+53,043,696 bytes into bench.log; after the fix it writes under 4 KiB, and the
+controller block selects and verifies the sealed copy. The fake guest in
+`scripts/tests/cloudbench-multi-workstream.test.sh` models the same protocol.
 
 ## Human feedback
 
