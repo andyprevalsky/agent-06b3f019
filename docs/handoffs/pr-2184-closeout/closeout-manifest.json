@@ -1,44 +1,44 @@
 {
   ".cloud-env": "managed-env (boxes.dev project environment; secrets never archived)",
   ".context/": {
-    "archive": "devbox-closeout-private/pr2184/20261116T043447Z-records.tar.gz.aesgcm",
+    "archive": "devbox-closeout-private/pr2184/20261116T045900Z-records-2.tar.gz.aesgcm",
     "disposition": "archived",
-    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt.json",
-    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt.json --destination <empty dir>",
-    "scope": "every regular file under .context on devbox 32af51a7 (PR #2184 WMH-lane --wait + planner max-effort repair: deploy cycle .context/deploy-pipeline READY at a855d9537b, merged b7ea782519; fleet SIM runs .context/fleet/runs/20261115-045941-984158 (planner fixed, 600 s cap); timing run .context/deploy-runs/20261115-054729-1620296; .context/pr2184-evidence = planner replay scripts + per-effort results, archived prod planner dumps (R2 trace copies), gate/review/merge/production logs, lease-gate scripts, repair handoff packet)",
-    "sha256": "05b58e62eb5e4d591005eb2a9856ab4cbef2efdbc32de1081363354c938909af"
+    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json --destination <empty dir>",
+    "scope": "every regular file under .context on devbox 32af51a7 (PR #2184 WMH-lane --wait + planner max-effort repair: deploy cycle .context/deploy-pipeline READY at a855d9537b, merged b7ea782519; fleet SIM runs .context/fleet/runs/20261115-045941-984158 (planner fixed, 600 s cap); timing run .context/deploy-runs/20261115-054729-1620296; .context/pr2184-evidence = planner replay scripts + per-effort results, archived prod planner dumps (R2 trace copies), gate/review/merge/production logs, lease-gate scripts, repair handoff packet); final state after the production retry (workflow-migration PASS, all lanes PASS, outcome completed)",
+    "sha256": "9b972d95075c722aee546dbadd82f210429746b8ab766140a2ebeb834b441296"
   },
   ".devbox/": "managed (boxes.dev runtime state)",
   ".env.npm": "managed-env (boxes.dev project environment; secrets never archived)",
   ".llm-dumps/": {
-    "archive": "devbox-closeout-private/pr2184/20261116T043447Z-records.tar.gz.aesgcm",
+    "archive": "devbox-closeout-private/pr2184/20261116T045900Z-records-2.tar.gz.aesgcm",
     "disposition": "archived",
-    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt.json",
-    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt.json --destination <empty dir>",
+    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json --destination <empty dir>",
     "scope": "local LLM dumps from the Rose/LLM blackbox suites and planner replays on devbox 32af51a7",
-    "sha256": "05b58e62eb5e4d591005eb2a9856ab4cbef2efdbc32de1081363354c938909af"
+    "sha256": "9b972d95075c722aee546dbadd82f210429746b8ab766140a2ebeb834b441296"
   },
   "agents/.env": "managed-env (boxes.dev project environment; secrets never archived)",
   "agents/.env.benchmark-temporal": "managed-env (generated benchmark Temporal override; secrets never archived)",
   "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
   "agents/navi-worker-log.txt": {
-    "archive": "devbox-closeout-private/pr2184/20261116T043447Z-records.tar.gz.aesgcm",
+    "archive": "devbox-closeout-private/pr2184/20261116T045900Z-records-2.tar.gz.aesgcm",
     "disposition": "archived",
-    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt.json",
-    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt.json --destination <empty dir>",
+    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json --destination <empty dir>",
     "scope": "local service log agents/navi-worker-log.txt on devbox 32af51a7",
-    "sha256": "05b58e62eb5e4d591005eb2a9856ab4cbef2efdbc32de1081363354c938909af"
+    "sha256": "9b972d95075c722aee546dbadd82f210429746b8ab766140a2ebeb834b441296"
   },
   "agents/providers/fast_cache/": "reproducible (runtime cache)",
   "back-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
   "back-end/.env.cloudbench-upsert.lock": "reproducible (lock file)",
   "back-end/backend-logs.log": {
-    "archive": "devbox-closeout-private/pr2184/20261116T043447Z-records.tar.gz.aesgcm",
+    "archive": "devbox-closeout-private/pr2184/20261116T045900Z-records-2.tar.gz.aesgcm",
     "disposition": "archived",
-    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt.json",
-    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt.json --destination <empty dir>",
+    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json --destination <empty dir>",
     "scope": "local service log back-end/backend-logs.log on devbox 32af51a7",
-    "sha256": "05b58e62eb5e4d591005eb2a9856ab4cbef2efdbc32de1081363354c938909af"
+    "sha256": "9b972d95075c722aee546dbadd82f210429746b8ab766140a2ebeb834b441296"
   },
   "branch:andyprevalsky/P3-message-person-hillclimb": {
     "archive": "devbox-closeout-private/pr1989/20261113T010239Z-local-only-git-refs.tar.gz.aesgcm",
@@ -689,20 +689,20 @@
   "docs/rca/INDEX.md": "reproducible (generated by python3 scripts/rca_archive.py reindex)",
   "front-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
   "front-end/frontend-logs.log": {
-    "archive": "devbox-closeout-private/pr2184/20261116T043447Z-records.tar.gz.aesgcm",
+    "archive": "devbox-closeout-private/pr2184/20261116T045900Z-records-2.tar.gz.aesgcm",
     "disposition": "archived",
-    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt.json",
-    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt.json --destination <empty dir>",
+    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json --destination <empty dir>",
     "scope": "local service log front-end/frontend-logs.log on devbox 32af51a7",
-    "sha256": "05b58e62eb5e4d591005eb2a9856ab4cbef2efdbc32de1081363354c938909af"
+    "sha256": "9b972d95075c722aee546dbadd82f210429746b8ab766140a2ebeb834b441296"
   },
   "hub-poller-logs.log": {
-    "archive": "devbox-closeout-private/pr2184/20261116T043447Z-records.tar.gz.aesgcm",
+    "archive": "devbox-closeout-private/pr2184/20261116T045900Z-records-2.tar.gz.aesgcm",
     "disposition": "archived",
-    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt.json",
-    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt.json --destination <empty dir>",
+    "receipt": "docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2184-closeout/private-archive-receipt-2.json --destination <empty dir>",
     "scope": "local service log hub-poller-logs.log on devbox 32af51a7",
-    "sha256": "05b58e62eb5e4d591005eb2a9856ab4cbef2efdbc32de1081363354c938909af"
+    "sha256": "9b972d95075c722aee546dbadd82f210429746b8ab766140a2ebeb834b441296"
   },
   "mac-app/.env": "managed-env (boxes.dev project environment; secrets never archived)",
   "package-lock.json": "reproducible (ignored root install lock)",

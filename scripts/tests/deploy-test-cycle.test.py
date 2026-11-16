@@ -7189,15 +7189,21 @@ class Cycle(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'campaign root binding'):
             c.reconcile(state, occurrence['id'], refused)
         self.assertEqual(before, state)
-        accepted = interrupted('cloud command interrupted or source changed')
-        stale = copy.deepcopy(state)  # the refresh's stale attempt: no occurrence, identified by its token
-        stale['phase'] = 'stale'; stale['attempts'][-1]['stale'] = True
-        stale_receipt = stale['attempts'][-1]['results'][0]
-        stale_receipt.update(executed=True)
-        c.write(paths['receipt'], stale_receipt)
-        accepted.update(receipt_sha256=c.sha_file(paths['receipt']))
-        c.reconcile(stale, stale_receipt['token'], accepted)
-        self.assertFalse(stale['reconciled_owners'][c.sha_file(paths['receipt'])]['credit_granted'])
+        for reason in ('cloud command interrupted or source changed',
+                       'cloud command ran while the source changed'):
+            with self.subTest(reason=reason):
+                accepted = interrupted(reason)
+                stale = copy.deepcopy(state)  # Stale attempts are selected by their original token.
+                stale['phase'] = 'stale'; stale['attempts'][-1]['stale'] = True
+                stale_receipt = stale['attempts'][-1]['results'][0]
+                stale_receipt.update(executed=True)
+                c.write(paths['receipt'], stale_receipt)
+                accepted.update(receipt_sha256=c.sha_file(paths['receipt']))
+                original_attempts = copy.deepcopy(stale['attempts'])
+                c.reconcile(stale, stale_receipt['token'], accepted)
+                self.assertEqual(original_attempts, stale['attempts'])
+                self.assertEqual(set(stale_receipt['cases'].values()), {'UNVERIFIED'})
+                self.assertFalse(stale['reconciled_owners'][c.sha_file(paths['receipt'])]['credit_granted'])
 
     def unlaunched_campaign_state(self):
         import shutil
@@ -7407,6 +7413,121 @@ class Cycle(unittest.TestCase):
         job = campaign / 'r001-j0001.log'
         job.write_text('controller was admitted\n')
         with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+
+    def peer_refusal_campaign_state(self):
+        import runpy
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        # Use the audited producer, even after later source epochs change HEAD.
+        source_head = '4a8576932cae45631b4a0aabd675b81575b39e24'
+        relatives = ('scripts/run-bench-campaign.py', 'scripts/cloudbench-campaign-inventory.sh',
+                     'scripts/lib/cloudbench-inventory.sh', 'scripts/lib/cloudbench-env.sh',
+                     'scripts/cloudbench-campaign-machines.py', 'scripts/cloudbench-machine-readiness.py')
+        for relative in relatives:
+            raw = subprocess.check_output(['git', '-C', str(ROOT), 'show', source_head + ':' + relative])
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            if relative != 'scripts/run-bench-campaign.py':
+                target = campaign / 'shared-inventory/scripts' / Path(relative).name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=t@x', 'commit', '-qm', 'audited producer'], check=True)
+        source = c.source(self.root)
+        request_path = paths['receipt'].parent / 'request.json'
+        request = c.read(request_path)
+        names = request['checks'][:8]
+        request.update(source=source, checks=names)
+        c.write(request_path, request)
+        summary = c.read(campaign / 'summary.json')
+        summary.update(task_count=8, total_jobs=8, concurrency=8, jobs=summary['jobs'][:8],
+                       controller=dict(pid=2147483000, birth='proc-start:00000000-0000-0000-0000-000000000000:1'),
+                       operator_settings={key: '1' for key in ('CLOUDBENCH_CAMPAIGN_SHARED_RELAY',
+                            'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY', 'CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT')})
+        c.write(campaign / 'summary.json', summary)
+        native = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+        group = native['campaign_group_record'](summary)
+        c.write(campaign / 'hub-group.json', group)
+        c.write(campaign / 'hub-group-publication-ack.private.json', dict(pid=2147483000,
+            token='d' * 32, record_sha256=hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()))
+        adapter = c.read(paths['adapter'])
+        adapter.update(source=source, cases=dict.fromkeys(names, 'UNVERIFIED'),
+                       native_command=['bash', 'scripts/run-bench', *names, '--runs', '1',
+                                       '--concurrency', '8', '--retry-infra', '0', '--ref', source['head']])
+        c.write(paths['adapter'], adapter)
+        receipt = state['attempts'][-1]['results'][0]
+        receipt.update(source=source, cases=adapter['cases'], case_complete=dict.fromkeys(names, False))
+        receipt['native_cleanup_reference']['result_sha256'] = c.sha_file(paths['adapter'])
+        c.write(paths['receipt'], receipt)
+        state['source'] = source
+        next(g for g in state['plan']['gates'] if g['name'] == occurrence['gate'])['checks'] = names
+        cli = Path(adapter['runner_log'])
+        cli.write_text(f'Native campaign {campaign}\nUnclassified startup refusal\n')
+        c.write(cli.with_name('cli.log.process.json'), dict(supervisor_pid=2147483001,
+            child_pid=2147483000, native_exit=adapter['native_exit'], quiescent=True,
+            orphaned_children=False, cancelled=False, timed_out=False, remaining=[], error=None,
+            reaped=[dict(pid=2147483000, status=256)]))
+        proof.update(source=source, owner=copy.deepcopy(receipt['cleanup_owner']),
+                     layout='campaign-peer-refusal-v1', receipt_sha256=c.sha_file(paths['receipt']),
+                     worker_result_sha256=c.sha_file(paths['adapter']))
+        files = [request_path, cli, cli.with_name('cli.log.process.json'), *campaign.glob('*.json'),
+                 campaign / 'shared-inventory/stop', campaign / 'shared-inventory/publisher.private.log',
+                 campaign / 'hub-group-publication.private.log',
+                 *(campaign / 'shared-inventory/scripts').iterdir(), *(self.root / p for p in relatives)]
+        proof['files'] = {str(p): c.sha_file(p) for p in files}
+        return state, occurrence, paths, proof, campaign
+
+    def test_peer_refusal_retires_without_execution_credit(self):
+        state, occurrence, paths, proof, campaign = self.peer_refusal_campaign_state()
+        before = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state['attempts'])
+        self.assertEqual(list(before[-1]['results'][0]['cases'].values()), ['UNVERIFIED'] * 8)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([], entry['participants'])
+
+    def test_peer_refusal_rejects_admission_or_incomplete_retirement(self):
+        state, occurrence, paths, proof, campaign = self.peer_refusal_campaign_state()
+        originals = {Path(p): Path(p).read_bytes() for p in proof['files']}
+        for mutation in ('marker', 'relay', 'dispatched', 'producer', 'live', 'ack', 'quiescence',
+                         'peak', 'inventory-owner', 'missing-stop', 'job-log', 'writer'):
+            with self.subTest(mutation=mutation):
+                candidate = copy.deepcopy(proof)
+                extras = []
+                try:
+                    if mutation in ('marker', 'relay', 'inventory-owner', 'job-log'):
+                        p = campaign / {'marker': 'shared-relay-location.json', 'relay': 'shared-relay',
+                            'inventory-owner': 'shared-inventory/owner', 'job-log': 'r001-j0001.log'}[mutation]
+                        p.write_text('present'); extras.append(p)
+                    if mutation in ('dispatched', 'peak'):
+                        p = campaign / 'summary.json'; d = c.read(p)
+                        if mutation == 'dispatched': d['jobs'][0]['controller_pid'] = 42
+                        else: d['peak_concurrency'] = 1
+                        c.write(p, d)
+                    if mutation == 'producer':
+                        p = campaign / 'shared-inventory/scripts/cloudbench-env.sh'; p.write_bytes(p.read_bytes() + b'changed')
+                    if mutation in ('live', 'quiescence'):
+                        p = Path(c.read(paths['adapter'])['runner_log']).with_name('cli.log.process.json'); d = c.read(p)
+                        if mutation == 'live': d['supervisor_pid'] = os.getpid()
+                        else: d['quiescent'] = False
+                        c.write(p, d)
+                    if mutation == 'ack':
+                        p = campaign / 'hub-group-publication-ack.private.json'; d = c.read(p)
+                        d['record_sha256'] = '0' * 64; c.write(p, d)
+                    if mutation == 'missing-stop': (campaign / 'shared-inventory/stop').unlink()
+                    candidate['files'] = {str(p): c.sha_file(p) for p in originals if p.exists()}
+                    before = copy.deepcopy(state)
+                    if mutation == 'writer':
+                        with (campaign / 'shared-inventory/publisher.private.log').open('a'):
+                            with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], candidate)
+                    else:
+                        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], candidate)
+                    self.assertEqual(before, state)
+                finally:
+                    for p in extras: p.unlink()
+                    for p, raw in originals.items(): p.write_bytes(raw)
 
     def unlaunched_relay_state(self):
         import shutil
