@@ -11,8 +11,9 @@
  *   order is accepted and ignored wherever agent_trajectories is not searched
  *   (newest first, as display_order says);
  *   a model-record kind, surface, until, page_after or non-task trace_path → 400
- *   naming that parameter; order on agent_trajectories mixed with another
- *   source → 400 naming order
+ *   naming that parameter; oldest_first on agent_trajectories mixed with
+ *   another source → 400 naming order, while newest_first is the order that
+ *   merged search reads in and is accepted
  *
  * Registered by data.blackbox.ts.
  */
@@ -326,6 +327,18 @@ async function proveAgentNetworkRecordKind(
     mergedTrajectories.status === 400 &&
       JSON.stringify(mergedTrajectories.data).includes("'order'"),
     `order on a merged agent_trajectories search is rejected by name, got ${mergedTrajectories.status} ${JSON.stringify(mergedTrajectories.data)}`
+  );
+  const mergedNewestFirst = await grep(headers, {
+    pattern: tree.marker,
+    sources: ['agent_network', 'agent_trajectories'],
+    order: 'newest_first',
+    agent_id: tree.siblingId,
+  });
+  assert(
+    mergedNewestFirst.status === 200 &&
+      (mergedNewestFirst.data as unknown as { display_order?: string }).display_order ===
+        'newest_first',
+    `newest_first on a merged agent_trajectories search is its own order, got ${mergedNewestFirst.status} ${JSON.stringify(mergedNewestFirst.data)}`
   );
 }
 

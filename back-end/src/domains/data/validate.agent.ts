@@ -229,13 +229,15 @@ function validateAgentNetworkSelectors(params: GrepParams): void {
 /**
  * `order` and `page_after` page one agent_trajectories search. `order` is
  * accepted and ignored where it does not apply (display_order reports the
- * real order); a merged search with agent_trajectories cannot honor it.
+ * real order); a merged search with agent_trajectories reads newest first
+ * (service.ts displayOrder), so it honors newest_first and nothing else.
  */
 export function validateAgentSourceSelection(params: GrepParams, sources: ValidSource[]): void {
   const hasTrajectories = sources.includes('agent_trajectories');
   if (hasTrajectories) {
     for (const key of ['order', 'page_after'] as const) {
-      if (params[key] !== undefined && sources.length !== 1) {
+      const honored = key === 'order' && params.order === 'newest_first';
+      if (params[key] !== undefined && sources.length !== 1 && !honored) {
         throw new InvalidGrepParamError(
           key,
           `${key} pages an agent_trajectories search only when agent_trajectories is the only source; search it alone or remove ${key}.`
