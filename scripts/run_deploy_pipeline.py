@@ -4017,7 +4017,7 @@ def _live_successor(target_id: str, merged_sha: str, *, app: object, backend: Pa
             candidate, _ = decoder.raw_decode(probe.stdout, match.start())
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict):
+        if isinstance(candidate, dict) and "pointerMatchesExpected" in candidate:
             report = candidate
     if not isinstance(report, dict) or report.get("pointerMatchesExpected") is not False:
         return None

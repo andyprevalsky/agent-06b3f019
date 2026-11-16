@@ -2938,7 +2938,9 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
                           "pointerMatchesExpected": False,
                           "livePointer": {"surfaceHash": "beef", "updatedBy": updated_by},
                           "messages": ["A managed predecessor requires its durable qualified retirement certificate."]},
-                         indent=2) + "\n")
+                         indent=2) + "\n"
+            # A later structured log line must not displace the report.
+            + '{"level": "info", "msg": "monitor done"}\n')
 
     newest = subprocess.run([*git, "commit-tree", tree, "-p", later, "-m", "newest main merge"], check=True,
                             stdout=subprocess.PIPE, text=True).stdout.strip()
@@ -2989,6 +2991,9 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     verified = json.loads((tmp / "production-state-7c" / "production.json").read_text())["cutover_verify"]
     assert verified["verified_by"] == "live-successor-cutover" and verified["live_job_id"] == live_id, verified
     assert verified["replaced_job_id"] == job_id and verified["job_stage"] == "SUCCEEDED", verified
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert node_calls[-2].endswith(f"read --job-id {live_id}"), node_calls
+    assert node_calls[-1].endswith(f"monitor-cooperative-cutover.ts --job-id {live_id} --verify"), node_calls
     assert subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
                           text=True).stdout.strip() == head, "the descendant fixture must not move HEAD"
     # 8. The queue refused an older/diverged release instead of rolling the live one
