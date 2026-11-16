@@ -1,0 +1,7 @@
+{"task": "chat-mode", "duration_seconds": 16.0, "cost_cents": 0.0, "timestamp": "2026-11-16T07:24:18+00:00", "agent_id": "a7250065-3188-44d7-bac0-2de94401aa53", "backfill_source": "hub:cloud-fleet"}
+{"task": "background-agent-message-smoke", "duration_seconds": 106.8, "cost_cents": 0.0, "timestamp": "2026-11-16T07:25:48.800000+00:00", "agent_id": "67567ce6-1efd-419d-8f97-f361a5d64106", "backfill_source": "hub:cloud-fleet"}
+{"task": "claude-code-agent", "duration_seconds": 107.2, "cost_cents": 0.0, "timestamp": "2026-11-16T07:25:49.200000+00:00", "agent_id": "acce3ffd-fab7-4cff-891f-c7312752b1de", "backfill_source": "hub:cloud-fleet"}
+{"task": "spawn-sub-agents", "duration_seconds": 116.6, "cost_cents": 0.0, "timestamp": "2026-11-16T07:25:58.600000+00:00", "agent_id": "c49fa323-745b-416e-a317-8e1e4264cdae", "backfill_source": "hub:cloud-fleet"}
+{"task": "browser-smoke", "duration_seconds": 142.1, "cost_cents": 9.0, "timestamp": "2026-11-16T07:26:24.100000+00:00", "agent_id": "6a37e9eb-f57f-4a66-ab06-f9fcbb51f720", "backfill_source": "hub:cloud-fleet"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 219.0, "cost_cents": 70.0, "timestamp": "2026-11-16T07:27:41+00:00", "agent_id": "814d25f2-b119-49be-9c6c-7da9e094b608", "backfill_source": "hub:cloud-fleet"}
+{"task": "parallel-tool-calls", "duration_seconds": 291.2, "cost_cents": 2.0, "timestamp": "2026-11-16T07:28:53.200000+00:00", "agent_id": "3a31c2c7-8ed3-4726-b59a-2760b02eb20d", "backfill_source": "hub:cloud-fleet"}
