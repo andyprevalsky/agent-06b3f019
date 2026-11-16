@@ -400,6 +400,8 @@ export CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256="$(sha256sum "$CLOUDBENCH_IMAGE_BUI
 
 Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
 
+Each rolling campaign claims its Fly config dir's single WireGuard peer (`FLY_CONFIG_DIR`, default `~/.fly`). To run a second rolling campaign on the same devbox, launch it with its own directory, e.g. `FLY_CONFIG_DIR=$HOME/.fly-campaign-2 scripts/run-bench <task> -k K --concurrency N`; flyctl then starts a separate agent and peer. Never share one config dir between two campaigns.
+
 For this explicitly requested 50-copy cached stress run, use the command-scoped
 Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
 Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
@@ -554,6 +556,11 @@ Polar-only selection caps at 135, where Kernel binds). Mixed, unknown or
 uncatalogued selections keep the global peaks (70). Do not retry, split or
 work around a refusal: ask the user to raise the provider limits (then record
 them in the registry in a reviewed change) or rerun at or below the cap.
+The same launchers also refuse, with exit 78, a simultaneous REAL/SIM width above the
+app-wide delegating-guest ceiling that fleet admission enforces
+(`CLOUDBENCH_DELEGATING_PRIMARY_CEILING`, default 70; DEMO-lane tasks do not count).
+Lower the width or use a rolling campaign with `--concurrency` at or below it; raise the
+ceiling only with a measured backend load at the wider width.
 Task-free `--infra-probe` fleets and validated `--demo-cache` replays are exempt.
 
 ### World-model refresh conformance

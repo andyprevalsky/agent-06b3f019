@@ -1806,6 +1806,20 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ] && [ "$INFRA_PRO
             || provider_capacity_status=$?
         [ "$provider_capacity_status" -eq 0 ] || exit "$provider_capacity_status"
     fi
+    # admit_lane_capacity caps live REAL/SIM primaries app-wide (all devboxes) and
+    # refuses only after its admission wait, recording INFRA. A launch (or its
+    # campaign/sharded group) whose own REAL/SIM width exceeds that ceiling can
+    # never fit: refuse it here, before credentials or any Fly call.
+    delegating_ceiling_width="$(provider_capacity_simultaneous_benches)" || exit 2
+    delegating_ceiling_tasks=()
+    for delegating_ceiling_task in "${BENCHES[@]}"; do
+        delegating_ceiling_tasks+=(--task "$delegating_ceiling_task")
+    done
+    delegating_ceiling_status=0
+    python3 -I -S -B "$ROOT_DIR/scripts/cloudbench-provider-capacity.py" \
+        delegating --benches "$delegating_ceiling_width" ${delegating_ceiling_tasks[@]+"${delegating_ceiling_tasks[@]}"} \
+        || delegating_ceiling_status=$?
+    [ "$delegating_ceiling_status" -eq 0 ] || exit "$delegating_ceiling_status"
 fi
 
 [ "$RECOVER_STALE_ONLY" = "1" ] \
