@@ -23,9 +23,11 @@ tags:
 sources:
   - PR #2230 (backend-coverage-blackbox run https://github.com/Rose-Ai-Labs/rose/actions/runs/43805814766, FLAKY caa4e37997914a68b620f7100777c972)
   - PR #2289 (backend-coverage-blackbox run https://github.com/Rose-Ai-Labs/rose/actions/runs/43814587111, 180/181)
+  - PR #2355 (fix, merged 99ca195f9c273c4715391f81e8a2e8d8118786c6)
+  - PR #2293 (backend-coverage FLAKY 4cb7636d7f1d4792b51743551e888478: positive "Saved to iCloud: Passwords & Keychain On" returned unknown; boxes thread ph7193zbgchqaaz524rn3e69858jb1k9)
   - PR #2261 (author's local run 1794783548-1221733-803 in boxes thread ph7860cdzmbjs2k81pn3q6fkhh8j9h2b captured the FAIL line)
 repro: back-end/src/tests/blackbox/iphone-control.setup-verifier-replay.cases.ts (live replay, in iphone-control) and back-end/src/tests/unit/phone-setup-verifier.cases.ts (majority contract)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -125,6 +127,14 @@ Relatives:
   noted below.
 
 ## Solution
+
+Shipped in PR #2355 (merge `99ca195f9c`, 2026-11-16). Every deploy gate passed
+on `e0dfd07c92`: backend-coverage-blackbox 283/283, with iphone-control's
+domain passing on its first attempt; smoke 7/7. Production Render, backend
+probes and semantics PASS. A third occurrence surfaced the same day on
+PR #2293: a positive check (`Saved to iCloud: Passwords & Keychain On`)
+returned `unknown` in one sample. It is the same class, and the 2-of-3 vote
+covers it, because one `unknown` sample is outvoted by two `confirmed` ones.
 
 1. `back-end/src/providers/phoneSetupVerifier.ts`: `verifyPhoneSetup` settles
    `SETUP_VERIFIER_SAMPLES = 3` independent samples in parallel. It votes on the
