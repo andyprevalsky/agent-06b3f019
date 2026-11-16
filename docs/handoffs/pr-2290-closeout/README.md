@@ -108,3 +108,23 @@ unrecorded time, without claiming active work or attributing its cause. The
 original deployment clock remains unchanged. Deletion readiness and SHIPPED
 remain pending the final archive, reviewed records follow-up and native READY
 result. No branch or devbox deletion is authorized or performed.
+
+### Qualified production closure
+
+The untouched workflow-migration entrypoint subsequently passed all45 checks
+with the exact original release environment, including fixture cleanup. See
+[its verification](workflow-migration-verification.json). The semantic
+entrypoint ran and correctly refused at the failed Fly prerequisite, exit2;
+no semantic workflow was dispatched and no PASS is claimed. The controlling
+deploy-failure policy permits a separately attributed, successfully delivered
+post-merge repair to continue independently. The native failure report records
+Fly and its semantic dependency as delegated/waived, preserving the original
+FAIL/BLOCKED and refusal evidence. This release does not wait for that repair
+and does not claim all production lanes passed. See the cumulative
+[failure report](failure-report.json) and existing repair thread linked there.
+
+The records-only follow-up is [PR #2413](https://github.com/Rose-Ai-Labs/rose/pull/2413).
+Native independent classification accepted zero actual approval-scoped hunks
+in the documentation filename guard hit. Existing CodeRabbit filters exclude
+the records; the native no-reviewable-paths disposition spent no review.
+Final private preservation and native deletion readiness remain pending.

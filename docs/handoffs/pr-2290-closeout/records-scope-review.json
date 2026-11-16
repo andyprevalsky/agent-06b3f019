@@ -1,0 +1,14 @@
+{
+  "files": [
+    "docs/rca/cases/2026-11-16-shared-handoff-prompt-offered-unsupported-native-channel.md"
+  ],
+  "head": "3af5532fbfdc9967503fb4092551564206069999",
+  "reviewer": "thr_ac0ba84a7f724691af3de36ea60a6b50",
+  "status": "code-only",
+  "owner_thread": "ph75rdnnakqvqqjzm38dg0w2sd8jb4h9",
+  "owner_turn": "01a1e589-9c1d-7922-b0a7-3e865957a4a5",
+  "review_thread": "ph71vhbf2pr5gg5f9n91ps4thd8ja60f",
+  "review_turn": "01a1e58a-5448-71c0-8b87-adbc4bd01e4c",
+  "evidence_sha256": "0b78ae2a58497510b8c59f2f2b413c70130617cacb601a8d82a8fadc18c6b20b",
+  "qualification": "Record-only filename guard false positive; zero scoped hunks. Server-authored completed results validated by unchanged native checker; no Golden approval reused for changed docs."
+}
