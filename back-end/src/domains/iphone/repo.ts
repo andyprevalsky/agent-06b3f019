@@ -97,7 +97,7 @@ export async function admit(tx: Transaction, deviceId: string): Promise<void> {
     await closeLease(tx, next.id, 'EXPIRED');
     return admit(tx, deviceId);
   }
-  await tx.iPhoneLease.update({
+  const admitted = await tx.iPhoneLease.update({
     where: { id: next.id },
     data: {
       status: 'ACTIVE',
@@ -106,6 +106,9 @@ export async function admit(tx: Transaction, deviceId: string): Promise<void> {
       revision: { increment: 1 },
     },
   });
+  // Availability runs before the new holder reads its interaction. Commit its
+  // custody with promotion, even when this transaction returns the old holder.
+  await ensureSetup(tx, device.id, admitted);
 }
 
 async function validateAgent(tx: Transaction, userId: string, input: AcquireInput) {
