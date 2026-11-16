@@ -295,6 +295,13 @@ async function testGetCall_nonexistentId() {
 
 // ==================== BOUNDARY CAPTURE ====================
 
+// Exact non-identifying opening instructions from the third reported call.
+const REPORTED_SPANISH_OPENING =
+  'IDIOMA: español de España únicamente. Nunca diga nada en inglés, ni siquiera el saludo. ' +
+  'Pronuncie los números en español ("diecisiete", "las siete de la tarde"). ' +
+  'Hablar despacio y claro, frases cortas.\n' +
+  'Primera frase exacta apenas el teléfono responda: "Hola, buenas. ¿Tienen mesa para dos personas para mañana martes, a las siete de la tarde?"';
+
 async function testBoundary_vapiCallCreation() {
   const cursor = await fakeCursor();
 
@@ -303,13 +310,13 @@ async function testBoundary_vapiCallCreation() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({
       to: '+10000000000',
-      system_prompt: 'Boundary test',
+      system_prompt: REPORTED_SPANISH_OPENING,
       output_schema: { result: 'string' },
     }),
   });
   assertVapiCallPlaced(res);
 
-  const { body: outboundBody } = await fakeVapiCreate(cursor, 'Boundary test');
+  const { body: outboundBody } = await fakeVapiCreate(cursor, REPORTED_SPANISH_OPENING);
 
   const assistant = outboundBody.assistant;
   if (!assistant) {
@@ -348,7 +355,7 @@ async function testBoundary_vapiCallCreation() {
   if (!systemMessage.includes('use the dtmf function')) {
     throw new Error('Expected outbound assistant prompt to instruct DTMF for IVR navigation');
   }
-  if (!systemMessage.includes('Boundary test')) {
+  if (!systemMessage.endsWith(REPORTED_SPANISH_OPENING)) {
     throw new Error('Expected per-call system prompt in outbound assistant config');
   }
   if (!assistant.model.tools?.some((tool) => tool.type === 'endCall')) {
@@ -361,26 +368,41 @@ async function testBoundary_vapiCallCreation() {
       `Expected outbound assistant to include dtmf tool for IVR navigation, got ${JSON.stringify(assistant.model.tools)}`
     );
   }
+  if (
+    assistant.firstMessage !== undefined ||
+    assistant.firstMessageMode !== 'assistant-speaks-first-with-model-generated-message'
+  ) {
+    throw new Error(
+      `Expected prompt-generated Spanish opening, got ${JSON.stringify({ firstMessage: assistant.firstMessage, firstMessageMode: assistant.firstMessageMode })}`
+    );
+  }
+  if (assistant.endCallMessage !== undefined) {
+    throw new Error(`Expected prompt-controlled closing, got ${assistant.endCallMessage}`);
+  }
+  const endCall = assistant.model.tools?.find((tool) => tool.type === 'endCall');
+  if (
+    JSON.stringify(endCall?.messages) !== JSON.stringify([{ type: 'request-start', content: '' }])
+  ) {
+    throw new Error('Expected silent endCall after the model speaks its prompt-controlled goodbye');
+  }
   // "Rose" preset from mac-app onboarding VoiceSelector (PRESET_VOICES[0]).
   if (
     assistant.voice?.provider !== '11labs' ||
-    assistant.voice.voiceId !== '6fZce9LFNG3iEITDfqZZ'
+    assistant.voice.voiceId !== '6fZce9LFNG3iEITDfqZZ' ||
+    assistant.voice.model !== 'eleven_turbo_v2_5'
   ) {
     throw new Error(`Expected 11labs/Rose voice, got ${JSON.stringify(assistant.voice)}`);
   }
   if (
     assistant.transcriber?.provider !== 'deepgram' ||
-    assistant.transcriber.model !== 'flux-general-en' ||
-    assistant.transcriber.language !== 'en' ||
-    assistant.transcriber.eotThreshold !== 0.7 ||
-    assistant.transcriber.eotTimeoutMs !== 5000
+    assistant.transcriber.model !== 'nova-3' ||
+    assistant.transcriber.language !== 'multi' ||
+    assistant.transcriber.eotThreshold !== undefined ||
+    assistant.transcriber.eotTimeoutMs !== undefined
   ) {
     throw new Error(
       `Expected deepgram transcriber config, got ${JSON.stringify(assistant.transcriber)}`
     );
-  }
-  if (assistant.firstMessage !== 'Hello, how are you today?') {
-    throw new Error(`Expected first message to be code-controlled, got ${assistant.firstMessage}`);
   }
   if (assistant.silenceTimeoutSeconds !== 30 || assistant.maxDurationSeconds !== 600) {
     throw new Error(
@@ -395,6 +417,48 @@ async function testBoundary_vapiCallCreation() {
   }
   if (!assistant.clientMessages?.includes('transcript')) {
     throw new Error('Expected client messages to be code-controlled');
+  }
+
+  // Negative controls: language-independent configuration and the IVR exception.
+  for (const brief of [
+    'Speak English. Open with "Hello, is this a good time?" Close with "Cheers."',
+    'Parlez français. Commencez par "Bonjour, puis-je vous poser une question ?"',
+    'Navigate the keypad IVR and enter tracking number 2451338820 followed by #.',
+  ]) {
+    const variantCursor = await fakeCursor();
+    assertVapiCallPlaced(
+      await request(`${BASE_URL}/api/vapi/call`, {
+        method: 'POST',
+        headers: apiKeyHeaders(),
+        body: JSON.stringify({
+          to: '+10000000000',
+          system_prompt: brief,
+          output_schema: { result: 'string' },
+        }),
+      })
+    );
+    const variant = (await fakeVapiCreate(variantCursor, brief)).body.assistant;
+    const ivr = brief.startsWith('Navigate');
+    if (
+      variant?.firstMessageMode !==
+        (ivr
+          ? 'assistant-waits-for-user'
+          : 'assistant-speaks-first-with-model-generated-message') ||
+      variant.firstMessage !== (ivr ? '' : undefined)
+    ) {
+      throw new Error(`Incorrect opening mode for negative control: ${brief}`);
+    }
+    if (!variant.model?.messages?.some((message) => message.content?.endsWith(brief))) {
+      throw new Error(`Call brief was changed: ${brief}`);
+    }
+    if (
+      variant.voice?.model !== 'eleven_turbo_v2_5' ||
+      variant.transcriber?.model !== 'nova-3' ||
+      variant.transcriber.language !== 'multi' ||
+      !variant.model?.tools?.some((tool) => tool.type === 'dtmf')
+    ) {
+      throw new Error(`Multilingual speech or IVR capability lost: ${brief}`);
+    }
   }
 }
 
@@ -444,7 +508,10 @@ async function testBoundary_vapiCallWithUserOverrides() {
       `Expected user's systemName to flow into identity prefix, got: ${systemMessage?.substring(0, 60)}`
     );
   }
-  if (outbound.assistant?.voice?.voiceId !== 'voice_test_atlas_xyz') {
+  if (
+    outbound.assistant?.voice?.voiceId !== 'voice_test_atlas_xyz' ||
+    outbound.assistant.voice.model !== 'eleven_turbo_v2_5'
+  ) {
     throw new Error(
       `Expected user's voicePreferenceId to override default voice, got: ${outbound.assistant?.voice?.voiceId}`
     );

@@ -43,9 +43,14 @@ export interface OutboundVapiCall {
       provider?: string;
       model?: string;
       messages?: { role?: string; content?: string }[];
-      tools?: { type?: string; function?: { name?: string }; server?: { url?: string } }[];
+      tools?: {
+        type?: string;
+        function?: { name?: string };
+        server?: { url?: string };
+        messages?: { type?: string; content?: string }[];
+      }[];
     };
-    voice?: { provider?: string; voiceId?: string };
+    voice?: { provider?: string; voiceId?: string; model?: string };
     transcriber?: {
       provider?: string;
       model?: string;
@@ -54,6 +59,7 @@ export interface OutboundVapiCall {
       eotTimeoutMs?: number;
     };
     firstMessage?: string;
+    firstMessageMode?: string;
     endCallMessage?: string;
     silenceTimeoutSeconds?: number;
     maxDurationSeconds?: number;
