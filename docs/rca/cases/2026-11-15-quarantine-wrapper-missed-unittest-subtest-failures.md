@@ -17,6 +17,8 @@ tags:
   - subtest
   - deploy-gate
 sources:
+  - PR #2258
+  - commit 2d99b77abfd3ae2f23fbcb16e48ef9c3d41a702d
   - PR #2104
   - commit cf458ba660fa059c2378e7c545ce3275fe3646f2
 repro: scripts/tests/test-quarantine.test.py
@@ -55,6 +57,8 @@ on the result, and later blocks still run. After the method returns, collected
 failures are reported as one QUARANTINED_FAIL (an exception group when there
 are several). The wrapper is removed afterwards. Sync and async methods share
 the path.
+
+Shipped in PR #2258 (merged 2d99b77abf, 2026-11-16); all 17 deploy gates passed on 8277c90e7e and production semantics passed (verified by descendant 530b71fe93).
 
 ## Human feedback
 
