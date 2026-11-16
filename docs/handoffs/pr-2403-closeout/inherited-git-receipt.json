@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private-preservation/phone-rca/inherited-git-20261116T150705Z-5d1c554c-5187-40c6-8bc5-f7b47989e050.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "c1ce790fe65eaa94828693f7f84c1d61462bfd8b675dbc02f30f41ac490a9fa1",
+  "gzip_sha256": "b1e5450ce96dfd0d70707194da6d87ca747e28796e1753182b6902cd236c9c46",
+  "stored_bytes": 1277562111,
+  "frames": 153,
+  "files": 8,
+  "original_bytes": 1295969962,
+  "manifest_sha256": "05863e7df49081cafe3b87157bf948ce9de6d5941e6b61a40b5102e4343a9a08",
+  "full_readback_verified": true
+}

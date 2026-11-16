@@ -1,0 +1,30 @@
+{
+  "native_failure": "backend-coverage-blackbox/blackbox:agents",
+  "native_result": "FAIL",
+  "attribution": "NOT_INTRODUCED",
+  "comparison": {
+    "failed_head": "0e65e3c0747c71c6dc742994285771eda1462f45",
+    "base": "d40e1e11692b84a6859aee1f4f80858b73b1b553",
+    "replay_exits": [
+      1,
+      1
+    ],
+    "valid_control_exits": [
+      0,
+      0
+    ]
+  },
+  "repair_url": "https://boxes.dev/thread/ph7ct281qpsd51tk14q890n9dd8jbesv",
+  "repair_devbox": "1de4e7aa-f614-4758-b535-49f62595e7a2",
+  "originating_devbox": "6ab683a5-b776-420b-9bab-edcfcd5b76cb",
+  "folder": {
+    "placementId": "p17fpr971m1t2qcfxyzqgrcsts8jb2m3",
+    "primaryInstanceId": "0f8c2d78-3043-4af0-89bd-eb53f8500a5c",
+    "executionInstanceId": "1de4e7aa-f614-4758-b535-49f62595e7a2",
+    "folderId": "z57k17gzz4egv17ag6qqtasexs8h273j",
+    "folderRevision": 1
+  },
+  "delivery": "delivered",
+  "native_pending_post_merge": 0,
+  "private_evidence_receipt": "gate-attribution-receipt.json"
+}

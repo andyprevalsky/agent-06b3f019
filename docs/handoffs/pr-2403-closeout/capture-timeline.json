@@ -1,0 +1,16 @@
+{
+  "capture_finished_at": "2026-11-16T16:25:16.119478+00:00",
+  "capture_started_at": "2026-11-16T16:25:05.366808+00:00",
+  "primary_restore_finished_at": "2026-11-16T16:26:41.208966+00:00",
+  "primary_restore_started_at": "2026-11-16T16:26:31.078307+00:00",
+  "primary_separate_verify_finished_at": "2026-11-16T16:26:31.077988+00:00",
+  "primary_separate_verify_started_at": "2026-11-16T16:26:23.577351+00:00",
+  "primary_upload_native_readback_finished_at": "2026-11-16T16:26:19.718919+00:00",
+  "primary_upload_started_at": "2026-11-16T16:25:22.374538+00:00",
+  "supplement_restore_finished_at": "2026-11-16T16:27:07.192305+00:00",
+  "supplement_restore_started_at": "2026-11-16T16:27:06.428776+00:00",
+  "supplement_separate_verify_finished_at": "2026-11-16T16:27:06.428519+00:00",
+  "supplement_separate_verify_started_at": "2026-11-16T16:27:05.612944+00:00",
+  "supplement_upload_native_readback_finished_at": "2026-11-16T16:27:05.600326+00:00",
+  "supplement_upload_started_at": "2026-11-16T16:27:00.605217+00:00"
+}

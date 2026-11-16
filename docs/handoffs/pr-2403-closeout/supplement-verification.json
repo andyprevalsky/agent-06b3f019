@@ -1,0 +1,8 @@
+{
+  "archive": "r2://trace-archive/private-preservation/pr2403/final-metadata-20261116T162700Z-60976da6-2ba4-43e5-8db8-ffdb77d44e76.tar.gz.gcm",
+  "ciphertext_sha256": "8e5d4e930db90ab0c27e801a714510c11693301eaee270dd24f03a843a6fa9d4",
+  "files": 58,
+  "full_restore_verified": true,
+  "native_full_readback": true,
+  "separate_full_verification": true
+}

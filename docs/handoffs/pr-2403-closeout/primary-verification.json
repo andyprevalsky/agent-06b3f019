@@ -1,0 +1,13 @@
+{
+  "archive": "r2://trace-archive/private-preservation/pr2403/final-primary-20261116T162522Z-8088e4a5-9f10-4525-9469-8d1fd3010974.tar.gz.gcm",
+  "ciphertext_sha256": "6289dce48f2ecf546deea36550720b198a61441e9e25408031b8d2a2129e6859",
+  "deletion_ready_claim": false,
+  "every_restored_source_file_hash_size_mode_matches": true,
+  "full_independent_restore": true,
+  "full_native_authenticated_readback": true,
+  "helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+  "key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "restored_source_files": 22412,
+  "separate_remote_full_verification": true,
+  "source_guard_after_upload_and_restore": true
+}
