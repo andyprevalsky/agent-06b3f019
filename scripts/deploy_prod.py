@@ -1263,6 +1263,7 @@ def main(argv: list[str] | None = None, *, io: IO | None = None, root: Path = RO
     gh, gh_env, gh_values = gh_setup(root, environ, io.exists)
     ctx = Ctx(sha=sha, root=root, state_dir=state_dir, io=io, environ=environ, resume_fly=args.resume_fly, gh=gh,
               gh_env=gh_env)
+    ctx.add_secrets({key: environ.get(key, '') for key in ('GH_TOKEN', 'GITHUB_TOKEN')})
     ctx.add_secrets(gh_values)
     for package in ('back-end', 'agents'):  # redact what any child could echo, before any child runs
         ctx.dotenv(package)
