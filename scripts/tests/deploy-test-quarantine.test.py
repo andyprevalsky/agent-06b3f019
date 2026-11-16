@@ -489,6 +489,45 @@ class ReleaseReport(unittest.TestCase):
             q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'real_model_controls'},
                                    self.root)
 
+    def test_bool_returning_domain_with_listed_cases_binds_its_single_failed_case(self):
+        # browser-tilion (PR #2214, occurrence 5cb2ca0e): run_all_tests() returns a bool, so the runner
+        # prints no counts prefix, and cases are `("label", fn)` pairs fed to record_async.
+        occurrence_id = 'e' * 32
+        domain = ("from test_quarantine import quarantine\n\n"
+                  "@quarantine(since='2026-11-15', repair='pending-handoff:%s', error='AssertionError: boom', "
+                  "evidence='rca-3')\n"
+                  "async def test_port_ownership():\n    pass\n\n"
+                  "async def test_other():\n    pass\n\n"
+                  "async def run_all_tests():\n"
+                  "    result = BlackboxResult()\n"
+                  "    for name, test in [\n"
+                  "        (\"port_ownership\", test_port_ownership),\n"
+                  "        (\n            \"other\",\n            test_other,\n        ),\n"
+                  "    ]:\n"
+                  "        await result.record_async(name, test)\n"
+                  "    return result.all_passed\n" % occurrence_id)
+        (self.root / 'tests' / 'listed.blackbox.py').write_text(domain)
+        detail = ("  ❌ listed FAIL (1 failed case(s): port_ownership; "
+                  "first error: port_ownership: AssertionError: boom)")
+        occurrence = {'id': occurrence_id, 'gate': 'agents', 'unit': 'listed', 'detail': detail,
+                      'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-3', 'marker': 'tests/listed.blackbox.py',
+                 'post_merge': packet, 'case': 'port_ownership'}
+        recorded = q.validate_attribution(occurrence, entry, self.root)
+        self.assertEqual(('NOT_INTRODUCED', 'listed', occurrence_id),
+                         tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
+        # A listed but unmarked case, a case that did not fail, or several failed cases never bind.
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution({**occurrence, 'detail': detail.replace('port_ownership', 'other')},
+                                   {**entry, 'case': 'other'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution(occurrence, {**entry, 'case': 'other'}, self.root)
+        several = detail.replace('(1 failed case(s): port_ownership', '(2 failed case(s): port_ownership, other')
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': several}, entry, self.root)
+
     def test_typescript_domain_flake_binds_the_marker_of_its_single_failed_native_case(self):
         occurrence_id = 'd' * 32
         title = 'HMR: an agent write reaches the preview DOM in \u2264 3 s'

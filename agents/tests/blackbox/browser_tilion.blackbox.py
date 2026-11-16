@@ -16,6 +16,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +29,8 @@ import websockets
 from playwright.async_api import async_playwright
 
 from _test_utils import BlackboxResult
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "lib"))
+from test_quarantine import quarantine
 
 TILION_SESSION = "sess_0123456789abcdef0123456789abcdef"
 TILION_TOKEN = "tok_secret_value_never_logged"
@@ -386,6 +389,12 @@ async def test_chromium_native_discovery_preserves_missing_file_budget():
         assert sleeps == 100, "retain the original readiness attempt budget"
 
 
+@quarantine(
+    since="2026-11-15",
+    repair="pending-handoff:5cb2ca0e07ae42fdbee8a8033fd2157c",
+    error='AssertionError: /json/version on 127.0.0.1:None not ready: FileNotFoundError: [Errno 2] No such file or directory: \'/tmp/tilion-full-chromium-lvlucndt/DevToolsActivePort\'; Chromium exit=None; stderr=[1214576:1216321:1115/072549.315342:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")',
+    evidence="PR #2214 agents-coverage-blackbox round 2 occurrence 5cb2ca0e07ae42fdbee8a8033fd2157c; RCA /home/boxes/omission-repro/rca-5cb2ca0e/RCA.md (cold Chromium start > 10 s DevToolsActivePort budget under memory pressure; reproduced on origin/main)",
+)
 async def test_full_chromium_port_cannot_be_stolen_after_parent_reservation():
     original_popen = subprocess.Popen
     held_ports = []

@@ -505,7 +505,8 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
             **({'case': entry['case']} if entry.get('case') is not None else {})}
 
 
-_DOMAIN_SINGLE_FAILURE = re.compile(r'\(\d+ passed, 1 failed; 1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
+# A domain whose run_all_tests() returns a bool (not a counts dict) prints no `N passed, 1 failed; ` prefix.
+_DOMAIN_SINGLE_FAILURE = re.compile(r'\((?:\d+ passed, 1 failed; )?1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
 
 
 def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) -> list[dict]:
@@ -526,8 +527,9 @@ def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) 
         text = (root / path).read_text(errors='replace')
     except OSError:
         return []
-    functions = set(re.findall(r'\brecord(?:_async)?\(\s*([\'"])' + re.escape(case) + r'\1\s*,\s*([A-Za-z_]\w*)\s*\)',
-                               text))
+    # The label is recorded by `record("case", fn)` or listed as a `("case", fn)` pair fed to record_async.
+    functions = set(re.findall(r'(?:\brecord(?:_async)?)?\(\s*([\'"])' + re.escape(case)
+                               + r'\1\s*,\s*([A-Za-z_]\w*)\s*,?\s*\)', text))
     names = {name for _quote, name in functions}
     if len(names) != 1:
         raise ValueError(f'{path} must record case {case} with exactly one test function')
