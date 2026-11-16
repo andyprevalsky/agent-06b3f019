@@ -17,8 +17,8 @@ tags:
   - selected-field
   - provider-compatibility
 sources:
-  - https://github.com/Rose-Ai-Labs/rose/actions/runs/43893687982
-  - originating merge 770611c7c2e3ad3e066c2ee703e87c28f0e50d4f
+  - fleet run 43893687982
+  - commit 770611c7c2e3ad3e066c2ee703e87c28f0e50d4f
 repro: back-end/src/tests/blackbox/response-schema-retry.blackbox.ts
 status: open
 ---
