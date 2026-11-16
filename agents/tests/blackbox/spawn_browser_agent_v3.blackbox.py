@@ -40,6 +40,9 @@ from _test_utils import (
     teardown_mock,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "lib"))
+from test_quarantine import quarantine
+
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -17073,6 +17076,12 @@ async def test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label
             await browser.close()
 
 
+@quarantine(
+    since="2026-11-16",
+    repair="pending-handoff:0e5f6905bb444c74ba092235d99fcfb1",
+    error="dom_service_cross_origin_iframe_coordinates_include_frame_offset: AssertionError",
+    evidence="PR2289 round final agents-coverage-blackbox spawn-browser-agent-v3 FLAKY 0e5f6905 on 71f2cd2668: first attempt AssertionError, same-source rerun passed; select_affected_tests shows the PR diff (back-end worker-deployment-queue only) does not reach this test",
+)
 async def test_dom_service_cross_origin_iframe_coordinates_include_frame_offset():
     """Regression for b4466499 (prod agent-payment-production-purchase, 2026-11-15).
 
@@ -40293,10 +40302,7 @@ async def run_all_tests():
         "dom_service_opacity_hidden_checkbox_nonempty_rect_uses_label",
         test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label,
     )
-    await r.record_async(
-        "dom_service_cross_origin_iframe_coordinates_include_frame_offset",
-        test_dom_service_cross_origin_iframe_coordinates_include_frame_offset,
-    )
+    await r.record_async("dom_service_cross_origin_iframe_coordinates_include_frame_offset", test_dom_service_cross_origin_iframe_coordinates_include_frame_offset)
     await r.record_async(
         "dom_service_disconnect_stops_session",
         test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser,
