@@ -1,7 +1,8 @@
 // GateRequestCard — renders a Gate (metadata.gate on an AttentionRequest) in the
 // attention inbox using the locked design: Rail layout · navi-black rail/border/
-// button · white Rose logo · animated thinking dot · CTA + Cancel. Pure render +
-// two callbacks (primary / cancel). See
+// button · white Rose logo · animated thinking dot · CTA + Cancel (+ optional Skip,
+// which the attention inbox uses to send the gate to the back of its queue).
+// Pure render + callbacks (primary / cancel / skip). See
 // docs/plans/active/sms-onboarding-and-gates.md and the /gate-playground sandbox.
 
 import { ArrowRight, Check, X } from 'lucide-react';
@@ -29,11 +30,13 @@ export function GateRequestCard({
   loading,
   onPrimary,
   onCancel,
+  onSkip,
 }: {
   gate: GateMetadata;
   loading: boolean;
   onPrimary: () => void;
   onCancel: () => void;
+  onSkip?: () => void;
 }): JSX.Element {
   const isReply = gate.action.kind === 'reply';
   return (
@@ -82,6 +85,16 @@ export function GateRequestCard({
             <X className="h-4 w-4" />
             {isReply ? 'Decline' : 'Cancel'}
           </button>
+          {onSkip && (
+            <button
+              type="button"
+              disabled={loading}
+              onClick={onSkip}
+              className={`${BTN} text-muted-foreground hover:text-foreground`}
+            >
+              Skip
+            </button>
+          )}
         </div>
       </div>
     </div>

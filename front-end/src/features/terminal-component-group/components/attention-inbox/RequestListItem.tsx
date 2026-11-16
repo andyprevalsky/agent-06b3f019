@@ -5,6 +5,7 @@
  *   | render optional media / question / response text
  *   v
  * [GENERIC_ACTIONS] -- Accept/Skip/Reject --> parent action handler
+ * [ANY KIND] --Skip--> request moves to the back of the queue; next one shows.
  *
  * [NATIVE AUTH] -> exact request/task locator; authenticated fullscreen resolves authority.
  * [NATIVE AUTH] --Resend code--> typed resend completion; agent re-raises a new request.
@@ -92,7 +93,7 @@ export function RequestListItem(props: RequestListItemProps) {
 
 /** Gate requests render the Gate card; everything else uses the generic body. */
 function RequestBody(props: RequestListItemProps) {
-  const { request, loading, onAccept, onReject } = props;
+  const { request, loading, onAccept, onReject, onSkip } = props;
   const gate = getGateMetadata(request.metadata);
   if (!gate) return <GenericRequestBody {...props} />;
 
@@ -109,6 +110,7 @@ function RequestBody(props: RequestListItemProps) {
         onAccept(request.id, reply);
       }}
       onCancel={() => onReject(request.id)}
+      onSkip={() => onSkip(request.id)}
     />
   );
 }
@@ -144,6 +146,7 @@ function GenericRequestBody({
           requestId={request.id}
           loading={loading}
           isCompleting={actionRequestId === request.id}
+          onSkip={() => onSkip(request.id)}
           onOpenLiveView={() => {
             openAuthBrowserInApp({
               agentId: request.agent_id,
@@ -227,6 +230,7 @@ interface AuthAssistanceBlockProps {
   requestId: string;
   loading: boolean;
   isCompleting: boolean;
+  onSkip: () => void;
   onOpenLiveView: () => void;
 }
 
@@ -238,6 +242,7 @@ function AuthAssistanceBlock({
   requestId,
   loading,
   isCompleting,
+  onSkip,
   onOpenLiveView,
 }: AuthAssistanceBlockProps) {
   return (
@@ -265,6 +270,9 @@ function AuthAssistanceBlock({
             className="inline-flex h-9 items-center gap-1 rounded-md border border-input px-3 text-sm disabled:opacity-50"
           />
         )}
+        <Button variant="outline" size="sm" onClick={onSkip} disabled={loading || isCompleting}>
+          Skip
+        </Button>
       </div>
     </div>
   );

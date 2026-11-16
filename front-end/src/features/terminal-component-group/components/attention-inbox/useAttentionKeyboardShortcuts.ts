@@ -1,7 +1,7 @@
 /**
  * Keyboard shortcuts for the open AttentionInbox modal:
  *  - Cmd/Ctrl + Enter: submit response for first unanswered request
- *  - Cmd/Ctrl + S:     skip first unanswered non-auth request
+ *  - Cmd/Ctrl + S:     skip first unanswered request (any kind) to the back of the queue
  */
 
 import { useEffect } from 'react';
@@ -34,7 +34,6 @@ export function useAttentionKeyboardShortcuts({
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
-        if (getAuthAssistanceMetadata(firstUnanswered) !== null) return;
         onSkip(firstUnanswered.id);
       }
     };

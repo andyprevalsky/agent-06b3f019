@@ -997,7 +997,7 @@ describe('AttentionInbox (blackbox)', () => {
     expect(screen.getByText('amazon.com')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Skip' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Authentication Complete' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: /Open Live Browser/i }));
@@ -1156,7 +1156,7 @@ describe('AttentionInbox (blackbox)', () => {
     await waitFor(() => expect(skipCalled).toBe(true));
   });
 
-  it('Cmd+S keyboard shortcut does not skip auth assistance requests', async () => {
+  it('Cmd+S keyboard shortcut skips auth assistance requests too', async () => {
     let skipCalled = false;
     server.use(
       http.get(`${API_BASE}/attention-requests`, () =>
@@ -1205,7 +1205,7 @@ describe('AttentionInbox (blackbox)', () => {
       );
     });
 
-    expect(skipCalled).toBe(false);
+    await waitFor(() => expect(skipCalled).toBe(true));
   });
 
   it('typing in the textarea updates the response input', async () => {
