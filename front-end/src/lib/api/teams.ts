@@ -75,7 +75,7 @@ export type ShareableProvider =
  * One exact shareable account. `accountId`: inbox email (gmail), '' (one-row providers:
  * imessage, whatsapp, linkedin, granola/fireflies + `accountEmail`), PlaidItem.id (plaid),
  * `gh:owner/repo` (github_repo), compute account id (claude_code / gpt_code), CLI request id (cli),
- * server URL (mcp).
+ * the MCP server's integration id (mcp; never its URL, which may carry a credential).
  */
 export interface ShareableIntegration {
   integrationId: string;

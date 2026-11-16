@@ -109,7 +109,7 @@ async function connectEverything(owner: User) {
 
 test('every provider except iPhone, browser cookies, passwords and Pebble lists exact shareable accounts', async () => {
   const owner = await user('Owner');
-  const { chase, amex, stale } = await connectEverything(owner);
+  const { rows, chase, amex, stale } = await connectEverything(owner);
   const listed = (await request(owner, '/shareable-integrations')).integrations as Listed[];
   const byKey = new Map(listed.map((row) => [`${row.provider}:${row.accountId}`, row]));
   assert.deepEqual([...new Set(listed.map((row) => row.provider))].sort(), [
@@ -139,7 +139,9 @@ test('every provider except iPhone, browser cookies, passwords and Pebble lists 
   assert.equal(byKey.get('github_repo:gh:acme/app')?.label, 'gh:acme/app');
   assert.equal(byKey.get('claude_code:claude-acct')?.label, 'claude@example.test');
   assert.equal(listed.find((row) => row.provider === 'cli')?.label, 'Vercel CLI');
-  assert.equal(byKey.get('mcp:https://mcp.example.test/mcp')?.label, 'Docs MCP');
+  // Keyed by the integration id: the server URL (which may carry a credential) is never shared.
+  assert.equal(byKey.get(`mcp:${rows.mcp.id}`)?.label, 'Docs MCP');
+  assert.ok(!JSON.stringify(listed).includes('mcp.example.test'), 'no MCP URL in the listing');
 });
 
 test('shares bind one exact account and are revalidated at read time for every provider', async () => {

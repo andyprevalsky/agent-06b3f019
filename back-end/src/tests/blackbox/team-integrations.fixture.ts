@@ -525,17 +525,19 @@ export async function seedTeamMcpFixture(
       },
     },
   });
-  const share = (
-    teamId: string,
-    ownerKey: 'owner' | 'outsider',
-    integrationId: string,
-    url: string
-  ) =>
+  // MCP shares are keyed by the integration id: the server URL may carry a credential.
+  const share = (teamId: string, ownerKey: 'owner' | 'outsider', integrationId: string) =>
     prisma.teamIntegrationShare.create({
-      data: { teamId, integrationId, ownerUserId: ids[ownerKey], provider: 'mcp', accountId: url },
+      data: {
+        teamId,
+        integrationId,
+        ownerUserId: ids[ownerKey],
+        provider: 'mcp',
+        accountId: integrationId,
+      },
     });
-  await share(teams.shared, 'owner', server.id, expected.url);
-  await share(teams.unrelated, 'outsider', outsider.id, privateUrl);
+  await share(teams.shared, 'owner', server.id);
+  await share(teams.unrelated, 'outsider', outsider.id);
   return {
     marker,
     ids,

@@ -13,7 +13,12 @@ type Client = Prisma.TransactionClient;
 const single = new Set<string>(SINGLE_ACCOUNT_PROVIDERS);
 const meeting = new Set<string>(MEETING_NOTE_PROVIDERS);
 /** Providers whose Integration row is one account, named by its non-empty accountId. */
-const BY_ACCOUNT_ID = new Set(['github_repo', 'claude_code', 'gpt_code', 'cli', 'mcp']);
+const BY_ACCOUNT_ID = new Set(['github_repo', 'claude_code', 'gpt_code', 'cli']);
+/**
+ * One MCP server per Integration row, shared by the row's id: its accountId is the server URL,
+ * which may carry a credential (`?api_key=…`) and must never reach teammates through a grant.
+ */
+const BY_INTEGRATION_ID = new Set(['mcp']);
 
 interface IntegrationFields {
   id: string;
@@ -120,6 +125,13 @@ export async function shareableAccounts(
           accountEmail: null,
           label: trimmed(item.institutionName),
         });
+    } else if (BY_INTEGRATION_ID.has(integration.name)) {
+      push({
+        id: integration.id,
+        accountId: integration.id,
+        accountEmail: null,
+        label: integrationLabel(integration),
+      });
     } else if (BY_ACCOUNT_ID.has(integration.name)) {
       if (integration.accountId !== '')
         push({
@@ -200,6 +212,9 @@ export function validateGrant(
     return item && item.userId === row.ownerUserId && item.integrationId === integration.id
       ? { label: trimmed(item.institutionName) }
       : null;
+  }
+  if (BY_INTEGRATION_ID.has(row.provider)) {
+    return row.accountId === integration.id ? { label: integrationLabel(integration) } : null;
   }
   if (BY_ACCOUNT_ID.has(row.provider)) {
     return row.accountId !== '' && integration.accountId === row.accountId

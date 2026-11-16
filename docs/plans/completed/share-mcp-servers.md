@@ -8,7 +8,8 @@ Shipped in PR #2259. `team-daily-shared-mcp` passed as a REAL run on the cloud f
 
 ```
 Owner's Integrations page ── MCP server row ── "Share" caption ──PUT /api/teams/:id/integrations/:integrationId
-                                                                  TeamIntegrationShare {provider 'mcp', accountId = server URL}
+                                                                  TeamIntegrationShare {provider 'mcp', accountId = the owner's integration id}
+                                                                  (never the URL: it may carry a credential)
 
 Teammate's code agent (Claude Code / Codex)
   ~/.rose/bin/rose mcp (stdio)

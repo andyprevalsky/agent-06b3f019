@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 /**
- * A teammate's code agent lists and calls the owner's team-shared MCP server (mcp grant,
+ * A teammate's code agent lists and calls the owner's team-shared MCP server (mcp grant keyed by
+ * the owner's integration id, never the server URL, which may carry a credential;
  * docs/plans/completed/share-mcp-servers.md). The call runs with the OWNER's API-key header
  * server-side; the teammate never receives it. The shared server's tool names never
  * collide with the reader's own server, and the sandbox `rose mcp` tool list names the
@@ -97,8 +98,10 @@ async function agentToken(userId: string) {
 
 test("a teammate lists and calls the owner's shared MCP server with the owner's key, never seeing it", async () => {
   const f = await teamFixture('mcp');
+  // A credential in the URL's query must never reach a teammate through the share.
+  const SECRET_QUERY = 'query-secret-never-shared';
   const { server: owned } = await connectMcpServer(f.owner.userId, {
-    url: `${fixture.base}/key-mcp`,
+    url: `${fixture.base}/key-mcp?api_key=${SECRET_QUERY}`,
     name: 'Team Docs',
     headers: { 'X-Api-Key': KEY },
     redirectUri: REDIRECT,
@@ -120,7 +123,7 @@ test("a teammate lists and calls the owner's shared MCP server with the owner's 
   const shareable = await teamsService.listShareableIntegrations(f.owner.userId);
   const account = shareable.integrations.find((row) => row.provider === 'mcp');
   assert.equal(account?.id, owned.id);
-  assert.equal(account?.accountId, `${fixture.base}/key-mcp`);
+  assert.equal(account?.accountId, owned.id, 'shared by integration id, not URL');
   assert.equal(account?.label, 'Team Docs');
   await share(f, owned.id);
 
@@ -140,6 +143,11 @@ test("a teammate lists and calls the owner's shared MCP server with the owner's 
   assert.equal(new Set(names).size, names.length, `unique agent tool names: ${names.join()}`);
   assert.ok(names.includes('team-docs__echo') && names.includes('team-docs-2__echo'), names.join());
   assert.ok(!JSON.stringify(servers).includes(KEY), 'the owner key is never listed');
+  // Every surface a teammate reads: grants, the team detail and the shared data map.
+  const grants = await teamsService.resolveTeamDataAccess(f.reader.userId);
+  const detail = await teamsService.getTeam(f.reader.userId, f.teamId);
+  for (const [surface, value] of Object.entries({ grants, detail, servers }))
+    assert.ok(!JSON.stringify(value).includes(SECRET_QUERY), `${surface} leaks the MCP URL query`);
 
   // key-mcp refuses any call without the owner's X-Api-Key: success proves it was sent.
   const result = await callMcpTool(f.reader.userId, owned.id, 'echo', { text: 'shared' });
