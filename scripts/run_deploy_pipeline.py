@@ -298,7 +298,6 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from typing import Literal, overload
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3753,18 +3752,8 @@ def _gh_read_token(root: Path) -> str | None:
     return token
 
 
-@overload
-def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
-             read_only: bool = False, binary: Literal[False] = False) -> str: ...
-
-
-@overload
-def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
-             read_only: bool = False, binary: Literal[True]) -> bytes: ...
-
-
-def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
-             read_only: bool = False, binary: bool = False) -> str | bytes:
+def _gh_output(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
+               read_only: bool = False, binary: bool = False) -> str | bytes:
     """``gh ...`` stdout; a failed call raises with gh's own message. Writes
     (dispatch, rerun) run with the inherited GH_TOKEN, the workflow-scoped
     identity. ``read_only`` calls run with the token pool's best member and,
@@ -3794,6 +3783,24 @@ def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SE
     return completed.stdout
 
 
+def _gh_bytes(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
+              read_only: bool = False) -> bytes:
+    """Raw gh output for binary log archives, without text decoding."""
+    output = _gh_output(arguments, root, timeout=timeout, read_only=read_only, binary=True)
+    if not isinstance(output, bytes):
+        raise ProductionGateError("gh binary output was not bytes")
+    return output
+
+
+def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS,
+             read_only: bool = False) -> str:
+    """Native subprocess text mode, including stdout/stderr decoding and errors."""
+    output = _gh_output(arguments, root, timeout=timeout, read_only=read_only)
+    if not isinstance(output, str):
+        raise ProductionGateError("gh text output was not text")
+    return output
+
+
 def _gh_json(arguments: list[str], root: Path) -> object:
     """``gh ... --json`` parsed (always a read); a failed call raises with
     gh's own message."""
@@ -3816,9 +3823,9 @@ def complete_failed_run_log(run_id: str, attempt: str, *, root: Path) -> tuple[s
 
     if not run_id.isdigit() or not attempt.isdigit():
         raise ProductionGateError("missing exact original run/attempt for log archive")
-    raw = _gh_text(["api", "--allow-escape-sequences",
+    raw = _gh_bytes(["api", "--allow-escape-sequences",
                     f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/attempts/{attempt}/logs"],
-                   root, timeout=GH_TIMEOUT_SECONDS * 5, read_only=True, binary=True)
+                   root, timeout=GH_TIMEOUT_SECONDS * 5, read_only=True)
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             names = archive.namelist()

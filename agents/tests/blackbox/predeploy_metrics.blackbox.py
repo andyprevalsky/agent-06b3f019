@@ -13,6 +13,9 @@ from pathlib import Path
 
 from _test_utils import BlackboxResult, teardown_mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "lib"))
+from test_quarantine import quarantine
+
 
 def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
@@ -258,6 +261,12 @@ def test_local_runner_persists_console_log_and_summary() -> None:
     assert summary["schedule"] == ["long-task", "medium-task", "short-task"]
 
 
+@quarantine(
+    since="2026-11-16",
+    repair="pending-handoff:5abc933da5e44218a362212243c5b06b",
+    error='subprocess.TimeoutExpired: Command \'[\'bash\', \'/home/runner/_work/rose/rose/scripts/run-deploy-stage\', \'slow-stage\', \'--\', \'bash\', \'-c\', "printf \'%s\\\\n\' $$ > \'/tmp/tmp9o9ye457/stage-child.pid\'; while :; do sleep 1; done"]\' timed out after 10 seconds',
+    evidence='PR #2417 native agents coverage run43941374764 occurrence5abc933da5e44218a362212243c5b06b; original full log SHA2562cd941ea22f206615e41d21aeca83175d63291b66f6b9aac82e34829b5769e57; RCA signal-attribution/REPORT.md and historical open case2026-10-15-stage-signal-timeout-without-first-delivery-evidence; source attribution NOT_INTRODUCED, causal state UNKNOWN.',
+)
 def test_timing_wrappers_terminate_child_groups_and_record_signal() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     stage_runner = repo_root / "scripts/run-deploy-stage"

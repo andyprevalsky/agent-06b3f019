@@ -651,17 +651,22 @@ def lane_fly(ctx: Ctx) -> Result:
 def lane_workflow_migration(ctx: Ctx) -> Result:
     receipt = ctx.production_receipt()
     proof = receipt.get('cutover_verify') or {}
-    qualified = proof.get('verified_by') == 'prequeue-live-descendant'
-    source = proof.get('source_commit') if qualified else ctx.sha
-    token = proof.get('attempt') if qualified else (receipt.get('fly') or {}).get('deployment_token')
-    if qualified and (receipt.get('status') != 'passed' or receipt.get('merged_sha') != ctx.sha
-                      or proof.get('original_source_commit') != ctx.sha
-                      or proof.get('monitor_verify_exit') != 0 or not source):
-        return False, 'invalid qualified descendant Fly proof; run the fly lane first', 1
+    if proof.get('verified_by') == 'prequeue-live-descendant':
+        source, token = proof.get('source_commit'), proof.get('attempt')
+        if (receipt.get('status') != 'passed' or receipt.get('merged_sha') != ctx.sha
+                or proof.get('original_source_commit') != ctx.sha
+                or proof.get('monitor_verify_exit') != 0 or not source or not token):
+            return False, 'invalid qualified descendant Fly proof; run the fly lane first', 1
+        code = ctx.sh('workflow-migration', MIGRATION_ARGV, cwd=ctx.root / 'back-end',
+                      extra=migration_env(source, token))
+        reason = (Descendant(f'every migration row PASS (qualified descendant {source}, original CI failure retained)')
+                  if code == 0 else f'validate-prod-workflow-migration exited {code}')
+        return (code == 0), reason, code
+    token = (ctx.production_receipt().get('fly') or {}).get('deployment_token')
     if not token:
         return False, 'no fly.deployment_token for this sha in production.json; run the fly lane first', 1
-    code = ctx.sh('workflow-migration', MIGRATION_ARGV, cwd=ctx.root / 'back-end', extra=migration_env(source, token))
-    return (code == 0), (('every migration row PASS' + (f' (qualified descendant {source}, original CI failure retained)' if qualified else '')) if code == 0 else f'validate-prod-workflow-migration exited {code}'), code
+    code = ctx.sh('workflow-migration', MIGRATION_ARGV, cwd=ctx.root / 'back-end', extra=migration_env(ctx.sha, token))
+    return (code == 0), ('every migration row PASS' if code == 0 else f'validate-prod-workflow-migration exited {code}'), code
 
 
 def is_descendant(ctx: Ctx, live: str) -> bool:

@@ -103,3 +103,22 @@ races; both received explicit regression controls before source acceptance.
 Separate original execution history from positive physical descendant proof.
 An absent job must require complete authenticated logs and durable evidence,
 and every source/identity proof must use the real immutable Git objects.
+
+## Repair validation regressions
+
+Native validation preserved three introduced repair failures rather than
+relabeling them as passing: malformed case metadata, duplicate module-level
+_gh_text overload definitions, and the migration structural assertion for
+the exact merged SHA/token path. The case schema was corrected with the
+unchanged archive validator. The existing unique-definition assertion first
+failed, then passed with separately named byte/text wrappers and a shared
+low-level body identical to the original subprocess implementation. A first
+wrapper proposal changed stderr decoding; independent review rejected it,
+and the accepted proposal preserves stdout, stderr, newline, error, token-pool
+fallback and timeout behavior. Its unchanged full owning unit passed.
+
+Migration now has a guarded qualified-descendant branch and retains the
+original normal source/token path literally. The unchanged migration
+structural script, its nested checks, all91production-lane tests and five
+focused identity checks passed on the reviewed correction. Full native
+new-source validation and merged production acceptance remain required.
