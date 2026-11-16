@@ -4302,7 +4302,15 @@ async def test_attempt_completion_result_reaches_the_verifier_as_authored_work()
             from helpers.llm import build_verifier_context_messages
 
             rendered = "\n".join(str(m["content"]) for m in build_verifier_context_messages(seen[-1], "V"))
-            assert '"tool_name": "attempt_completion"' in rendered
+            import json
+            payloads = [json.loads(line[len("TOOL_RESULT "):]) for line in rendered.splitlines()
+                        if line.startswith("TOOL_RESULT ")]
+            assert payloads == [
+                {"tool_name": "attempt_completion", "tool_call_id": "tc-1", "result": ""},
+                {"tool_name": "attempt_completion", "tool_call_id": "tc-1:result",
+                 "result": args["result"], "title": "Authored result"},
+            ]
+            assert authored[0]["text"] == args["result"]
             assert "Andy Prevalskii, Founder, Rose Labs" in rendered, rendered
         else:
             assert authored == [], seen[-1]

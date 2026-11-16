@@ -24,6 +24,7 @@ sources:
   - PR #1947 round 1 backend-coverage-blackbox (head fd8b1a1486fbebb5ad2a7de13a2777434b2ffd94, Actions run 43083582799)
   - PR #1932 FLAKY ae9ae00c (Lantern small pool) and PR #1885 auth-options baseline run 42694223937 (cap 100, sampled peak 79)
   - commit f76adfe108 (fix/gate-vm-postgres-max-connections)
+  - PR #2221 (merge 55655e654472)
   - PR #1946 deploy round 6 backend-coverage-blackbox/units (source 223f387721080950d4d56a86eb914aadcabeb410, merged as d39e7e64092ddc90273b2b376c4b294516acc79c)
 repro: scripts/tests/deploy-test-github.test.py (GateSetupPostgres)
 status: fixed
@@ -111,6 +112,11 @@ Rounds 1–5 had passed. Five `Message_agentId_fkey` violations at
     generation lock, and deploy-fenced late writes.
 - No test, assertion, timeout, pool, concurrency or product change. The test
   carried no quarantine marker, so there is nothing to release.
+- Shipped as RCA-only PR #2221 (merge 55655e6544). On its frozen HEAD the
+  original failing command, Blacksmith `backend-coverage-blackbox` run
+  43690209043, passed 272/272. That includes `units` (459/459, with
+  `workflow-restart-tools.test.ts`) and `coverage-threshold`. Evidence is in
+  `docs/handoffs/pr-2221-closeout/`.
 
 ## Human feedback
 
