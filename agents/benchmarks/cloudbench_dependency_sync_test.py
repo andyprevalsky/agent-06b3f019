@@ -35,6 +35,7 @@ from types import SimpleNamespace
 import pytest
 
 from benchmarks.fixture_host_guard import FIXTURE_DRAIN_SECONDS, FIXTURE_HOST_GUARD_SECONDS
+from benchmarks.fixture_controller_checkout import FIXTURE_TOKEN, isolated_controller_checkout
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
@@ -22100,7 +22101,19 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo(tmp_path: Path
         server_thread.join(timeout=5)
 
 
-def test_boot_payload_fleet_snapshot_stages_native_identity_helper(tmp_path: Path) -> None:
+@pytest.fixture
+def isolated_snapshot_controller(tmp_path, monkeypatch):
+    """Whole-entry lifecycle checks must never rewrite the caller's credentials."""
+    monkeypatch.setenv("CLOUDBENCH_GITHUB_TOKEN_B64", base64.b64encode(b"synthetic-inherited-adversary").decode())
+    with isolated_controller_checkout(ROOT, tmp_path / "controller-checkout") as (entry, environment):
+        monkeypatch.setattr(sys.modules[__name__], "FLEET_SCRIPT", entry)
+        for key, value in environment.items():
+            if os.environ.get(key) != value:
+                monkeypatch.setenv(key, value)
+        yield
+
+
+def test_boot_payload_fleet_snapshot_stages_native_identity_helper(tmp_path: Path, isolated_snapshot_controller) -> None:
     """The public launcher must freeze the helper consumed by guest staging."""
     snapshot_root = tmp_path / "snapshots"
     snapshot_root.mkdir()
@@ -22159,10 +22172,16 @@ def test_boot_payload_fleet_snapshot_stages_native_identity_helper(tmp_path: Pat
         release.touch(exist_ok=True)
         stdout, stderr = owner.communicate(timeout=15)
     assert owner.returncode == 0, (stdout, stderr)
+    # The real exporter ran with fixture auth, never the inherited credential.
+    for part in ("agents", "back-end"):
+        fixture_env = (FLEET_SCRIPT.parents[1] / part / ".env").read_text()
+        assert "PRESERVED=fixture-value" in fixture_env
+        assert f"GITHUB_TOKEN={FIXTURE_TOKEN}" in fixture_env
+        assert "synthetic-inherited-adversary" not in fixture_env
     assert not list(snapshot_root.glob("cloudbench-scripts.*")), "launcher leaked its exact snapshot"
 
 
-def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
+def test_controller_execs_from_a_script_snapshot(tmp_path: Path, isolated_snapshot_controller) -> None:
     """bash reads scripts lazily from disk: editing run-bench-fleet or
     run-bench-cloud while a controller is mid-run shifts bytes under the
     interpreter and kills a healthy fleet with a parse error (observed: 28
@@ -22290,7 +22309,7 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     )
 
 
-def test_nested_controller_borrows_parent_owned_script_snapshot(tmp_path: Path) -> None:
+def test_nested_controller_borrows_parent_owned_script_snapshot(tmp_path: Path, isolated_snapshot_controller) -> None:
     """A nested control process may execute a parent's immutable snapshot, but
     inherited environment variables must not make it a second cleanup owner."""
     snapshot_root = tmp_path / "snapshots"
@@ -22325,7 +22344,7 @@ def test_nested_controller_borrows_parent_owned_script_snapshot(tmp_path: Path) 
             ["bash", str(snapshot / "run-bench-fleet"), "--help"],
             env={
                 **os.environ,
-                "CLOUDBENCH_FLEET_ROOT": str(ROOT),
+                "CLOUDBENCH_FLEET_ROOT": str(FLEET_SCRIPT.parents[1]),
                 "CLOUDBENCH_SCRIPT_SNAPSHOT": str(snapshot),
                 "CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE": "owner",
                 "CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_TOKEN": str(marker["token"]),
@@ -22404,7 +22423,7 @@ test ! -e "$CLOUDBENCH_SCRIPT_SNAPSHOT"
 
 
 def test_script_snapshot_initialization_signal_and_publish_failure_clean_up(
-    tmp_path: Path,
+    tmp_path: Path, isolated_snapshot_controller,
 ) -> None:
     snapshot_root = tmp_path / "snapshots"
     snapshot_root.mkdir()
@@ -22577,7 +22596,7 @@ def test_script_snapshot_initialization_signal_and_publish_failure_clean_up(
 
 
 def test_borrowed_script_snapshot_and_invalid_owner_identity_are_never_deleted(
-    tmp_path: Path,
+    tmp_path: Path, isolated_snapshot_controller,
 ) -> None:
     borrowed = tmp_path / "cloudbench-scripts.borrow"
     borrowed.mkdir()
@@ -22588,7 +22607,7 @@ def test_borrowed_script_snapshot_and_invalid_owner_identity_are_never_deleted(
         ["bash", str(FLEET_SCRIPT), "--help"],
         env={
             **os.environ,
-            "CLOUDBENCH_FLEET_ROOT": str(ROOT),
+            "CLOUDBENCH_FLEET_ROOT": str(FLEET_SCRIPT.parents[1]),
             "CLOUDBENCH_SCRIPT_SNAPSHOT": str(borrowed),
             "CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE": "borrow",
             "TMPDIR": str(tmp_path),
@@ -22775,7 +22794,7 @@ esac
 
 
 def test_detached_script_snapshot_transfer_covers_exit_death_timeout_and_waiter_loss(
-    tmp_path: Path,
+    tmp_path: Path, isolated_snapshot_controller,
 ) -> None:
     def lifecycle_env(name: str, **extra: str) -> tuple[dict[str, str], Path, Path]:
         root = tmp_path / name

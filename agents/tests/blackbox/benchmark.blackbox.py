@@ -1446,7 +1446,9 @@ def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
             "-q",
             str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"),
             "-k",
-            "boot_payload or boot_launch_compresses_complete_payload",
+            "boot_payload or boot_launch_compresses_complete_payload or controller_execs_from_a_script_snapshot "
+            "or nested_controller_borrows_parent_owned_script_snapshot or script_snapshot_initialization_signal_and_publish_failure_clean_up "
+            "or borrowed_script_snapshot_and_invalid_owner_identity_are_never_deleted or detached_script_snapshot_transfer_covers_exit_death_timeout_and_waiter_loss",
         ],
         cwd=repo_root,
         text=True,
@@ -1454,7 +1456,7 @@ def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "27 passed" in result.stdout
+    assert "32 passed" in result.stdout
 
 
 def test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate():
