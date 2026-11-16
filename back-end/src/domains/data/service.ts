@@ -4,6 +4,8 @@
 
 import { getSharedDataMap } from './teamContext';
 import { includesPrivateSources } from './teamAccess';
+import { resolveScopeGrants, type SharedGrant } from './teamAccessRepo';
+import { OUTSIDE_SCOPE_NOTICE } from './tableAccessRepo';
 import { isPostgresRegexError } from './regexSafety';
 import { formatTimeAgo } from './format.snippets';
 import { sortMatches } from './grepSort';
@@ -65,23 +67,25 @@ interface SourceSearchResult {
   notice?: string;
 }
 
+/** Sources whose scope can include a teammate's shared account. */
+function readsGrants(source: ValidSource): boolean {
+  return isMessageFamilySource(source) || source === 'documents' || source === 'transactions';
+}
+
 async function searchSource(
   userId: string,
   input: ValidatedGrepInput,
   source: ValidSource,
-  agentId: string | undefined
+  agentId: string | undefined,
+  grants: SharedGrant[]
 ): Promise<SourceSearchResult> {
-  if (isMessageFamilySource(source)) return searchMessageSource({ userId, input, source });
+  if (isMessageFamilySource(source)) return searchMessageSource({ userId, input, source, grants });
+  if (source === 'transactions') return searchTransactionSource(userId, input, grants);
+  if (source === 'documents') return searchDocumentSource(userId, input, grants);
   if (!includesPrivateSources(userId, input.teamScope))
-    return {
-      total: 0,
-      matches: [],
-      notice: `${source}: private source is outside this sharing scope.`,
-    };
+    return { total: 0, matches: [], notice: OUTSIDE_SCOPE_NOTICE(source) };
   if (isGoogleGrepSource(source)) return searchGoogleSource({ userId, input, source });
   if (source === 'network') return searchNetworkSource({ userId, input });
-  if (source === 'transactions') return searchTransactionSource(userId, input);
-  if (source === 'documents') return searchDocumentSource(userId, input);
   if (source === 'agent_trajectories') return searchTrajectorySource(userId, input, agentId);
   // Defaulted selections carry the DEFAULT_GREP_SOURCES array itself (validate.ts).
   if (input.sources === DEFAULT_GREP_SOURCES && (agentId === undefined || agentId === '')) {
@@ -96,11 +100,12 @@ async function searchSource(
 async function searchAllSources(
   userId: string,
   input: ValidatedGrepInput,
-  agentId: string | undefined
+  agentId: string | undefined,
+  grants: SharedGrant[]
 ): Promise<SourceSearchResult[]> {
   try {
     return await Promise.all(
-      input.sources.map((source) => searchSource(userId, input, source, agentId))
+      input.sources.map((source) => searchSource(userId, input, source, agentId, grants))
     );
   } catch (error) {
     // Fix 1b: a regex feature Postgres ARE rejects (e.g. lookbehind) surfaces as
@@ -163,7 +168,11 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     await validateGrepInput(params),
     params.agent_id
   );
-  const sourceResults = await searchAllSources(userId, input, params.agent_id);
+  // One grant resolution per request, shared by every source that reads shared accounts.
+  const grants = input.sources.some(readsGrants)
+    ? await resolveScopeGrants(userId, input.teamScope)
+    : [];
+  const sourceResults = await searchAllSources(userId, input, params.agent_id, grants);
   const { soleTrajectory, oldestFirst, contextUnit } = displayOrder(input);
 
   const totalMatches = sourceResults.reduce((sum, result) => sum + result.total, 0);
@@ -179,9 +188,10 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     ? sourceResults[0].hasMore === true
     : totalMatches > input.offset + matches.length;
   const summaries: GrepResult['summaries'] = {};
-  if (input.sources.includes('transactions') && includesPrivateSources(userId, input.teamScope)) {
-    summaries.transactions = await transactionSummaries(userId, input);
-  }
+  const transactionTotals = input.sources.includes('transactions')
+    ? await transactionSummaries(userId, input, grants)
+    : undefined;
+  if (transactionTotals !== undefined) summaries.transactions = transactionTotals;
 
   log.info(
     `grep: '${input.pattern}' -> ${matches.length}/${totalMatches} matches in ${input.sources.join(',')}`

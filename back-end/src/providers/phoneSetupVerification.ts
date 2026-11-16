@@ -32,6 +32,9 @@ export interface SetupProof {
   providerEpoch: number;
   /** Original native observation epoch when a confirmed stop carries the device settings. */
   observedProviderEpoch?: number;
+  /** Attempt floor this proof was rebound to when its setup actor re-acquired the phone; a later
+   * re-observation may move observedAt past it, so the floor compares the later of the two. */
+  carriedAt?: string;
   expectedPhone: string | null;
   runtime?: SetupRuntime;
 }
@@ -70,7 +73,9 @@ export function proofCurrent(
     proof.expectedPhone === context.expectedPhone &&
     proof.floorCursor !== undefined &&
     proof.floorCursor === (context.floorCursor ?? 0) &&
-    (context.floorAt === undefined || Date.parse(proof.observedAt) >= Date.parse(context.floorAt))
+    (context.floorAt === undefined ||
+      Math.max(Date.parse(proof.observedAt), Date.parse(proof.carriedAt ?? proof.observedAt)) >=
+        Date.parse(context.floorAt))
   );
 }
 export function verificationDto(
@@ -173,6 +178,8 @@ export function validSetupChecks(value: unknown): value is SetupChecks {
         (Number.isSafeInteger(p.observedProviderEpoch) &&
           p.observedProviderEpoch >= 0 &&
           p.observedProviderEpoch <= p.providerEpoch)) &&
+      (p.carriedAt === undefined ||
+        (typeof p.carriedAt === 'string' && Number.isFinite(Date.parse(p.carriedAt)))) &&
       typeof p.evidenceDigest === 'string' &&
       (p.expectedPhone === null || typeof p.expectedPhone === 'string')
   );

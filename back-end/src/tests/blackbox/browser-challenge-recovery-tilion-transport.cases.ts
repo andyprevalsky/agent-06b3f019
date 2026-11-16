@@ -1,5 +1,6 @@
 /** Tilion residential tunnel-failure recovery cases (tilion_direct egress). Registered by browser-challenge-recovery.blackbox.ts. */
 import { randomUUID } from 'node:crypto';
+import { waitFor } from '../helpers/waitFor';
 import type { Browser } from 'playwright';
 import { prisma } from '../../providers/database';
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
@@ -140,5 +141,70 @@ export function registerTilionTransportCases(test: RegisterTest): void {
   test(
     'a challenged tilion_direct falls through to the other providers',
     testDirectChallengedFallsThroughToOtherProviders
+  );
+
+  async function testOrdinarySearchEndsBeforeCallerDeadline(): Promise<void> {
+    // H-20: a non-transport challenge search had no deadline. Candidates that
+    // each spent ~66 s walked 8 configs serially past the worker's 300 s read
+    // deadline (ReadTimeout), then kept renting sessions after the caller left.
+    const run = await seedRun('tilion', 'direct');
+    const scripted = scriptedRecoveryRuntime([]);
+    const runtime: BrowserConfigSearchRuntimeDependencies = {
+      ...scripted.runtime,
+      searchDeadlineMs: 300,
+      probe: (_session, _url, _storage, logContext, _billing, signal) =>
+        new Promise((_resolve, reject) => {
+          scripted.createdKeys.push(String(logContext?.configKey));
+          signal?.addEventListener('abort', () => reject(new Error('lane_aborted')));
+        }),
+    };
+    const started = Date.now();
+    const callerReadDeadlineMs = 10_000; // The original caller deadline fuse, not synchronization.
+    try {
+      const outcome = await withEnv(TILION_DEFAULT_ENV, async () =>
+        Promise.race([
+          searchAndPromoteBrowserConfig(
+            {
+              taskId: run.session.id,
+              userId: run.owner.userId,
+              targetUrl: 'https://www.instacart.com/store',
+              storageState: { cookies: [], origins: [] },
+              recoveryReason: 'Instacart email login required for checkout is blocked by reCAPTCHA',
+              fingerprintInjection: null,
+            },
+            runtime
+          ).then(
+            () => 'promoted',
+            (error: unknown) => (error instanceof Error ? error.message : String(error))
+          ),
+          new Promise<string>((resolve) =>
+            setTimeout(() => resolve('still searching'), callerReadDeadlineMs)
+          ),
+        ])
+      );
+      assert(
+        outcome === 'Challenge recovery search deadline exceeded',
+        `search must end inside its caller's deadline: ${outcome} after ${Date.now() - started} ms`
+      );
+      assert(scripted.createdKeys.length > 0, 'no candidate was probed');
+      await waitFor(
+        'all timed-out candidate sessions released',
+        () => scripted.released.length >= scripted.createdKeys.length,
+        50
+      );
+      assert(
+        scripted.released.length >= scripted.createdKeys.length,
+        `candidates still rented after the deadline: ${JSON.stringify(scripted)}`
+      );
+      const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: run.session.id } });
+      assert(row.sessionId === run.session.sessionId, 'a timed-out search must not promote');
+    } finally {
+      await run.cleanup();
+    }
+  }
+
+  test(
+    'an ordinary challenge config search ends before the caller read deadline',
+    testOrdinarySearchEndsBeforeCallerDeadline
   );
 }

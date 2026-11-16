@@ -241,7 +241,9 @@ class Relay(unittest.TestCase):
 
     def test_exact_presignal_refusal_and_closed_namespace(self):
         old = self.root / "registered-orphan-drain/relay-bootstrap"
-        old.mkdir(parents=True)
+        # Production creates every relay journal private (mkdir(mode=0o700)); under the deploy
+        # gate's umask 022 a default mkdir is 0755 and the owner-only reader refuses it.
+        old.mkdir(parents=True, mode=0o700)
         args = SimpleNamespace(
             pre_signal_refusal_journal=old,
             relay_directory=Path("/tmp/cb-relay-iw84qnlh"),

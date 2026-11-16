@@ -44,6 +44,13 @@ PARALLEL_LINE = (
     "  - Parallel Search+Extract API: 600 requests/min per key (PARRALLEL_API_KEY) → max 70 concurrent benches "
     "(peak 6.83 requests/min per bench, measured run600c)"
 )
+KERNEL_LINE = ("  - Kernel browser sessions: 150 concurrent sessions, Start-up plan (KERNEL_API_KEY) → max 135 "
+               "concurrent benches (peak 0.884 sessions per bench, measured run600c)")
+POLAR_PARALLEL_LINE = (
+    "  - Parallel Search+Extract API: 600 requests/min per key (PARRALLEL_API_KEY) → max 147 concurrent benches "
+    "(peak 3.25 requests/min per bench, polar-bench census 2026-11-16, 1.5x margin)"
+)
+POLAR_TASKS = ("polar-bu-001", "polar-bu-084", "polar-odysseys-0ab48db60760", "polar-odysseys-18ddad3e0781")
 
 
 def clean_env(**extra: str) -> dict[str, str]:
@@ -187,21 +194,153 @@ class ProviderCapacityRegistryTests(unittest.TestCase):
     def test_provider_capacity_has_no_bypass_option(self) -> None:
         usage = helper("check", "--help").stdout
         # --browser-provider only selects which provider-scoped rows bind; it
-        # cannot raise any unscoped row's cap.
+        # cannot raise any unscoped row's cap. --task names the launched
+        # selection; only a reviewed, measured demand profile can lower its peak.
         self.assertEqual(sorted({word.rstrip(",]") for word in usage.split() if word.startswith("--")}),
-                         ["--benches", "--browser-provider", "--help"])
+                         ["--benches", "--browser-provider", "--help", "--task"])
         for flag in ("--force", "--skip", "--allow-over-cap"):
             self.assertEqual(helper("check", "--benches", "600", flag).returncode, 2)
         # Unrelated env vars change nothing; the refusal is identical.
         self.assertEqual(helper("check", "--benches", "600", CLOUDBENCH_PROVIDER_CAPACITY_SKIP="1",
                                 CLOUDBENCH_SKIP_PROVIDER_LIMITS="1").stderr, REFUSAL_600)
+        # A task outside every demand profile keeps the global refusal exactly.
+        self.assertEqual(helper("check", "--benches", "600", "--task", "demo-fleet-alpha").stderr, REFUSAL_600)
+
+
+class ProviderCapacityDemandProfileTests(unittest.TestCase):
+    """A measured task-group profile (polar-bench) lowers only its own rows' peaks for a pure selection."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="provider-capacity-profile-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    @staticmethod
+    def polar(*argv: str) -> list[str]:
+        return [*argv, *[part for task in POLAR_TASKS for part in ("--task", task)]]
+
+    def test_polar_profile_is_recorded_with_its_measurement(self) -> None:
+        value = json.loads(REGISTRY.read_text(), parse_float=Decimal)
+        profile, = value["demand_profiles"]
+        self.assertEqual((profile["id"], profile["task_group"], profile["date"]), ("polar-bench", "polar-bench", "2026-11-16"))
+        self.assertEqual(profile["per_bench_peak"], {"parallel-search-extract": Decimal("3.25")})
+        global_peak = {row["id"]: row["per_bench_peak"] for row in value["enforced"]}["parallel-search-extract"]
+        self.assertLess(profile["per_bench_peak"]["parallel-search-extract"], global_peak)
+        for fact in ("24 Polar cloud runs", "43 Parallel Search requests", "0 Parallel Extract fallbacks",
+                     "2.17 requests/min per bench", "1.5x margin"):
+            self.assertIn(fact, profile["demand_source"])
+        catalog = json.loads((ROOT / "agents/benchmarks/polar_tasks.json").read_text())
+        self.assertTrue(catalog and all(task["group"] == "polar-bench" for task in catalog))
+        main = json.loads((ROOT / "agents/benchmarks/tasks.json").read_text())
+        self.assertNotIn("polar-bench", {task.get("group") for task in main})
+
+    def test_polar_only_selection_is_admitted_above_70_up_to_the_next_binding_row(self) -> None:
+        # Independent recomputation: Parallel 600*0.8/3.25 = 147.7 -> 147; unscoped Kernel 135 binds next.
+        self.assertEqual(math.floor(Fraction(600) * Fraction(4, 5) / Fraction("3.25")), 147)
+        for provider in ("kernel", "tilion"):
+            with self.subTest(provider):
+                self.assertEqual(helper(*self.polar("cap", "--browser-provider", provider)).stdout, "135\n")
+                for benches in ("71", "135"):
+                    fits = helper(*self.polar("check", "--benches", benches, "--browser-provider", provider))
+                    self.assertEqual(fits.returncode, 0, fits.stderr)
+                    self.assertEqual(fits.stderr.splitlines()[0],
+                                     "🧮 provider demand profile polar-bench: every selected task is in catalog group "
+                                     "polar-bench (polar-bench census 2026-11-16, 1.5x margin)")
+                    self.assertNotIn("❌", fits.stderr)
+                over = helper(*self.polar("check", "--benches", "136", "--browser-provider", provider))
+                self.assertEqual(over.returncode, 78, over.stderr)
+                self.assertIn("requested 136 concurrent benches, maximum 135.", over.stderr)
+                self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")], [KERNEL_LINE])
+                self.assertIn("rerun with a lower concurrency (135 or fewer concurrent benches)", over.stderr)
+        table = json.loads(helper(*self.polar("cap", "--json")).stdout)
+        self.assertEqual((table["demand_profile"], table["max_concurrent_benches"]), ("polar-bench", 135))
+        rows = {row["id"]: row for row in table["enforced"]}
+        self.assertEqual(rows["parallel-search-extract"]["max_concurrent_benches"], 147)
+        self.assertEqual(rows["parallel-search-extract"]["per_bench_peak"], "3.25 requests/min per bench")
+        self.assertEqual(rows["kernel-browser-sessions"]["max_concurrent_benches"], 135)
+        # With every other row widened, the profiled Parallel row binds and its refusal names that row.
+        value = registry_value()
+        for row in value["enforced"]:
+            if row["id"] != "parallel-search-extract":
+                row["limit"] *= 100
+        wide = self.tmp / "parallel-binding.json"
+        wide.write_text(json.dumps(value))
+        env = {"CLOUDBENCH_PROVIDER_LIMITS_FILE": str(wide)}
+        self.assertEqual(helper(*self.polar("cap", "--browser-provider", "tilion"), **env).stdout, "147\n")
+        self.assertEqual(helper(*self.polar("check", "--benches", "147"), **env).returncode, 0)
+        over = helper(*self.polar("check", "--benches", "148", "--browser-provider", "tilion"), **env)
+        self.assertEqual(over.returncode, 78)
+        self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")], [POLAR_PARALLEL_LINE])
+
+    def test_mixed_unknown_or_uncatalogued_selections_keep_the_global_cap(self) -> None:
+        selections = {
+            "no tasks": [],
+            "mixed": [*POLAR_TASKS, "demo-fleet-alpha"],
+            "unknown polar-looking name": [*POLAR_TASKS, "polar-bu-999"],
+            "non-polar only": ["demo-fleet-alpha", "demo-fleet-beta"],
+        }
+        for label, tasks in selections.items():
+            with self.subTest(label):
+                argv = [part for task in tasks for part in ("--task", task)]
+                self.assertEqual(helper("cap", "--browser-provider", "tilion", *argv).stdout, "70\n")
+                self.assertEqual(json.loads(helper("cap", "--json", *argv).stdout)["demand_profile"], None)
+                over = helper("check", "--benches", "71", *argv)
+                self.assertEqual(over.returncode, 78)
+                self.assertIn("requested 71 concurrent benches, maximum 70.", over.stderr)
+                self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")], [PARALLEL_LINE])
+                self.assertNotIn("demand profile", over.stderr)
+        # A copied helper without the task catalogs cannot prove group membership.
+        root = self.tmp / "root"
+        (root / "scripts").mkdir(parents=True)
+        for member in MEMBERS:
+            shutil.copy2(ROOT / "scripts" / member, root / "scripts" / member)
+        copied = subprocess.run([sys.executable, "-I", "-S", "-B", str(root / "scripts" / MEMBERS[0]),
+                                 *self.polar("cap")], env=clean_env(), capture_output=True, text=True, timeout=30)
+        self.assertEqual((copied.returncode, copied.stdout), (0, "70\n"), copied.stderr)
+
+    def test_invalid_demand_profiles_fail_closed(self) -> None:
+        def broken(change) -> dict:
+            value = registry_value()
+            change(value["demand_profiles"][0])
+            return value
+        cases = {
+            "raises a peak": broken(lambda p: p["per_bench_peak"].update({"parallel-search-extract": 7})),
+            "unknown provider": broken(lambda p: p["per_bench_peak"].update({"exa": 1})),
+            "empty peaks": broken(lambda p: p.update(per_bench_peak={})),
+            "zero peak": broken(lambda p: p["per_bench_peak"].update({"parallel-search-extract": 0})),
+            "extra key": broken(lambda p: p.update(skip=True)),
+            "missing source": broken(lambda p: p.pop("demand_source")),
+            "bad date": broken(lambda p: p.update(date="11/16/2026")),
+            "empty group": broken(lambda p: p.update(task_group="")),
+        }
+        duplicate = registry_value()
+        duplicate["demand_profiles"].append(dict(duplicate["demand_profiles"][0], id="polar-copy"))
+        cases["duplicate group"] = duplicate
+        not_list = registry_value()
+        not_list["demand_profiles"] = {"polar-bench": 1}
+        cases["not a list"] = not_list
+        for label, value in cases.items():
+            with self.subTest(label):
+                path = self.tmp / (label.replace(" ", "-") + ".json")
+                path.write_text(json.dumps(value))
+                result = helper(*self.polar("check", "--benches", "1"), CLOUDBENCH_PROVIDER_LIMITS_FILE=str(path))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("provider limit registry", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+        # The profile list is optional: a registry without it keeps the global cap for Polar too.
+        value = registry_value()
+        value.pop("demand_profiles")
+        path = self.tmp / "no-profiles.json"
+        path.write_text(json.dumps(value))
+        self.assertEqual(helper(*self.polar("cap"), CLOUDBENCH_PROVIDER_LIMITS_FILE=str(path)).stdout, "70\n")
 
 
 class ProviderCapacityBrowserProviderTests(unittest.TestCase):
-    """The Tilion pilot (20 browsers, one shared account) binds Tilion fleets only."""
+    """The Tilion account (250 browsers, one shared account) binds Tilion fleets only."""
 
-    TILION_LINE = ("  - Tilion browser sessions: 20 concurrent browsers, pilot plan (TILION_API_KEY) → max 16 "
+    TILION_LINE = ("  - Tilion browser sessions: 250 concurrent browsers, pilot_roselabs (TILION_API_KEY) → max 200 "
                    "concurrent benches (peak 1 sessions per bench, assumed, not yet measured on Tilion)")
+    KERNEL_LINE = ("  - Kernel browser sessions: 150 concurrent sessions, Start-up plan (KERNEL_API_KEY) → max 135 "
+                   "concurrent benches (peak 0.884 sessions per bench, measured run600c)")
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="provider-capacity-browser-"))
@@ -225,42 +364,77 @@ class ProviderCapacityBrowserProviderTests(unittest.TestCase):
     def test_tilion_row_is_scoped_to_tilion_fleets(self) -> None:
         rows = {row["id"]: row for row in registry_value()["enforced"]}
         self.assertEqual(rows["tilion-browser-sessions"]["browser_provider"], "tilion")
-        self.assertEqual(rows["tilion-browser-sessions"]["limit"], 20)
+        self.assertEqual(rows["tilion-browser-sessions"]["limit"], 250)
         self.assertNotIn("browser_provider", rows["kernel-browser-sessions"])
-        self.assertEqual(expected_cap(registry_value(), "tilion")[0], 16)
+        # 250 * 0.8 = 200 Tilion benches; the unscoped Parallel row (70) still binds the fleet.
+        cap, caps = expected_cap(registry_value(), "tilion")
+        self.assertEqual((cap, caps["tilion-browser-sessions"]), (70, 200))
         for provider in ("kernel", "steel", "browser-use"):
             with self.subTest(provider):
                 self.assertEqual(helper("cap", "--browser-provider", provider).stdout, "70\n")
                 fits = helper("check", "--benches", "70", "--browser-provider", provider)
                 self.assertEqual(fits.returncode, 0, fits.stderr)
                 self.assertNotIn("Tilion", fits.stderr)
-        self.assertEqual(helper("cap", "--browser-provider", "tilion").stdout, "16\n")
-        self.assertEqual(helper("check", "--benches", "16", "--browser-provider", "tilion").returncode, 0)
-        over = helper("check", "--benches", "17", "--browser-provider", "tilion")
+                # Even above the Tilion cap, a non-Tilion fleet never lists the Tilion row.
+                wide = helper("check", "--benches", "201", "--browser-provider", provider)
+                self.assertEqual(wide.returncode, 78)
+                self.assertNotIn("Tilion", wide.stderr)
+        self.assertEqual(helper("cap", "--browser-provider", "tilion").stdout, "70\n")
+        self.assertEqual(helper("check", "--benches", "70", "--browser-provider", "tilion").returncode, 0)
+        # The Tilion row limits a Tilion fleet exactly above 200 concurrent benches.
+        at_cap = helper("check", "--benches", "200", "--browser-provider", "tilion")
+        self.assertEqual(at_cap.returncode, 78)
+        self.assertEqual([line for line in at_cap.stderr.splitlines() if line.startswith("  - ")],
+                         [PARALLEL_LINE, self.KERNEL_LINE])
+        over = helper("check", "--benches", "201", "--browser-provider", "tilion")
         self.assertEqual(over.returncode, 78)
-        self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")], [self.TILION_LINE])
-        self.assertIn("rerun with a lower concurrency (16 or fewer concurrent benches)", over.stderr)
+        self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")],
+                         [PARALLEL_LINE, self.KERNEL_LINE, self.TILION_LINE])
+        self.assertIn("rerun with a lower concurrency (70 or fewer concurrent benches)", over.stderr)
         table = json.loads(helper("cap", "--json", "--browser-provider", "tilion").stdout)
-        self.assertEqual((table["browser_provider"], table["max_concurrent_benches"]), ("tilion", 16))
+        self.assertEqual((table["browser_provider"], table["max_concurrent_benches"]), ("tilion", 70))
+        tilion_row = {row["id"]: row for row in table["enforced"]}["tilion-browser-sessions"]
+        self.assertEqual((tilion_row["limit"], tilion_row["max_concurrent_benches"]),
+                         ("250 concurrent browsers, pilot_roselabs", 200))
         kernel = json.loads(helper("cap", "--json").stdout)
         self.assertNotIn("tilion-browser-sessions", {row["id"] for row in kernel["enforced"]})
+        # Where Tilion is the only binding row, its 200-bench cap alone admits or refuses.
+        value = registry_value()
+        for row in value["enforced"]:
+            if row["id"] != "tilion-browser-sessions":
+                row["limit"] *= 100
+        wide = self.tmp / "tilion-binding.json"
+        wide.write_text(json.dumps(value))
+        self.assertEqual(helper("cap", "--browser-provider", "tilion", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(wide)).stdout,
+                         "200\n")
+        fits = helper("check", "--benches", "200", "--browser-provider", "tilion", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(wide))
+        self.assertEqual(fits.returncode, 0, fits.stderr)
+        over = helper("check", "--benches", "201", "--browser-provider", "tilion", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(wide))
+        self.assertEqual(over.returncode, 78)
+        self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")], [self.TILION_LINE])
+        self.assertIn("rerun with a lower concurrency (200 or fewer concurrent benches)", over.stderr)
 
     def test_provider_source_order_and_fail_closed_default(self) -> None:
+        def tilion_bound(result: subprocess.CompletedProcess[str]) -> bool:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            table = json.loads(result.stdout)
+            self.assertEqual(table["max_concurrent_benches"], 70)  # the unscoped Parallel row binds every fleet
+            return "tilion-browser-sessions" in {row["id"] for row in table["enforced"]}
+
         cases = [
-            ("env selects tilion", 16, {"CLOUDBENCH_BROWSER_PROVIDER": "tilion"}, 'BROWSER_PROVIDER="kernel"\n'),
-            ("backend env tilion", 16, {}, 'OTHER=1\nBROWSER_PROVIDER="tilion" # default\n'),
-            ("backend env kernel", 70, {}, "BROWSER_PROVIDER=kernel\n"),
-            ("backend env last wins", 16, {}, "BROWSER_PROVIDER=kernel\nBROWSER_PROVIDER='tilion'\n"),
-            ("no provider anywhere binds every row", 16, {}, "OTHER=1\n"),
-            ("unknown provider binds every row", 16, {}, "BROWSER_PROVIDER=browserbase\n"),
+            ("env selects tilion", True, {"CLOUDBENCH_BROWSER_PROVIDER": "tilion"}, 'BROWSER_PROVIDER="kernel"\n'),
+            ("backend env tilion", True, {}, 'OTHER=1\nBROWSER_PROVIDER="tilion" # default\n'),
+            ("backend env kernel", False, {}, "BROWSER_PROVIDER=kernel\n"),
+            ("backend env last wins", True, {}, "BROWSER_PROVIDER=kernel\nBROWSER_PROVIDER='tilion'\n"),
+            ("no provider anywhere binds every row", True, {}, "OTHER=1\n"),
+            ("unknown provider binds every row", True, {}, "BROWSER_PROVIDER=browserbase\n"),
         ]
-        for label, cap, env, backend_env in cases:
+        for label, bound, env, backend_env in cases:
             with self.subTest(label):
-                result = self.copied("cap", backend_env=backend_env, **env)
-                self.assertEqual((result.returncode, result.stdout), (0, f"{cap}\n"), result.stderr)
-        explicit = self.copied("cap", "--browser-provider", "kernel", backend_env="BROWSER_PROVIDER=tilion\n",
+                self.assertEqual(tilion_bound(self.copied("cap", "--json", backend_env=backend_env, **env)), bound)
+        explicit = self.copied("cap", "--json", "--browser-provider", "kernel", backend_env="BROWSER_PROVIDER=tilion\n",
                                CLOUDBENCH_BROWSER_PROVIDER="tilion")
-        self.assertEqual(explicit.stdout, "70\n")
+        self.assertFalse(tilion_bound(explicit))
         self.assertEqual(self.copied("cap", "--browser-provider", "browserbase").returncode, 2)
 
     def test_scoped_row_validation_fails_closed(self) -> None:
@@ -291,10 +465,10 @@ class ProviderCapacityBrowserProviderTests(unittest.TestCase):
         result = subprocess.run(
             ["bash", str(FLEET), "demo-fleet-alpha"], cwd=ROOT,
             env=clean_env(PATH=f"{fakebin}:{os.environ['PATH']}", TMPDIR=str(self.tmp),
-                          CLOUDBENCH_BROWSER_PROVIDER="tilion", CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS="17"),
+                          CLOUDBENCH_BROWSER_PROVIDER="tilion", CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS="201"),
             capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
-        self.assertIn("requested 17 concurrent benches, maximum 16.", result.stderr)
+        self.assertIn("requested 201 concurrent benches, maximum 70.", result.stderr)
         self.assertIn(self.TILION_LINE, result.stderr)
         self.assertFalse(calls.exists())
 
@@ -336,6 +510,23 @@ class ProviderCapacityCampaignTests(unittest.TestCase):
         self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
         self.assertIn(REFUSAL_600, result.stderr)
         self.assert_no_campaign_started()
+
+    def test_provider_capacity_campaign_polar_selection_uses_its_measured_profile(self) -> None:
+        polar = [task["name"] for task in json.loads((ROOT / "agents/benchmarks/polar_tasks.json").read_text())]
+        argv = [sys.executable, str(CAMPAIGN), f"--root={self.root}", "--runs=1", "--concurrency=136",
+                *[f"--task={task}" for task in polar[:136]]]
+        result = subprocess.run(argv, env=clean_env(RUN_BENCH_CAMPAIGN_ROOT=str(self.campaigns)),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+        self.assertIn("requested 136 concurrent benches, maximum 135.", result.stderr)
+        self.assertIn(KERNEL_LINE, result.stderr)
+        self.assertNotIn("Parallel", result.stderr)
+        self.assert_no_campaign_started()
+        refusal = runpy.run_path(str(CAMPAIGN))["provider_capacity_refusal"]
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(refusal(135, polar[:135]), 0)
+            self.assertEqual(refusal(71, [*polar[:70], "demo-fleet-alpha"]), 78)
+        self.assertIn("requested 71 concurrent benches, maximum 70.", stderr.getvalue())
 
     def test_provider_capacity_campaign_width_refuses_before_any_controller(self) -> None:
         result = self.campaign(tasks=71, runs=1, concurrency=71)
@@ -405,6 +596,148 @@ class ProviderCapacityFleetTests(unittest.TestCase):
                 self.assertEqual(invalid.returncode, 2, invalid.stderr)
                 self.assertIn("CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES must be a positive integer", invalid.stderr)
         self.assertFalse(self.provider_calls.exists())
+
+    def test_provider_capacity_fleet_passes_its_tasks_for_the_demand_profile(self) -> None:
+        polar = self.fleet("polar-bu-001", "polar-odysseys-0ab48db60760", CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES="136")
+        self.assertEqual(polar.returncode, 78, polar.stdout + polar.stderr)
+        self.assertIn("provider demand profile polar-bench", polar.stderr)
+        self.assertIn("requested 136 concurrent benches, maximum 135.", polar.stderr)
+        self.assertIn(KERNEL_LINE, polar.stderr)
+        mixed = self.fleet("polar-bu-001", "demo-fleet-alpha", CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES="71")
+        self.assertEqual(mixed.returncode, 78, mixed.stdout + mixed.stderr)
+        self.assertIn("requested 71 concurrent benches, maximum 70.", mixed.stderr)
+        self.assertIn(PARALLEL_LINE, mixed.stderr)
+        self.assertFalse(self.provider_calls.exists())
+
+
+def delegating_refusal(requested: int, ceiling: int = 70) -> str:
+    return (
+        f"❌ Delegating-guest ceiling: requested {requested} simultaneous REAL/SIM copies, maximum {ceiling} "
+        "(CLOUDBENCH_DELEGATING_PRIMARY_CEILING, default 70).\n"
+        "Fleet admission counts every live REAL/SIM primary on the app (all devboxes) against this ceiling, so this "
+        "launch can never be admitted: its copies would wait out admission and be recorded as INFRA.\n"
+        f"Lower the simultaneous width to {ceiling} or fewer (fewer tasks or -k copies, or a rolling campaign with "
+        f"--concurrency {ceiling} or less).\n"
+        "Raising CLOUDBENCH_DELEGATING_PRIMARY_CEILING needs a measured backend/provider load at the wider width; "
+        "70 is the widest proven-safe width.\n"
+    )
+
+
+def polar_catalog_names(count: int) -> list[str]:
+    names = [task["name"] for task in json.loads((ROOT / "agents/benchmarks/polar_tasks.json").read_text())]
+    assert len(names) >= count, len(names)
+    return names[:count]
+
+
+class DelegatingCeilingPreflightTests(unittest.TestCase):
+    """2026-11-16: two sharded launches of 74 Polar copies passed --check (Polar provider cap 135)
+    and then aborted at the 5% infra stop with "Delegating-guest ceiling reached: 73-79 live
+    REAL/SIM primaries + 1 requested > 70": a 74-copy launch can never fit under fleet admission's
+    app-wide ceiling (run-bench-fleet admit_lane_capacity). Launchers refuse it up front."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="delegating-ceiling-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    @staticmethod
+    def tasks(*names: str) -> list[str]:
+        return [part for name in names for part in ("--task", name)]
+
+    def test_helper_refuses_real_width_above_the_fleet_ceiling_with_the_same_override(self) -> None:
+        fleet = FLEET.read_text()
+        self.assertIn('local delegating_ceiling="${CLOUDBENCH_DELEGATING_PRIMARY_CEILING:-70}"', fleet)
+        polar = self.tasks(*POLAR_TASKS)
+        fits = helper("delegating", "--benches", "70", *polar)
+        self.assertEqual((fits.returncode, fits.stderr), (0, ""))
+        over = helper("delegating", "--benches", "74", *polar)
+        self.assertEqual(over.returncode, 78)
+        self.assertEqual(over.stderr, delegating_refusal(74))
+        for selection in ([], self.tasks(*POLAR_TASKS, "demo-fleet-alpha"), self.tasks("not-a-catalog-task")):
+            with self.subTest(selection=selection):
+                self.assertEqual(helper("delegating", "--benches", "71", *selection).stderr, delegating_refusal(71))
+        raised = helper("delegating", "--benches", "74", *polar, CLOUDBENCH_DELEGATING_PRIMARY_CEILING="74")
+        self.assertEqual(raised.returncode, 0, raised.stderr)
+        self.assertEqual(helper("delegating", "--benches", "75", *polar,
+                                CLOUDBENCH_DELEGATING_PRIMARY_CEILING="74").stderr, delegating_refusal(75, 74))
+        self.assertEqual(helper("delegating", "--benches", "71", *polar,
+                                CLOUDBENCH_DELEGATING_PRIMARY_CEILING="").stderr, delegating_refusal(71))
+        for value in ("abc", "-1", "7 0"):
+            with self.subTest(value):
+                invalid = helper("delegating", "--benches", "1", CLOUDBENCH_DELEGATING_PRIMARY_CEILING=value)
+                self.assertEqual(invalid.returncode, 2, invalid.stderr)
+                self.assertIn("CLOUDBENCH_DELEGATING_PRIMARY_CEILING must be a non-negative integer", invalid.stderr)
+
+    def test_demo_and_infra_lanes_request_no_delegating_primaries(self) -> None:
+        demo = self.tasks("demo-fleet-alpha", "demo-fleet-beta")
+        self.assertEqual(helper("delegating", "--benches", "600", *demo).returncode, 0)
+        for lane in ("demo", "infra"):
+            with self.subTest(lane):
+                self.assertEqual(helper("delegating", "--benches", "600", *self.tasks(*POLAR_TASKS),
+                                        CLOUDBENCH_LANE=lane).returncode, 0)
+        forced = helper("delegating", "--benches", "71", *demo, CLOUDBENCH_LANE="delegating")
+        self.assertEqual(forced.stderr, delegating_refusal(71))
+
+    def campaign(self, tasks: list[str], *, concurrency: int, **env: str) -> subprocess.CompletedProcess[str]:
+        root = self.tmp / "root"
+        (root / "scripts").mkdir(parents=True, exist_ok=True)
+        for member in MEMBERS:
+            shutil.copy2(ROOT / "scripts" / member, root / "scripts" / member)
+        self.child_marker = self.tmp / "child-launched"
+        run_bench = root / "scripts/run-bench"
+        run_bench.write_text(f"#!/bin/sh\n: > {self.child_marker}\nexit 1\n")
+        run_bench.chmod(0o700)
+        self.campaigns = self.tmp / "campaigns"
+        argv = [sys.executable, str(CAMPAIGN), f"--root={root}", "--runs=1", f"--concurrency={concurrency}",
+                *[f"--task={task}" for task in tasks]]
+        return subprocess.run(argv, env=clean_env(RUN_BENCH_CAMPAIGN_ROOT=str(self.campaigns), **env),
+                              capture_output=True, text=True, timeout=60)
+
+    def test_campaign_refuses_74_simultaneous_polar_copies_before_any_controller(self) -> None:
+        polar = polar_catalog_names(74)
+        result = self.campaign(polar, concurrency=74)
+        self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+        self.assertIn("provider demand profile polar-bench", result.stderr)  # the provider cap (135) admitted it
+        self.assertIn(delegating_refusal(74), result.stderr)
+        self.assertFalse(self.child_marker.exists())
+        self.assertFalse(self.campaigns.exists())
+        # One shard of a 74-copy sharded group counts the whole group.
+        shard = self.campaign(polar[:10], concurrency=10, RUN_BENCH_CAMPAIGN_GROUP_TOTAL="74",
+                              BENCHMARK_HUB_GROUP_RUN_ID="delegating-ceiling-fixture-group")
+        self.assertEqual(shard.returncode, 78, shard.stdout + shard.stderr)
+        self.assertIn(delegating_refusal(74), shard.stderr)
+        self.assertFalse(self.child_marker.exists())
+        # A rolling campaign of the same 74 copies at --concurrency 70 fits.
+        module = runpy.run_path(str(CAMPAIGN))
+        width = module["campaign_simultaneous_benches"](70, 74, None)
+        self.assertEqual(width, 70)
+        with mock.patch.dict(os.environ, clean_env(), clear=True), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(module["delegating_ceiling_refusal"](width, polar), 0)
+            self.assertEqual(module["delegating_ceiling_refusal"](74, polar), 78)
+        self.assertEqual(stderr.getvalue(), delegating_refusal(74))
+
+    def test_fleet_refuses_its_group_real_width_before_any_provider_call(self) -> None:
+        fakebin = self.tmp / "bin"
+        fakebin.mkdir()
+        provider_calls = self.tmp / "provider-calls"
+        for name in ("fly", "flyctl", "curl"):
+            path = fakebin / name
+            path.write_text(f'#!/bin/sh\necho "{name} $*" >> {provider_calls}\nexit 99\n')
+            path.chmod(0o700)
+
+        def fleet(*benches: str, **env: str) -> subprocess.CompletedProcess[str]:
+            environment = clean_env(PATH=f"{fakebin}:{os.environ['PATH']}", TMPDIR=str(self.tmp), **env)
+            return subprocess.run(["bash", str(FLEET), *benches], cwd=ROOT, env=environment,
+                                  capture_output=True, text=True, timeout=120)
+        child = fleet("polar-bu-001", CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES="74")
+        self.assertEqual(child.returncode, 78, child.stdout + child.stderr)
+        self.assertIn("provider demand profile polar-bench", child.stderr)
+        self.assertIn(delegating_refusal(74), child.stderr)
+        lowered = fleet("polar-bu-001", "polar-odysseys-0ab48db60760", CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS="71",
+                        CLOUDBENCH_DELEGATING_PRIMARY_CEILING="1")
+        self.assertEqual(lowered.returncode, 78, lowered.stdout + lowered.stderr)
+        self.assertIn(delegating_refusal(71, 1), lowered.stderr)
+        self.assertFalse(provider_calls.exists(), provider_calls.read_text() if provider_calls.exists() else "")
+        self.assertEqual(list(self.tmp.glob("cloudbench-scripts.*")), [])  # owned script snapshot retired
 
 
 class ProviderCapacityLocalTests(unittest.TestCase):

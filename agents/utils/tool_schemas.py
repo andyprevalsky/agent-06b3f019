@@ -825,7 +825,12 @@ class GrepTool(BaseModel):
     )
     team_id: Optional[str] = Field(default=None, description="Only accounts shared with this team.")
     account_id: Optional[str] = Field(
-        default=None, description='Only this inbox email ("" = default iMessage account).'
+        default=None,
+        description=(
+            'Only this account (exact accountId from the shared data map): an inbox email, "" (iMessage), '
+            '"whatsapp", "linkedin" (via messages), "granola", "fireflies", or a bank login id. '
+            "Shared bank transactions need team_id or owner_user_id."
+        ),
     )
     role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
         default=None,

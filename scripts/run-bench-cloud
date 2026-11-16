@@ -488,6 +488,30 @@ if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
     }
 fi
 
+# Fresh ordinary fleet primaries must boot the exact dependency-proven image.
+# machine clone has no image override; apply this to the owned inert Machine
+# with the existing --skip-start update before its boot barrier can release.
+fleet_fresh_boot_image_args() {
+    FLEET_BOOT_IMAGE_ARGS=()
+    local image="${CLOUDBENCH_FLEET_BOOT_IMAGE:-}"
+    if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] \
+        && [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" != 1 ] \
+        && [ -z "${CLOUDBENCH_SOURCE_MANIFEST:-}" ]; then
+        if [ -z "${FLEET_MACHINE_ID:-}" ] || [ -z "${CLOUDBENCH_FLEET_RUN_TOKEN:-}" ] \
+            || [ "${CLOUDBENCH_ENV_VERIFIED:-0}" != 1 ] \
+            || [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ] \
+            || ! [[ "$image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Fresh fleet bootstrap lacks an immutable admitted image" >&2
+            return 2
+        fi
+        FLEET_BOOT_IMAGE_ARGS=(--image "$image")
+    elif [ -n "$image" ]; then
+        echo "Unexpected fresh-image handoff outside ordinary fresh fleet bootstrap" >&2
+        return 2
+    fi
+}
+fleet_fresh_boot_image_args || exit 2
+
 if [ "$IMAGE_BUILD_BUILDER_REQUESTED" = 1 ] && [ "$MODE" != build-image ]; then
     echo "--builder requires --build-image" >&2
     exit 2
@@ -2994,6 +3018,27 @@ warm_source_machine_creation_admission() {
     echo "❌ warm-source capacity gap: reuse an existing owned warm Machine; new Machine creation is withheld without measured admission" >&2
     return 78
 }
+# Bind the activated image to the manifests it was built from, so fleets can
+# prove that fresh REAL primaries (which copy deps from the image's baked /app)
+# will match their checkout. Only an image this process built from
+# IMAGE_BUILD_CONTEXT has known /app manifests; a prebuilt WARM_IMAGE_REF stays
+# unproven, and fresh fleets then restore the proven snapshot instead.
+publish_warm_image_deps_proof() {  # <warm-machine-id>
+    local machine_id="$1" node_fp py_fp
+    if [ -n "${WARM_IMAGE_REF:-}" ]; then
+        echo "   prebuilt image: no dependency proof published (fresh fleets restore the proven snapshot)"
+        return 0
+    fi
+    node_fp="$(cloudbench_node_dependency_fingerprint "$IMAGE_BUILD_CONTEXT")" || node_fp=""
+    py_fp="$(cloudbench_manifest_fingerprint "$IMAGE_BUILD_CONTEXT" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || py_fp=""
+    if [ -n "$node_fp" ] && [ -n "$py_fp" ] \
+        && cloudbench_publish_warm_image_deps "$APP" "$machine_id" "$IMAGE_REF" "$node_fp" "$py_fp"; then
+        echo "🧾 published warm image dependency proof for $IMAGE_REF (node ${node_fp:0:12}, python ${py_fp:0:12})"
+    else
+        echo "⚠️  could not publish the warm image dependency proof; fresh fleets will restore the proven snapshot" >&2
+    fi
+    return 0
+}
 if [ "$MODE" = "setup" ]; then
     echo "═══ run-bench-cloud --setup ═══"
     echo "app=$APP region=$REGION machine=$MACHINE_NAME volume=$VOLUME_NAME vm=$VM_SIZE/${VM_MEMORY}MB volume_size=${VOLUME_SIZE}GB"
@@ -3043,6 +3088,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
             exit 1
         }
         echo "✅ Persistent machine already exists: $mid (image refreshed)"
+        publish_warm_image_deps_proof "$mid"
     else
         echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
         warm_source_machine_creation_admission || exit $?
@@ -3061,6 +3107,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
         [ -z "$mid" ] && mid="$(resolve_machine_id)"
         [ -z "$mid" ] && { echo "❌ Failed to create the persistent machine"; exit 1; }
         echo "✅ Machine: $mid"
+        publish_warm_image_deps_proof "$mid"
     fi
     write_state "$mid"
 
@@ -5122,6 +5169,10 @@ def manifest():
     with request() as response:
         data = response.read(1048577)
         assert len(data) <= 1048576 and response.status == 200
+        # read(amt) returns a short body without IncompleteRead when the stream closes early.
+        sealed = response.headers.get("Content-Length")
+        if sealed is not None and sealed.isdigit() and len(data) != int(sealed):
+            raise TruncatedTransfer(f"manifest ended at {len(data)} of {sealed} bytes")
         return json.loads(data)
 def exited_without_ack():
     # /shutdown-health is 409 until the controller sends POST /shutdown, even
@@ -5138,11 +5189,16 @@ def exited_without_ack():
             return response.read(256).strip() != run_token.encode()
     except urllib.error.HTTPError as error:
         return error.code == 404
+class TruncatedTransfer(ConnectionError):
+    """The guest stream ended before its sealed Content-Length was delivered."""
+
 unacked_exits = 0
 shutdown_complete = False
 # DONE precedes the guest EXIT trap. Retry only seal observation and transient
 # transport reads before the first manifest, within the unchanged whole-capture
-# alarm. Once sealed, transfers and the final manifest comparison fail closed.
+# alarm. Once sealed, transfers and the final manifest comparison fail closed on
+# any HTTP rejection, header/size disagreement, hash mismatch or manifest change;
+# only a transport fault restarts that exact read (sealed_read).
 while True:
     try:
         try:
@@ -5975,7 +6031,7 @@ PY_UNAPPLIED
     if BOOT_UPDATE_MACHINE_ID="$mid" \
         BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER="$OUT_DIR/boot-config-host-unresponsive" \
         boot_update_with_capacity_recovery "$_update_log" \
-          flyctl machine update "$mid" -a "$APP" "${_pool_shape_args[@]}" "${_envargs[@]}" \
+          flyctl machine update "$mid" -a "$APP" "${FLEET_BOOT_IMAGE_ARGS[@]}" "${_pool_shape_args[@]}" "${_envargs[@]}" \
           "${_lane_args[@]}" "${_boot_file_args[@]}" \
           --command "$_boot_command" --skip-health-checks --skip-start --yes; then
         _upd=1

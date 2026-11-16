@@ -1,7 +1,7 @@
 {
   "name": "blue-bottle-ferry-pickup-v1",
   "description": "Passing Blue Bottle Ferry Building guest-checkout pickup run (2026-09-03), compressed critical path.",
-  "built_at": "2026-09-09T18:50:40.269404+00:00",
+  "built_at": "2026-11-06T10:37:21.547292+00:00",
   "rows": [
     {
       "id": "1cba6647-b233-42f2-aafe-40fd6729494b",
@@ -15,98 +15,76 @@
         "outcome": "passed",
         "entry_points": [
           {
-            "tool": "spawn_agent",
+            "tool": "spawn_browser_agent",
             "start_url": "https://bluebottlecoffee.com/"
           }
         ],
         "critical_path": [
           {
             "step": 1,
-            "tool": "spawn_agent",
-            "action": "Opened https://bluebottlecoffee.com/ with one browser agent.",
-            "result": "The Blue Bottle website loaded."
+            "tool": "spawn_browser_agent",
+            "action": "Opened https://bluebottlecoffee.com/ and navigated to https://bluebottlecoffee.com/us/eng/cafes/ferry-bu.",
+            "result": "Reached the Ferry Building cafe page using the sole browser agent."
           },
           {
             "step": 2,
             "tool": "spawn_browser_agent",
-            "action": "At https://bluebottlecoffee.com/us/eng/cafes/ferry-bu, dismissed cookies, chose local pickup, searched Ferry Building, and selected 1 Ferry Building.",
-            "result": "The Ferry Building in San Francisco became the pickup location."
+            "action": "Chose 'LOCAL CAFE PICKUP OR DELIVERY', searched 'Ferry Building San Franci', and selected '1 Ferry Building San Francisco'.",
+            "result": "Located the Ferry Building pickup area."
           },
           {
             "step": 3,
             "tool": "spawn_browser_agent",
-            "action": "Clicked the Blue Bottle pickup-order link after the browser challenge.",
-            "result": "The same browser session recovered and loaded the ordering menu."
+            "action": "Clicked 'Blue Bottle Coffee – Order pic' and recovered the browser challenge.",
+            "result": "Reached the merchant ordering menu."
           },
           {
             "step": 4,
             "tool": "spawn_browser_agent",
-            "action": "Opened Specialty Beverages and item customization; set 16 oz and oat milk using the modifier toggles.",
-            "result": "One 16 oz iced vanilla bean shakerato was configured."
+            "action": "Opened 'Specialty Beverages*', clicked 'Add item to cart', selected two option toggles, then clicked 'Add to cart - $12.00'.",
+            "result": "Drink added to the cart; checkout showed $12.00."
           },
           {
             "step": 5,
             "tool": "spawn_browser_agent",
-            "action": "Clicked “Add to cart - $12.00,” then “Checkout $12.00.”",
-            "result": "The configured drink entered checkout with a $12.00 cart subtotal."
+            "action": "Clicked 'Checkout $12.00', closed optional login, and entered the required guest contact details.",
+            "result": "Continued through guest checkout."
           },
           {
             "step": 6,
             "tool": "spawn_browser_agent",
-            "action": "Closed optional login, completed the required guest contact and name fields, and enabled the checkout toggle.",
-            "result": "Guest checkout was ready for payment."
+            "action": "Clicked 'Credit/Debit Card Add payment'.",
+            "result": "Reached card-payment entry."
           },
           {
             "step": 7,
             "tool": "spawn_browser_agent",
-            "action": "Clicked “Credit/Debit Card Add payment.”",
-            "result": "The card-payment step opened."
-          },
-          {
-            "step": 8,
-            "tool": "spawn_browser_agent",
-            "action": "Requested a one-time payment card for the checkout amount.",
-            "result": "Payment card requested for the $12.25 final total."
+            "action": "Requested a one-time payment card for $12.25.",
+            "result": "Payment-card request recorded for $12.25; payment was not submitted."
           }
         ],
         "detours": [
           {
-            "tried": "Read order-related network requests and attempted completion at 50% progress.",
-            "why_it_failed": "The verifier rejected completion because checkout and the payment-card request had not been reached.",
-            "steps_wasted": 3
+            "tried": "Inspected order.online network requests, attempted early completion, and tried a new-tab route.",
+            "why_it_failed": "Completion was rejected at 50%, and the new-tab browser challenge recovery failed.",
+            "steps_wasted": 5
           },
           {
-            "tried": "Opened a new tab, which triggered a browser challenge and a failed recovery attempt.",
-            "why_it_failed": "It did not progress until the ordering link was reopened and the same session recovered.",
-            "steps_wasted": 2
-          },
-          {
-            "tried": "Opened the Iced Beverages category before switching to Specialty Beverages.",
-            "why_it_failed": "The target item was reached through Specialty Beverages instead.",
-            "steps_wasted": 1
-          },
-          {
-            "tried": "Captured an extra screenshot during item customization.",
-            "why_it_failed": "It did not change the order or advance checkout.",
-            "steps_wasted": 1
-          },
-          {
-            "tried": "Started the optional phone-login flow before closing it.",
-            "why_it_failed": "The task required guest checkout, so the optional login path was abandoned.",
+            "tried": "Opened 'Iced Beverages*' before switching to 'Specialty Beverages*'.",
+            "why_it_failed": "The item-selection path continued under Specialty Beverages instead.",
             "steps_wasted": 1
           }
         ],
         "pitfalls": [
-          "Do not attempt completion at 50%; the verifier requires reaching the payment-card request.",
-          "Avoid opening a new tab because it triggered a browser challenge and failed recovery once.",
-          "Use Specialty Beverages rather than the abandoned Iced Beverages path.",
-          "Close optional login and use the guest-checkout fields.",
-          "Treat $12.25 as the final total, note the displayed pickup time, and stop after requesting the card without submitting payment."
+          "An initial browser challenge recovery failed; later recovery succeeded within the same browser agent.",
+          "Close optional login to continue as a guest.",
+          "The cart showed $12.00, but the payment-card request was for $12.25.",
+          "The retained transcript does not expose the drink-option labels or a pickup time."
         ],
-        "terminal_condition": "Stopped at the payment boundary after requesting a $12.25 one-time card; payment was not submitted and no order or confirmation ID was created.",
+        "terminal_condition": "Stopped at guest checkout after requesting a one-time payment card for $12.25; order not placed, no confirmation ID obtained, and pickup time not shown.",
         "first_unmet_requirement": null
       },
-      "compressor_version": "cp-v3",
+      "compressor_version": "cp-v7",
       "source": {
         "bundle": "1cba6647-b233-42f2-aafe-40fd6729494b",
         "rows_in": 31,
