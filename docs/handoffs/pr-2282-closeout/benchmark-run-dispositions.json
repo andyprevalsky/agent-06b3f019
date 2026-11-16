@@ -1,0 +1,18 @@
+[
+  {
+    "path": "agents/benchmarks/runs/20261116_031500_32eab9e1-fd5e-497d-a023-e4f81fc5f84a_browser-smoke.json",
+    "sha256": "4aaf17ca509d7b11478604ff4d8abd2e040124c0a2708a954609b7fba8ca7299",
+    "verified_exact_copies": [
+      "/home/boxes/rose/.context/benchmarks/b82-harness-eval-20261116/run.json"
+    ],
+    "disposition": "pending final encrypted archive via exact context copy"
+  },
+  {
+    "path": "agents/benchmarks/runs/20261116_033134_8ccdf23f-297b-4564-b8e1-0bd7c724bcda_browser-smoke.json",
+    "sha256": "df397bbf119fcb04a7307b0853ebcf93691e1a1b39c2b89084512cc1dd935455",
+    "verified_exact_copies": [
+      "/home/boxes/rose/.context/benchmarks/b82-final-harness-eval-20261116/run.json"
+    ],
+    "disposition": "pending final encrypted archive via exact context copy"
+  }
+]

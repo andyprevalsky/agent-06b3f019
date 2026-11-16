@@ -240,7 +240,6 @@
     "scripts/tests/cloudbench-bench-log-backlog.test.py": 1,
     "scripts/tests/cloudbench-bootstrap-recovery.test.py": 7,
     "scripts/tests/cloudbench-campaign-env.test.py": 5,
-    "scripts/tests/cloudbench-cleanup-admission-parallel.test.py": 3,
     "scripts/tests/cloudbench-cleanup-admission-tickets.test.py": 7,
     "scripts/tests/cloudbench-cleanup-ticket-campaign.test.py": 3,
     "scripts/tests/cloudbench-cohort-reconcile.test.py": 4,

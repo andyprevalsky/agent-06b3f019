@@ -1,0 +1,25 @@
+{
+  "status": "Sanitized files copied; parent review/commit/merge and canonical deletion receipt pending",
+  "destination": "docs/handoffs/pr-2282-closeout",
+  "required_files": [
+    "stage_final_snapshot.py",
+    "READY-COMMANDS.md",
+    "preparation-status.json",
+    "ignored-inventory.json",
+    "benchmark-run-dispositions.json",
+    "symlink-targets.json",
+    "closeout-manifest.json",
+    "final-private-archive-receipt.json",
+    "final-capture-summary.json",
+    "deletion-readiness.json",
+    "source-manifest.json",
+    "archive-verification-summary.json",
+    "production-summary.json"
+  ],
+  "additional_tmp_records": [
+    "/tmp/b82-preservation/all-local-refs.json",
+    "/tmp/b82-preservation/ref-publication-audit.json",
+    "/tmp/b82-preservation/inherited-ref-audit.json"
+  ],
+  "rule": "Parent copies sanitized preparation metadata and canonical final receipt/manifests in records-only commit; private logs and raw evidence stay encrypted, never Git."
+}
