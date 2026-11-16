@@ -514,18 +514,33 @@ async function main() {
       const gate = rows.get(`agent-queue-admission:${queue}`)!.request as Record<string, unknown>;
       pointer = { taskQueue: queue, surfaceHash: 'a'.repeat(12) };
       assert.equal(gate.phase, 'RETIRED');
-      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      await assert.rejects(
+        admitQueueContinuation(identity, async () => native),
+        /qualified OPEN/
+      );
       gate.phase = 'RETIRING';
-      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      await assert.rejects(
+        admitQueueContinuation(identity, async () => native),
+        /qualified OPEN/
+      );
       gate.phase = 'OPEN';
       gate.legacyCoverage = 'UNKNOWN';
-      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      await assert.rejects(
+        admitQueueContinuation(identity, async () => native),
+        /qualified OPEN/
+      );
       gate.legacyCoverage = 'QUALIFIED';
       pointer = { taskQueue: queue, surfaceHash: 'b'.repeat(12) };
-      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      await assert.rejects(
+        admitQueueContinuation(identity, async () => native),
+        /qualified OPEN/
+      );
       const unpublished = `navi-agent-tasks-pool-0123456789ab@${'c'.repeat(12)}`;
       pointer = { taskQueue: unpublished, surfaceHash: 'c'.repeat(12) };
-      await assert.rejects(admitQueueContinuation(identity, async () => native), /qualified OPEN/);
+      await assert.rejects(
+        admitQueueContinuation(identity, async () => native),
+        /qualified OPEN/
+      );
       assert.equal(
         [...rows.values()].filter(
           (r) =>
