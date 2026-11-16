@@ -777,6 +777,38 @@ def test_handoff_json_schema_is_fixed_by_output_schema():
     assert json.dumps(handoff_json_schema(COLLATZ_OUTPUT_SCHEMA), sort_keys=True) in text
 
 
+def test_native_handoff_preserves_single_command_task():
+    """Worker wire -> real Codex adapter keeps constraints and delegates result persistence."""
+    from domains.spawn_claude_code_agent.service import HANDOFF_END_CONDITION, handoff_task_text
+
+    goal = "Run exactly one command: tool --json. Do not run any other commands."
+    task = handoff_task_text(goal, COLLATZ_OUTPUT_SCHEMA)
+    assert task.startswith(goal + "\n\nResult handoff instructions:\n")
+    # Claude/exec still receive the existing file-writing contract unchanged.
+    assert HANDOFF_END_CONDITION in task
+    with tempfile.TemporaryDirectory(prefix="native-handoff-reader-") as directory:
+        receipts_path = Path(directory) / "receipts.json"
+        env = {**os.environ, "ROSE_HANDOFF_TEST_TASK": task, "ROSE_HANDOFF_RECEIPTS": str(receipts_path)}
+        result = subprocess.run(
+            ["node", "--test", "--test-name-pattern=native handoff", "e2b-templates/codex-code/app-server.test.mjs"],
+            cwd=Path(__file__).resolve().parents[3],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        from domains.spawn_claude_code_agent.service import _read_handoff
+
+        schema = {"fields": [{"name": "value", "type": "str", "required": True}]}
+        receipts = json.loads(receipts_path.read_text())
+        # Actual transport writer -> filesystem/close reader -> worker validator.
+        for receipt, status in zip(receipts[:3], ("blocked", "complete", "failed")):
+            parsed, error = _read_handoff(receipt, schema)
+            assert error is None and parsed["rose_handoff"]["status"] == status
+        assert [receipt["status"] for receipt in receipts[-2:]] == ["missing", "missing"]
+
+
 def test_handoff_json_schema_carries_declared_field_descriptions():
     """The code agent must see what each field means, not just its type.
 
@@ -845,7 +877,7 @@ def test_handoff_task_is_a_goal_ending_in_the_handoff_condition():
     text = handoff_task_text("Compute Collatz from 27.", COLLATZ_OUTPUT_SCHEMA)
     marker = f"\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n"
     goal, _, schema = text.rpartition(marker)
-    assert goal == f"Compute Collatz from 27.\n\n{HANDOFF_END_CONDITION}", goal
+    assert goal == f"Compute Collatz from 27.\n\nResult handoff instructions:\n{HANDOFF_END_CONDITION}", goal
     assert json.loads(schema) == handoff_json_schema(COLLATZ_OUTPUT_SCHEMA)
     for phrase in (CODE_AGENT_HANDOFF_PATH, CODE_AGENT_HANDOFF_SCHEMA_PATH, "Do not ask questions", "assumptions"):
         assert phrase in HANDOFF_END_CONDITION, phrase
@@ -4312,6 +4344,7 @@ async def _run_all_tests():
     await r.record_async("handoff_missing_or_invalid_truthful", test_handoff_missing_or_invalid_is_reported_truthfully)
     await r.record_async("handoff_replay_31f51d25_bounded", test_handoff_replay_31f51d25_result_is_bounded)
     r.record("handoff_task_is_goal_with_end_condition", test_handoff_task_is_a_goal_ending_in_the_handoff_condition)
+    r.record("native_handoff_preserves_single_command_task", test_native_handoff_preserves_single_command_task)
     r.record("handoff_schema_reserves_standard_key", test_handoff_schema_reserves_the_standard_key)
     await r.record_async(
         "handoff_blocked_or_failed_without_declared_fields",

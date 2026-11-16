@@ -434,3 +434,21 @@ test('publication requires the applicable skill and a verifiable completion rece
     }
   }
 });
+
+test('handoff system instructions defer persistence to the task without adding shell bookkeeping', () => {
+  for (const roseDesktop of [false, true]) {
+    const prompt = buildCodeAgentSystemPrompt({ roseDesktop });
+    assert.match(prompt, /Follow the task's handoff instructions/);
+    assert.match(prompt, /the transport persists your JSON response or you write/);
+    assert.match(prompt, /\/home\/user\/output/);
+    assert.doesNotMatch(prompt, /Your task is a goal that ends when/);
+    assert.match(
+      buildCodeAgentSystemPrompt({ roseDesktop, githubRepoUrl: 'https://github.com/acme/repo' }),
+      /Read the code-session skill before you commit, merge or finish/
+    );
+    assert.doesNotMatch(
+      buildLocalCodeAgentSystemPrompt({ roseDesktop }),
+      /result handoff instructions/
+    );
+  }
+});

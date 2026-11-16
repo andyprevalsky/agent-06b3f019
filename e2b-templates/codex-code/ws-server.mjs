@@ -33,6 +33,9 @@ function log(level, message, data = {}) {
 // its own port.
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const GOAL = process.env.CODEX_GOAL;
+const CODE_AGENT_HANDOFF_PATH = "/home/user/.rose/handoff.json";
+const HANDOFF_SCHEMA_MARKER = `\n\nResult JSON Schema for ${CODE_AGENT_HANDOFF_PATH}:\n`;
+
 const CODEX_AUTH_JSON = process.env.CODEX_AUTH_JSON;
 // Funded fallback: our Azure OpenAI deployment (Responses API), selected with
 // -c model_provider flags; the key is read from AZURE_OPENAI_API_KEY by Codex.
@@ -1418,6 +1421,7 @@ class CodexAppServer {
     this.handoffSchema = handoff ? strictOutputSchema(handoff.schema) : null;
     this.handoffTurnId = null;
     this.handoffText = null;
+    this.goalStatus = null;
     this.pending = new Map();
     this.nextId = 1;
     this.activeTurnId = null;
@@ -1511,6 +1515,7 @@ class CodexAppServer {
         ),
       };
     } else if (message.method === "thread/goal/updated") {
+      this.goalStatus = p.goal?.status || null;
       // The native thread goal's lifecycle: the monitor ends the attachment
       // only once no goal is active (an active goal starts continuation turns).
       this.emit({
@@ -1520,6 +1525,7 @@ class CodexAppServer {
         tokens_used: p.goal?.tokensUsed ?? null,
       });
     } else if (message.method === "thread/goal/cleared") {
+      this.goalStatus = "cleared";
       this.emit({ ...common, type: "goal", status: "cleared" });
     } else if (message.method === "thread/settings/updated") {
       const settings = p.threadSettings;
@@ -1545,6 +1551,11 @@ class CodexAppServer {
       });
     } else if (message.method === "turn/started") {
       this.activeTurnId = p.turn.id;
+      if (this.handoffSchema && this.goalStatus === "active") {
+        this.handoffTurnId = p.turn.id;
+        this.handoffText = null;
+        this.handoff.reset?.();
+      }
       this.turnStartedAt = new Date().toISOString();
       this.emit({
         ...common,
@@ -1809,6 +1820,11 @@ class CodexAppServer {
     this.ready = true;
   }
   async initialize(resumeId, goal, goalTask = goal) {
+    if (this.handoffSchema) {
+      this.handoff.reset?.();
+      goal = nativeHandoffTask(goal);
+      goalTask = nativeHandoffTask(goalTask);
+    }
     await this.connect();
     // Catalog -> supported defaults -> native ACK -> first turn.
     const model = this.catalogModel(this.settings.model);
@@ -1877,6 +1893,7 @@ class CodexAppServer {
         objective,
         status: "active",
       });
+      this.goalStatus = "active";
     } catch (error) {
       log("warn", "Could not set the thread goal", { error: error.message });
       this.emit({ type: "goal", status: "unavailable", error: error.message });
@@ -1930,6 +1947,23 @@ class CodexAppServer {
       const settings = this.validateSettings(msg.settings);
       let delivery_mode;
       let turn_id;
+      const nextSchema =
+        msg.sender === "agent" && typeof msg.text === "string"
+          ? handoffSchemaFromGoal(msg.text)
+          : null;
+      const nextNativeSchema =
+        nextSchema && this.handoff ? strictOutputSchema(nextSchema) : null;
+      if (nextSchema && this.handoff) {
+        this.handoff.schema = nextSchema;
+        this.handoffSchema = nextNativeSchema;
+        this.handoffText = null;
+        this.handoff.reset?.();
+        input = input.map((item) =>
+          item.type === "text" && nextNativeSchema
+            ? { ...item, text: nativeHandoffTask(item.text) }
+            : item,
+        );
+      }
       if (this.activeTurnId) {
         if (JSON.stringify(settings) !== JSON.stringify(this.settings))
           throw new Error("settings_change_requires_idle");
@@ -1942,12 +1976,15 @@ class CodexAppServer {
         turn_id = response.turnId || this.activeTurnId;
         delivery_mode = "steer";
       } else {
-        turn_id = await this.start(input, settings, msg.id);
+        turn_id = await this.start(input, settings, msg.id, nextNativeSchema);
+        if (nextNativeSchema) this.handoffTurnId = turn_id;
         delivery_mode = "start";
       }
       // A new spawn's task delivered to this live session is its new goal.
       if (msg.sender === "agent" && typeof msg.text === "string")
-        await this.setGoal(msg.text);
+        await this.setGoal(
+          nextNativeSchema ? nativeHandoffTask(msg.text) : msg.text,
+        );
       return {
         delivery_mode,
         turn_id,
@@ -1961,8 +1998,6 @@ class CodexAppServer {
 
 // The worker appends this block to the goal (agents/domains/spawn_claude_code_agent/
 // service.py:handoff_task_text); back-end CODE_AGENT_HANDOFF_PATH names the file.
-const CODE_AGENT_HANDOFF_PATH = "/home/user/.rose/handoff.json";
-const HANDOFF_SCHEMA_MARKER = `\n\nResult JSON Schema for ${CODE_AGENT_HANDOFF_PATH}:\n`;
 // The task's end condition names this file (service.py CODE_AGENT_HANDOFF_SCHEMA_PATH).
 const CODE_AGENT_HANDOFF_SCHEMA_PATH = "/home/user/.rose/handoff.schema.json";
 // codex-rs protocol MAX_THREAD_GOAL_OBJECTIVE_CHARS.
@@ -1998,6 +2033,21 @@ function goalObjective(text) {
     log("warn", "Could not write the task file", { error: error.message });
   }
   return `Task: read ${taskPath} and do exactly what it says. Its final paragraph is your end condition.`;
+}
+
+// Convert only the worker-owned protocol section, never the user's task.
+// This runs only when strictOutputSchema accepted the native result contract.
+function nativeHandoffTask(text) {
+  const marker = "\n\nResult handoff instructions:\n";
+  const start = text.lastIndexOf(marker);
+  const end = text.lastIndexOf(HANDOFF_SCHEMA_MARKER);
+  if (start < 0 || end <= start) return text;
+  const native =
+    "Return your final response as one JSON object matching the declared result schema. " +
+    "The transport writes and validates the handoff file; do not run commands or modify files for handoff bookkeeping. " +
+    "Mark rose_handoff.status complete only when the requested task is done and verified; otherwise report blocked or failed truthfully. " +
+    "Preserve the task's action restrictions. Do not ask questions; list assumptions in rose_handoff.summary.";
+  return text.slice(0, start) + marker + native + text.slice(end);
 }
 
 function handoffSchemaFromGoal(goal) {
@@ -2048,6 +2098,7 @@ function strictOutputSchema(schema) {
 // Drop the nulls strict mode forced onto optional, non-nullable fields so the
 // handoff has the declared shape; return the file text, or null if not JSON.
 function handoffFromFinalMessage(text, schema) {
+  if (typeof text !== "string") return null;
   let value;
   try {
     value = JSON.parse(text);
@@ -2175,6 +2226,7 @@ async function runCodexAppServer() {
   const handoff = handoffSchema
     ? {
         schema: handoffSchema,
+        reset: () => rmSync(CODE_AGENT_HANDOFF_PATH, { force: true }),
         write: (text) => {
           mkdirSync(dirname(CODE_AGENT_HANDOFF_PATH), { recursive: true });
           writeFileSync(CODE_AGENT_HANDOFF_PATH, text);
