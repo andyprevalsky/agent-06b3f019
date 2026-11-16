@@ -1,0 +1,16 @@
+{
+  "source": "5cf0ccba73a23aa8b828fcf957868d764f94765a",
+  "run": "20261116-204606-2729655",
+  "run_json_sha256": "2d1c087e73a8874b7be8ebc628c53ebbaf759abf6cab69f6a9c3fca5d6ff2fa1",
+  "root": "b461127d-c83e-471a-af28-0c99a978d081",
+  "status": "COMPLETED",
+  "passed": true,
+  "duration_seconds": 160.9,
+  "original_timeout_seconds": 300,
+  "numbers": 112,
+  "steps": 111,
+  "all_transitions_valid": true,
+  "cleanup_failure": null,
+  "native_manifest": "r2://trace-archive/trace-archive/b461127d-c83e-471a-af28-0c99a978d081/manifest.json.gz.enc",
+  "scope_limit": "Model chose github_repo_ref=null. Original contract outcome PASS; project-restore repair causality is independently proven by controlled pack replay and real E2B restore path, not inferred from this later PASS."
+}

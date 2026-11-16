@@ -140,8 +140,15 @@ started work after its expected parent had exited; both corrected cases pass. Cu
 hashes. Final three-case stability passed5/5 unchanged under8-slot CPU load
 (260s; receipt20261116T202309). Fresh cross-review resolved all P2/P3
 findings in turn01a1e607-39b8-7b81-aefc-971ffe116786.
-The original cloud task and full deployment remain pending; no completed
-repair is claimed yet.
+The exact unchanged cloud task passed natively in160.9s on source5cf0ccba73a2,
+rootb461127d-c83e-471a-af28-0c99a978d081, statusCOMPLETED,112numbers,
+111steps, every transition verified. All17 deploy gates passed on that source;
+all7 smoke controllers exited0 with resources_released/lifecycle_verified true.
+Important scope limit: this model chose github_repo_ref=null, so that later
+smoke PASS does not exercise or establish project-restore causality. That proof
+comes independently from identical-pack reversal, the old-source-failing real
+Git regression, and actual project-restoration E2B path measurements. No prompt
+or task change forced that choice. Merge/production/closeout remain pending.
 Golden reference: not applicable (no approval-gated hunk).
 
 ## Human feedback
@@ -163,3 +170,9 @@ controlled replay outputs are independently preserved in the encrypted object
 The full-readback-verified receipt is
 `docs/handoffs/pr-2415-closeout/rca-archive-receipt.json` (125 files,149 frames).
 Final native gate/production evidence is added during closeout.
+
+Native contract proof and SHA256-bound result are recorded in
+`docs/handoffs/pr-2415-closeout/original-contract-proof.json`. The final
+review/memory/stability supplement and inherited-ref archive have separate
+full-readback-verified receipts beside it. Quarantine remains metadata, never
+task acceptance; it is linked/resolved through the normal policy after ship.
