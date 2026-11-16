@@ -8351,16 +8351,22 @@ def test_backend_data_plane_proxy_keeps_process_readiness_contract(tmp_path: Pat
     starter_wrapper = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
     attempts = tmp_path / "attempts"
     proxy_log = tmp_path / "proxy.log"
+    # The production launcher execs Fly so its PID owns the native process.
+    # A shell function cannot be exec'd: supply an executable fixture too.
+    fake_flyctl = tmp_path / "flyctl"
+    fake_flyctl.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf 'attempt\\n' >> {shlex.quote(str(attempts))}\n"
+        "trap 'exit 0' TERM\n"
+        "while :; do sleep 0.05; done\n"
+    )
+    fake_flyctl.chmod(0o755)
     script = f"""set -u
+PATH={shlex.quote(str(tmp_path))}:"$PATH"
 ATTEMPTS={shlex.quote(str(attempts))}
 APP=proxy-readiness-regression
 CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
 sleep() {{ command sleep 0.05; }}
-flyctl() {{
-  printf 'attempt\\n' >> "$ATTEMPTS"
-  trap 'exit 0' TERM
-  while :; do sleep 1; done
-}}
 curl() {{ printf 000; return 0; }}
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 {accepted_wrapper}
