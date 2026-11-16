@@ -1,0 +1,12 @@
+{
+  "verified_at": "2026-11-16T06:24:30.234244+00:00",
+  "restored_members_verified": 31396,
+  "captured_file_sha256_verified": 31395,
+  "bad_members": [],
+  "source_stat_changes_after_capture": [],
+  "existing_helper_full_authenticated_restore_exit": 0,
+  "existing_helper_full_readback_exit": 0,
+  "owned_processes_complete": true,
+  "source_lease": "none; immutable data reads only",
+  "cutoff_epoch": 1794808500
+}

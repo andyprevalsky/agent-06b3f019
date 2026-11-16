@@ -1,0 +1,41 @@
+{
+  "observed_at": "2026-11-16T17:58:35.224353+00:00",
+  "source": "dvb-onbox env list --json and delivered managed dotenv sections; list exposes no values",
+  "managed_settings_saved_values_read_directly": false,
+  "files": [
+    {
+      "path": "agents/.env",
+      "names": [
+        "R2_ACCOUNT_ID",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "R2_BUCKET_TRACE_ARCHIVE",
+        "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+        "TRACE_ARCHIVE_KEY_ID"
+      ],
+      "all_saved_project_values_present": true,
+      "effective_values_match_delivered_managed_section": true,
+      "local_shadow_override": false,
+      "aes_key_bytes": 32,
+      "key_id": "trace-archive-prod-2026-07-03"
+    },
+    {
+      "path": "back-end/.env",
+      "names": [
+        "R2_ACCOUNT_ID",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "R2_BUCKET_TRACE_ARCHIVE",
+        "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+        "TRACE_ARCHIVE_KEY_ID"
+      ],
+      "all_saved_project_values_present": true,
+      "effective_values_match_delivered_managed_section": true,
+      "local_shadow_override": false,
+      "aes_key_bytes": 32,
+      "key_id": "trace-archive-prod-2026-07-03"
+    }
+  ],
+  "recovery": "On a fresh authorized project devbox, boxes.dev delivers the existing project variables to agents/.env and back-end/.env. Restore with the existing versioned private_archive.py helper and committed archive receipts. No new key, env mutation, or dependency on a key stored only inside these archives.",
+  "qualification": "Managed metadata and delivered sections verified; direct saved-value API read is unavailable. Five prior archives already authenticated/restored with this existing key; no credential values or fingerprints are published."
+}

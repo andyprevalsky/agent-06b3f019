@@ -1,0 +1,16 @@
+{
+  "format": "PR2290-RECOVERY-PLAN-V1",
+  "archives": "archive-index.json",
+  "chronological_order": [
+    "initial",
+    "2a",
+    "d05",
+    "1771",
+    "96d",
+    "final-overlay-pending"
+  ],
+  "initial_git_prerequisite": "Fetch public prerequisite history before importing recovered local-refs.bundle; do not duplicate public history",
+  "catalog_reconstruction": "For each restored capture-manifest: initial list rows source/stage;2a files rows;later logical_files map prior mapping or new member; prefix content members with their archive stage dir. Preserve every source+hash version and alias.",
+  "final_overlay": "PENDING; no final object/checksum exists",
+  "secret_delivery": "Use existing project-managed values; managed-recovery-proof.json records matching effective delivered sections. No new key; credentials and raw config never appear in Git."
+}

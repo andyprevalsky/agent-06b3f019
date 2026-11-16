@@ -21,7 +21,7 @@ sources:
   - commit 546e440154645f394ddb683bf6dd019fe8f44474
   - PR #2290 deploy gate e2b-smoke, flaky occurrence 2ac0b28bdf8c48cba65b3021129a4661
 repro: back-end/src/tests/blackbox/code-session-merge-facts.blackbox.ts legacy handoff system instructions require the result file without offering native persistence
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -68,6 +68,15 @@ passed 34/34, no skips (88.441s), including the single-command task; legacy
 Claude with BLACKBOX_SMOKE=1 passed 59/59, no skips (26.100s). All owned
 sandboxes were terminated. Deployment-wide validation and shipping remain;
 the case is open.
+
+### Landed qualification (2026-11-16)
+
+PR #2290 merged as cc7a39b2846aa385320386bbb1374e74c989e6a4. The shared
+prompt restoration left no net legacy prompt change; the recorded real Claude
+59/59 pass and subsequent full 17-gate qualification support this repair.
+This closes the candidate regression only; it does not claim transport-owned
+handoff for legacy providers. Full production deployment still awaited the
+separate Fly verifier repair.
 
 ## Human feedback
 

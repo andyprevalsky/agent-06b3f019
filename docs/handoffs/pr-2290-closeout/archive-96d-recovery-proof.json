@@ -1,0 +1,11 @@
+{
+  "verified_at": "2026-11-16T17:30:42.109384+00:00",
+  "helper_full_authenticated_readback": true,
+  "independent_helper_restore_exit": 0,
+  "restored_new_content_sha256_checked": 13846,
+  "restored_capture_manifest_sha256_checked": true,
+  "all_logical_sources_rehashed": 17006,
+  "source_content_changed_after_capture": [],
+  "source_consumers": "none; immutable reads only",
+  "not_deletion_ready": true
+}
