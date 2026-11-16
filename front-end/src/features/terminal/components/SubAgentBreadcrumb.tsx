@@ -6,6 +6,7 @@
  *                     (hub / archived GPs have parent_agent_id but a live CTE
  *                     that finds no rows)
  *   CURRENT_ONLY — no parent id: current goal, not clickable
+ *   CODE_SESSION — append the owner as a clickable crumb, then the code title
  *
  * Clicks call onSelectAgent(ancestor.id) so the URL + panel switch to that
  * ancestor. Hub archive GET /agents/:id then serves the parent the same way.
@@ -23,6 +24,7 @@ interface SubAgentBreadcrumbProps {
   onSelectAgent: (id: string | null) => void;
   dripStyles: DripStyles;
   blur: number;
+  codeAgentTitle?: string;
 }
 
 type LooseAncestor = AncestorNode & { agent_id?: string };
@@ -50,10 +52,17 @@ export function SubAgentBreadcrumb({
   onSelectAgent,
   dripStyles,
   blur,
+  codeAgentTitle,
 }: SubAgentBreadcrumbProps) {
   const trail = resolveBreadcrumbAncestors(ancestors, agentDetail);
+  if (codeAgentTitle !== undefined) {
+    trail.push({ id: agentDetail.agent_id, goal: agentDetail.goal });
+  }
   return (
-    <div className="absolute top-[calc(var(--mobile-terminal-header-height)+0.5rem)] left-0 right-0 z-40 px-2 md:top-20 md:px-6">
+    <nav
+      aria-label="Agent breadcrumb"
+      className="absolute top-[calc(var(--mobile-terminal-header-height)+0.5rem)] left-0 right-0 z-40 px-2 md:top-20 md:px-6"
+    >
       <div className="max-w-4xl mx-auto">
         <div
           className="inline-flex px-4 py-2 rounded-lg text-sm items-center gap-1 border border-gray-200/50 dark:border-white/[0.08] bg-white/80 dark:bg-[rgba(32,32,30,0.78)] shadow-lg overflow-x-auto max-w-full"
@@ -80,11 +89,14 @@ export function SubAgentBreadcrumb({
               <span className="text-gray-400 dark:text-gray-500">&rsaquo;</span>
             </span>
           ))}
-          <span className="font-medium truncate max-w-[200px] text-gray-800 dark:text-gray-200 flex-shrink-0">
-            {agentDetail.goal}
+          <span
+            aria-current="page"
+            className="font-medium truncate max-w-[200px] text-gray-800 dark:text-gray-200 flex-shrink-0"
+          >
+            {codeAgentTitle ?? agentDetail.goal}
           </span>
         </div>
       </div>
-    </div>
+    </nav>
   );
 }

@@ -47,6 +47,7 @@ import {
 } from '../../providers/projects/workspaceExecutor';
 import { e2bWorkspaceExecutor, restoreWorkspace } from '../../providers/projects/workspace';
 import { FakeE2b, tempRoot } from './project-maintenance-fake-e2b';
+import { registerMaintenanceProviderCases } from './project-maintenance-provider.cases';
 import { registerMaintenanceLeaseCases } from './project-maintenance-lease.cases';
 import { registerMaintenanceReviewCases } from './project-maintenance-review.cases';
 
@@ -598,3 +599,5 @@ test('a session restored from the snapshot gets the branch head, fresh env files
 registerMaintenanceReviewCases({ fixture, runOnce, lastRun, projectRow, git, SYNC_SCRIPT });
 
 registerMaintenanceLeaseCases();
+
+registerMaintenanceProviderCases({ fixture, runOnce, lastRun, git, SECRET });

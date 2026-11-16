@@ -293,9 +293,15 @@ export async function acquireCodeSandbox(
     codeSession,
     async () => {
       const snapshot = sizing.snapshot ?? sizing.project?.templateSnapshot ?? null;
-      // Only a session with no sandbox of its own (a new one) starts from the
-      // snapshot; a lost sandbox being replaced or resized keeps the base path.
-      if (snapshot !== null && (codeSession === null || codeSession.sandboxId === null)) {
+      // Project maintenance builds Claude images (maintenanceE2b.ts). A Codex
+      // ws-server overlay cannot supply the missing Codex binary; its workspace
+      // must instead be restored onto the Codex provider's own image.
+      // A lost sandbox being replaced or resized keeps the base path.
+      if (
+        sizing.provider === 'claude' &&
+        snapshot !== null &&
+        (codeSession === null || codeSession.sandboxId === null)
+      ) {
         try {
           const sandbox = await createWithNativeCli(
             snapshot.id,

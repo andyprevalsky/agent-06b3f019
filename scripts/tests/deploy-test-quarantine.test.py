@@ -43,6 +43,12 @@ def _refusal(root, occurrence_id):
     return ''
 
 
+class RepositoryCatalogQuarantine(unittest.TestCase):
+    def test_repository_catalog_is_strict_and_quarantines_validate(self):
+        self.assertTrue((ROOT / q.CATALOG).is_file(), 'repository catalog is required')
+        q.catalog_quarantines(ROOT)
+
+
 class CycleQuarantine(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

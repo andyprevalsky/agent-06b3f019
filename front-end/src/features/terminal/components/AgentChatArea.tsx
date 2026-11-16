@@ -16,8 +16,9 @@
  *
  * CODE AGENT VIEW (Rose Desktop, useOpenCodeAgent): a left-bar code-agent row
  *   of the selected (owner) agent is open → CodeAgentConversationView replaces
- *   the whole column (header + transcript over the root's blur backdrop + the
- *   query box as its direct channel); closing it returns to this agent's chat.
+ *   the conversation (transcript over the root's blur backdrop + the query box
+ *   as its direct channel); the ancestor > owner > code-session breadcrumb stays
+ *   above it. Clicking an ancestor closes the code view and selects that agent.
  *
  * NEW LOCATION: no selected agent + pending project -> project / folder above composer.
  * Selecting a project root clears the folder; Home or successful create hides it.
@@ -71,6 +72,7 @@ import {
   TaskCompletedBar,
   useAppView,
   useOpenCodeAgent,
+  useCodeAgentView,
 } from '@/features/terminal-component-group';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
@@ -89,8 +91,9 @@ import type {
 } from '../types';
 
 import { AppScreenHost } from './AppScreenHost';
-import { BlurOverlay, ChatScrollArea } from './ChatScrollArea';
+import { ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
+import { AgentCodeConversation } from './AgentCodeConversation';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { composerCanSubmit } from './composerCanSubmit';
 import { TerminalLegalFooter } from './TerminalLegalFooter';
@@ -144,17 +147,18 @@ function ChatColumn({
   const readOnlyMessage = readOnlyNotice(a);
 
   const codeAgent = useOpenCodeAgent(a.selectedAgentId);
-  if (codeAgent !== null) {
-    const blur = <BlurOverlay selectedAgentId={a.selectedAgentId} {...drip} />;
+  const codeAgentView = useCodeAgentView();
+  if (codeAgent !== null)
     return (
-      <CodeAgentConversationView
-        key={codeAgent.taskId}
-        codeAgent={codeAgent}
-        readOnlyMessage={readOnlyMessage}
-        backdrop={blur}
-      />
+      <AgentCodeConversation
+        agents={a}
+        drip={drip}
+        ownerAgentId={codeAgent.ownerAgentId}
+        onClose={codeAgentView?.close}
+      >
+        <CodeAgentConversationView key={codeAgent.taskId} {...{ codeAgent, readOnlyMessage }} />
+      </AgentCodeConversation>
     );
-  }
 
   const canSubmit = composerCanSubmit({
     selectedAgentId: a.selectedAgentId,
