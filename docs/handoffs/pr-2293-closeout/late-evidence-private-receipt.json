@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout/browser-chip-count-726b25a4/late-closeout-review-stash.bin",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "02678f539947b5856c9766c3e6c9eae0d81331255cb4d641d1b3fdba6f7853b9",
+  "gzip_sha256": "b23e0bcdc7302c3ecd6cce52d29ad72917d996923c7fb3eee55c3b2fe7664009",
+  "stored_bytes": 239536,
+  "frames": 1,
+  "files": 52,
+  "original_bytes": 1589559,
+  "manifest_sha256": "d9f33316a6dd66798265c90852a6d2bcf7d1ad8796ea9526e85fb2391d4ad9a8",
+  "full_readback_verified": true
+}
