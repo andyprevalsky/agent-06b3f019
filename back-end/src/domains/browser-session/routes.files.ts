@@ -2,6 +2,7 @@ import { type Response, type Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { BrowserOperationWorkerOwnedError } from '../../providers/browser';
 import {
+  TilionDownloadChallengedError,
   TilionInsufficientCreditsError,
   TilionSessionBusyError,
 } from '../../providers/browser/tilion';
@@ -18,7 +19,8 @@ import {
 /**
  * Typed provider refusals instead of a 500: 409 `worker_owned` for an
  * operation only the worker can do (Tilion upload), 409 when a CDP client (the agent)
- * holds a Tilion session so REST drive calls are refused, 402 when the Tilion
+ * holds a Tilion session so REST drive calls are refused, 409 when a challenge
+ * Tilion could not clear stands in front of a download, 402 when the Tilion
  * wallet is exhausted.
  */
 export function respondToTilionRefusal(error: unknown, res: Response): boolean {
@@ -36,6 +38,14 @@ export function respondToTilionRefusal(error: unknown, res: Response): boolean {
       error: 'session_driven_by_client',
       provider: 'tilion',
       retryable_after_detach: true,
+      message: error.message,
+    });
+    return true;
+  }
+  if (error instanceof TilionDownloadChallengedError) {
+    res.status(409).json({
+      error: 'download_challenged',
+      provider: 'tilion',
       message: error.message,
     });
     return true;
